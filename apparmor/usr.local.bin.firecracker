@@ -22,7 +22,7 @@
   /var/lib/fc-runner/vms/*.json r,
 
   # Per-VM log files
-  /var/lib/fc-runner/vms/*.log w,
+  /var/lib/fc-runner/vms/*.log rw,
 
   # API sockets (if --no-api is removed in the future)
   /var/lib/fc-runner/vms/*.sock rw,
