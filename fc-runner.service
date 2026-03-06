@@ -22,7 +22,8 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
-MemoryDenyWriteExecute=true
+# MemoryDenyWriteExecute breaks iptables/ipset on some systems
+# MemoryDenyWriteExecute=true
 # Needed for TAP/NAT and mount/loop operations
 # CAP_NET_RAW needed for iptables
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_MKNOD

@@ -598,7 +598,8 @@ async fn add_iptables_rule_if_missing(add_args: &[&str], check_args: &[&str]) ->
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .await?;
+        .await
+        .with_context(|| format!("running iptables {:?}", check_args))?;
 
     if status.success() {
         return Ok(());
@@ -609,7 +610,7 @@ async fn add_iptables_rule_if_missing(add_args: &[&str], check_args: &[&str]) ->
         .args(add_args)
         .status()
         .await
-        .context("adding iptables rule")?;
+        .with_context(|| format!("running iptables {:?}", add_args))?;
     ensure!(status.success(), "iptables rule failed: {:?}", add_args);
     Ok(())
 }
