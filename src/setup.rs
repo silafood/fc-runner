@@ -271,7 +271,7 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
     let status = Command::new("debootstrap")
         .args([
             "--arch=amd64",
-            "--include=systemd,systemd-sysv,curl,git,jq,ca-certificates,sudo,openssh-client,unzip,libicu74,liblttng-ust1",
+            "--include=systemd,systemd-sysv,curl,git,jq,ca-certificates,sudo,openssh-client,unzip,libicu74",
             "noble",
             mount_dir,
             "http://archive.ubuntu.com/ubuntu",
