@@ -81,7 +81,7 @@ impl MicroVm {
             anyhow::bail!("mount point verification failed for {}", mnt);
         }
 
-        let env_dir = self.mount_point.join("run");
+        let env_dir = self.mount_point.join("etc");
         tokio::fs::create_dir_all(&env_dir).await?;
 
         let env_content = format!(

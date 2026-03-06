@@ -364,7 +364,7 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
         format!("{}/entrypoint.sh", mount_dir),
         r#"#!/bin/bash
 set -euo pipefail
-source /run/fc-runner-env
+source /etc/fc-runner-env
 
 cd /home/runner
 sudo -u runner ./config.sh \
