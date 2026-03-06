@@ -523,20 +523,18 @@ async fn ensure_nat_rules(network: &NetworkConfig) -> anyhow::Result<()> {
             "applying network allowlist via ipset"
         );
 
-        // Create/flush ipset
+        // Create ipset if it doesn't exist, then flush it
         let _ = Command::new("ipset")
-            .args(["destroy", "fc-allowed"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .await;
-
-        let status = Command::new("ipset")
-            .args(["create", "fc-allowed", "hash:net", "family", "inet", "hashsize", "16384", "maxelem", "65536"])
+            .args(["create", "fc-allowed", "hash:net", "family", "inet", "hashsize", "16384", "maxelem", "65536", "-exist"])
             .status()
             .await
             .context("creating ipset fc-allowed")?;
-        ensure!(status.success(), "ipset create failed");
+
+        let _ = Command::new("ipset")
+            .args(["flush", "fc-allowed"])
+            .status()
+            .await
+            .context("flushing ipset fc-allowed")?;
 
         // Add all IPv4 CIDRs to the set (skip IPv6 — NAT is IPv4 only)
         for cidr in &network.resolved_networks {
