@@ -30,6 +30,15 @@ vm_config_template = "/etc/fc-runner/vm-config.json.template"
 [runner]
 work_dir = "/var/lib/fc-runner/vms"
 poll_interval_secs = 5
+max_concurrent_jobs = 4
+vm_timeout_secs = 3600
+
+[network]
+tap_device = "tap-fc0"
+host_ip = "172.16.0.1"
+guest_ip = "172.16.0.2"
+cidr = "24"
+dns = ["8.8.8.8", "1.1.1.1"]
 ```
 
 ## Sections
@@ -62,6 +71,18 @@ poll_interval_secs = 5
 |-----|----------|---------|-------------|
 | `work_dir` | No | `/var/lib/fc-runner/vms` | Directory for per-VM scratch files |
 | `poll_interval_secs` | No | `5` | Seconds between GitHub API poll cycles |
+| `max_concurrent_jobs` | No | `4` | Maximum VMs running simultaneously (prevents resource exhaustion) |
+| `vm_timeout_secs` | No | `3600` | Maximum seconds a single VM is allowed to run before being killed |
+
+### `[network]`
+
+| Key | Required | Default | Description |
+|-----|----------|---------|-------------|
+| `tap_device` | No | `tap-fc0` | TAP device name for guest networking |
+| `host_ip` | No | `172.16.0.1` | Host-side IP address for the TAP interface |
+| `guest_ip` | No | `172.16.0.2` | Guest-side IP address assigned inside the VM |
+| `cidr` | No | `24` | CIDR prefix length for the TAP subnet |
+| `dns` | No | `["8.8.8.8", "1.1.1.1"]` | DNS servers configured inside guest VMs |
 
 ## VM Config Template
 

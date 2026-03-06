@@ -49,20 +49,57 @@ Async poll loop using `tokio::time::interval`. Each cycle:
 2. For each run, fetches queued jobs
 3. Filters jobs by label match
 4. Deduplicates via `HashSet<u64>` of job IDs
-5. Spawns a `tokio::spawn` task per new job
+5. Acquires a semaphore permit (bounded by `max_concurrent_jobs`)
+6. Spawns a `tokio::spawn` task per new job
 
-The job ID is removed from the seen set after the task completes, allowing retry if the VM failed before the runner registered.
+The job ID is removed from the seen set after the task completes, allowing retry if the VM failed before the runner registered. Active job count is tracked for graceful shutdown.
 
 ## Concurrency
 
-Each job runs in its own tokio task. There is currently no concurrency limit — for production use, add a `tokio::sync::Semaphore` in the orchestrator.
+Each job runs in its own tokio task. Concurrency is bounded by a `tokio::sync::Semaphore` initialized from `runner.max_concurrent_jobs` (default: 4). This prevents resource exhaustion on the host when many jobs queue simultaneously.
+
+## VM Timeout
+
+Each VM execution is wrapped in `tokio::time::timeout` using `runner.vm_timeout_secs` (default: 3600). If a VM exceeds this limit, it is killed and the job fails with a timeout error.
+
+## Graceful Shutdown
+
+On SIGTERM/SIGINT, the orchestrator:
+
+1. Stops the poll loop (no new jobs dispatched)
+2. Waits up to 5 minutes for active VMs to finish
+3. Logs the count of still-running jobs if the timeout expires
+
+Active job count is tracked via `Arc<Mutex<usize>>`.
 
 ## Security
 
+### Secret Handling
+- GitHub PAT stored as `secrecy::SecretString` — zeroized on drop, redacted in Debug/logs
 - JIT tokens are written into the ext4 image (not kernel cmdline) and deleted on VM teardown
+- Token files inside the mounted rootfs are `chmod 0600`
+- Config file permissions are checked at load time — warns if world-readable
+
+### Path Safety
+- All critical paths (`kernel_path`, `rootfs_golden`, `binary_path`, `vm_config_template`) are validated against symlinks at config load time
+- `path_str()` helper converts `PathBuf` to `&str` with descriptive errors instead of panicking
+
+### VM Lifecycle
 - `--no-api` disables the Firecracker management socket
-- The GitHub PAT is never logged (`secrecy::SecretString` with custom Debug impl redacts it, zeroized on drop)
+- Mount TOCTOU protection: `mountpoint -q` verification runs after every mount
+- `umount_with_retry()`: 3 attempts with 200ms delay, then lazy umount fallback to prevent leaked mounts
+- Cleanup runs unconditionally, even on failure
+
+### Network
 - The `jailer` binary is installed but not wired in by default — enable it for production hardening
+
+### Rate Limiting
+- GitHub API rate-limit headers (`x-ratelimit-remaining`) are parsed after every response
+- Warning at < 100 remaining requests, 60-second backoff at < 10
+
+### Host Hardening
+- systemd service runs with `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=true`, `MemoryDenyWriteExecute`, and restricted capabilities
+- Work directory created with `0700` permissions
 
 ### AppArmor
 

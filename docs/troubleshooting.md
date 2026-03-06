@@ -112,6 +112,61 @@ sudo bash install.sh
 
 ---
 
+### VM killed by timeout
+
+```
+Error: VM execution timed out
+```
+
+**Cause:** The job exceeded `vm_timeout_secs` (default: 3600 seconds).
+
+**Fix:**
+- Increase `runner.vm_timeout_secs` in config for long-running jobs
+- Investigate why the job is taking so long (large builds, network issues)
+
+---
+
+### Config file permission warning
+
+```
+WARN: config file is world-readable
+```
+
+**Cause:** The config file at `/etc/fc-runner/config.toml` has permissions allowing other users to read it (it contains the GitHub PAT).
+
+**Fix:**
+```bash
+sudo chmod 0600 /etc/fc-runner/config.toml
+```
+
+---
+
+### Symlink rejected on critical path
+
+```
+Error: path is a symlink (potential path traversal)
+```
+
+**Cause:** A critical path (`kernel_path`, `rootfs_golden`, `binary_path`, or `vm_config_template`) is a symlink. fc-runner rejects symlinks on these paths to prevent path traversal attacks.
+
+**Fix:** Use direct paths instead of symlinks for these config values.
+
+---
+
+### Rate limit exhausted
+
+```
+ERROR: GitHub API rate limit nearly exhausted, backing off
+```
+
+**Cause:** The GitHub REST API rate limit (5,000 requests/hour) is nearly depleted.
+
+**Fix:**
+- Increase `runner.poll_interval_secs` to reduce API calls
+- Check if multiple instances of fc-runner are sharing the same PAT
+
+---
+
 ## Useful Commands
 
 ```bash

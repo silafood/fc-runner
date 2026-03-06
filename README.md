@@ -29,7 +29,10 @@ GitHub Actions                fc-runner                    Firecracker
 - **JIT tokens** — single-use, short-lived tokens (no static runner registration)
 - **Secret protection** — GitHub PAT stored via `secrecy::SecretString`, zeroized on drop, redacted in all logs
 - **AppArmor** — ships restrictive profiles for both `firecracker` and `fc-runner` binaries
-- **Graceful shutdown** — SIGTERM/SIGINT handlers stop the poll loop and wait for running VMs
+- **Concurrency control** — bounded by `max_concurrent_jobs` via `tokio::sync::Semaphore` (default: 4)
+- **VM timeout** — configurable per-VM execution timeout (default: 3600s) kills hung jobs
+- **Graceful shutdown** — SIGTERM/SIGINT handlers stop the poll loop and wait up to 5 min for active VMs
+- **Rate-limit aware** — parses GitHub API `x-ratelimit-remaining` headers, warns and backs off automatically
 - **Deduplication** — `HashSet<job_id>` prevents dispatching the same job twice
 - **Structured logging** — `tracing` with configurable log levels via `RUST_LOG`
 
@@ -126,8 +129,8 @@ Full example at [`config.toml.example`](config.toml.example). Key sections:
 |---------|-----------|
 | `[github]` | `token`, `owner`, `repo`, `runner_group_id` (default: 1), `labels` |
 | `[firecracker]` | `kernel_path`, `rootfs_golden`, `vcpu_count` (default: 2), `mem_size_mib` (default: 2048) |
-| `[runner]` | `work_dir`, `poll_interval_secs` (default: 5) |
-| `[network]` | `tap_device` (default: tap-fc0), `host_ip`, `guest_ip`, `cidr` |
+| `[runner]` | `work_dir`, `poll_interval_secs` (default: 5), `max_concurrent_jobs` (default: 4), `vm_timeout_secs` (default: 3600) |
+| `[network]` | `tap_device` (default: tap-fc0), `host_ip`, `guest_ip`, `cidr`, `dns` (default: 8.8.8.8, 1.1.1.1) |
 
 See [docs/configuration.md](docs/configuration.md) for the full reference.
 
@@ -166,10 +169,14 @@ fc-runner/
 | VM isolation | Firecracker microVM (KVM-based, minimal attack surface) |
 | Secret handling | `secrecy::SecretString` — zeroized on drop, redacted in Debug/logs |
 | Token scope | JIT tokens are single-use, short-lived, per-job |
-| Token injection | Written to ext4 image file (not kernel cmdline or env vars visible in `/proc`) |
+| Token injection | Written to ext4 image file (not kernel cmdline or env vars visible in `/proc`), `chmod 0600` |
+| Path validation | Symlink checks on all critical paths at config load time |
+| Mount safety | TOCTOU protection via `mountpoint -q` verification; umount retry with lazy fallback |
 | Filesystem | AppArmor profiles restrict both binaries to minimum required paths |
 | Network | AppArmor `net_admin` capability scoped; Firecracker has no network access in its profile |
+| Rate limiting | Parses `x-ratelimit-remaining` headers; warns at < 100, backs off at < 10 |
 | Process | Firecracker `jailer` available for chroot + seccomp-BPF + UID/GID drop |
+| Host hardening | systemd: `NoNewPrivileges`, `ProtectSystem=strict`, `MemoryDenyWriteExecute`, restricted capabilities |
 | Cleanup | All VM artifacts deleted after every job, even on failure |
 
 **AppArmor profiles:**
