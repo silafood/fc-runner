@@ -13,7 +13,7 @@ echo "=== fc-runner host setup ==="
 # --- 1. System dependencies ---
 echo "[1/8] Installing system dependencies..."
 apt-get update -qq
-apt-get install -y -qq debootstrap curl jq e2fsprogs
+apt-get install -y -qq debootstrap curl jq e2fsprogs unzip wget
 
 # --- 2. Firecracker binaries ---
 echo "[2/8] Installing Firecracker v${FC_VERSION}..."
@@ -28,84 +28,96 @@ rm -rf "$TMP_FC"
 # --- 3. Guest kernel ---
 echo "[3/8] Downloading guest kernel..."
 mkdir -p /opt/fc-runner
-KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/${ARCH}/kernels/vmlinux.bin"
-curl -sL -o /opt/fc-runner/vmlinux.bin "$KERNEL_URL"
+if [ -f /opt/fc-runner/vmlinux.bin ]; then
+    echo "  Kernel already exists — skipping."
+else
+    KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/${ARCH}/kernels/vmlinux.bin"
+    wget -O /opt/fc-runner/vmlinux.bin "$KERNEL_URL"
+fi
 
 # --- 4. Golden rootfs ---
 echo "[4/8] Building golden rootfs (this takes a few minutes)..."
 if [ -f /opt/fc-runner/runner-rootfs-golden.ext4 ]; then
     echo "  Golden rootfs already exists — skipping. Delete it to rebuild."
 else
-    ROOTFS_DIR=$(mktemp -d)
     ROOTFS_IMG="/opt/fc-runner/runner-rootfs-golden.ext4"
 
     # Create ext4 image
     dd if=/dev/zero of="$ROOTFS_IMG" bs=1M count=${ROOTFS_SIZE_MIB} status=progress
     mkfs.ext4 -F "$ROOTFS_IMG"
 
-    # Mount and debootstrap
-    mount -o loop "$ROOTFS_IMG" "$ROOTFS_DIR"
+    # Bootstrap into temp dir then copy into image
+    sudo debootstrap --arch=amd64 noble /tmp/fc-rootfs
 
-    debootstrap --include=systemd,systemd-sysv,curl,git,jq,ca-certificates,sudo,openssh-client \
-        noble "$ROOTFS_DIR" http://archive.ubuntu.com/ubuntu
+    # Configure inside chroot
+    sudo chroot /tmp/fc-rootfs /bin/bash <<'CHROOT'
+# Minimal dependencies for GitHub runner
+apt update && apt install -y --no-install-recommends \
+  curl git jq unzip ca-certificates sudo \
+  libicu74 liblttng-ust1
 
-    # Configure networking inside the rootfs
-    cat > "${ROOTFS_DIR}/etc/systemd/network/eth0.network" <<NETEOF
+# Create runner user
+useradd -m -s /bin/bash runner
+echo "runner ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/runner
+
+# Install GitHub Actions runner v2.323.0
+cd /home/runner
+curl -fsSL -o runner.tar.gz \
+  https://github.com/actions/runner/releases/download/v2.323.0/actions-runner-linux-x64-2.323.0.tar.gz
+tar xzf runner.tar.gz && rm runner.tar.gz
+./bin/installdependencies.sh
+chown -R runner:runner /home/runner
+
+# Entrypoint: register (JIT) → run one job → auto-deregister
+cat > /entrypoint.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+# Token injected at VM boot via kernel cmdline or vsock
+source /run/fc-runner-env
+
+cd /home/runner
+sudo -u runner ./config.sh \
+  --url "${REPO_URL}" \
+  --token "${RUNNER_TOKEN}" \
+  --name "fc-$(cat /proc/sys/kernel/hostname)" \
+  --labels "firecracker,linux,x64" \
+  --ephemeral \
+  --unattended \
+  --work /home/runner/_work
+
+sudo -u runner ./run.sh
+EOF
+chmod +x /entrypoint.sh
+
+# Set entrypoint in rc.local
+cat > /etc/rc.local <<'EOF'
+#!/bin/bash
+/entrypoint.sh >> /var/log/runner.log 2>&1 &
+exit 0
+EOF
+chmod +x /etc/rc.local
+
+# Network config (virtio-net)
+cat > /etc/systemd/network/20-eth.network <<'EOF'
 [Match]
 Name=eth0
 
 [Network]
-Address=${GUEST_IP}/24
-Gateway=${HOST_IP}
+Address=172.16.0.2/24
+Gateway=172.16.0.1
 DNS=8.8.8.8
-NETEOF
+EOF
 
-    # Enable systemd-networkd
-    chroot "$ROOTFS_DIR" systemctl enable systemd-networkd systemd-resolved
+systemctl enable systemd-networkd
+CHROOT
 
-    # Install GitHub Actions runner
-    mkdir -p "${ROOTFS_DIR}/home/runner/actions-runner"
-    RUNNER_URL="https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
-    curl -sL "$RUNNER_URL" | tar xz -C "${ROOTFS_DIR}/home/runner/actions-runner"
+    # Package rootfs into ext4 image
+    mount -o loop "$ROOTFS_IMG" /mnt
+    cp -a /tmp/fc-rootfs/. /mnt/
+    umount /mnt
 
-    # Create runner user
-    chroot "$ROOTFS_DIR" useradd -d /home/runner -s /bin/bash runner || true
-    chroot "$ROOTFS_DIR" chown -R runner:runner /home/runner
-
-    # Write entrypoint script
-    cat > "${ROOTFS_DIR}/entrypoint.sh" <<'ENTRY'
-#!/bin/bash
-set -e
-source /run/fc-runner-env
-
-cd /home/runner/actions-runner
-./config.sh \
-    --url "$REPO_URL" \
-    --token "$RUNNER_TOKEN" \
-    --unattended \
-    --ephemeral \
-    --name "fc-$VM_ID" \
-    --labels self-hosted,linux,firecracker \
-    --work _work
-
-sudo -u runner ./run.sh
-reboot -f
-ENTRY
-    chmod +x "${ROOTFS_DIR}/entrypoint.sh"
-
-    # Set entrypoint to run on boot via rc.local
-    cat > "${ROOTFS_DIR}/etc/rc.local" <<'RCEOF'
-#!/bin/bash
-/entrypoint.sh &
-RCEOF
-    chmod +x "${ROOTFS_DIR}/etc/rc.local"
-
-    # Set root password (for debugging only)
-    chroot "$ROOTFS_DIR" bash -c 'echo "root:fc-runner" | chpasswd'
-
-    # Unmount
-    umount "$ROOTFS_DIR"
-    rmdir "$ROOTFS_DIR"
+    # Cleanup temp rootfs
+    rm -rf /tmp/fc-rootfs
     echo "  Golden rootfs created: $ROOTFS_IMG"
 fi
 

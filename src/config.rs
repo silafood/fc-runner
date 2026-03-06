@@ -119,9 +119,8 @@ impl AppConfig {
             bail!("firecracker.mem_size_mib must be > 0");
         }
 
+        // kernel_path and rootfs_golden are auto-provisioned by setup::ensure_vm_assets
         let required_paths = [
-            ("firecracker.kernel_path", &self.firecracker.kernel_path),
-            ("firecracker.rootfs_golden", &self.firecracker.rootfs_golden),
             ("firecracker.binary_path", &self.firecracker.binary_path),
             (
                 "firecracker.vm_config_template",

@@ -2,6 +2,7 @@ mod config;
 mod firecracker;
 mod github;
 mod orchestrator;
+mod setup;
 
 use std::sync::Arc;
 
@@ -25,6 +26,11 @@ async fn main() -> anyhow::Result<()> {
     let config = Arc::new(
         config::AppConfig::load(&config_path).context("failed to load configuration")?,
     );
+
+    // Download kernel / build golden rootfs if missing
+    setup::ensure_vm_assets(&config)
+        .await
+        .context("failed to provision VM assets")?;
 
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
