@@ -149,11 +149,38 @@ impl MicroVm {
     }
 
     async fn run(&self) -> anyhow::Result<std::process::ExitStatus> {
-        let fut = Command::new(&self.fc_config.binary_path)
-            .arg("--config-file")
-            .arg(&self.config_path)
-            .arg("--no-api")
-            .status();
+        let fut = if let Some(jailer_path) = &self.fc_config.jailer_path {
+            let uid = self.fc_config.jailer_uid.expect("validated in config");
+            let gid = self.fc_config.jailer_gid.expect("validated in config");
+            tracing::info!(
+                vm_id = %self.vm_id,
+                jailer = %jailer_path,
+                uid, gid,
+                "launching via jailer"
+            );
+            Command::new(jailer_path)
+                .arg("--id")
+                .arg(&self.vm_id)
+                .arg("--exec-file")
+                .arg(&self.fc_config.binary_path)
+                .arg("--uid")
+                .arg(uid.to_string())
+                .arg("--gid")
+                .arg(gid.to_string())
+                .arg("--chroot-base-dir")
+                .arg(&self.fc_config.jailer_chroot_base)
+                .arg("--")
+                .arg("--config-file")
+                .arg(&self.config_path)
+                .arg("--no-api")
+                .status()
+        } else {
+            Command::new(&self.fc_config.binary_path)
+                .arg("--config-file")
+                .arg(&self.config_path)
+                .arg("--no-api")
+                .status()
+        };
 
         let status = timeout(Duration::from_secs(self.vm_timeout_secs), fut)
             .await
@@ -177,6 +204,18 @@ impl MicroVm {
             }
         }
         let _ = tokio::fs::remove_dir(&self.mount_point).await;
+
+        // Clean up jailer chroot if jailer was used
+        if self.fc_config.jailer_path.is_some() {
+            let chroot_dir = PathBuf::from(&self.fc_config.jailer_chroot_base)
+                .join("firecracker")
+                .join(&self.vm_id);
+            if let Err(e) = tokio::fs::remove_dir_all(&chroot_dir).await {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(vm_id = %self.vm_id, path = %chroot_dir.display(), error = %e, "jailer chroot cleanup failed");
+                }
+            }
+        }
     }
 
     pub async fn execute(self, jit_token: &str, repo_url: &str) -> anyhow::Result<()> {

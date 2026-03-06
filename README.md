@@ -175,7 +175,7 @@ fc-runner/
 | Filesystem | AppArmor profiles restrict both binaries to minimum required paths |
 | Network | AppArmor `net_admin` capability scoped; Firecracker has no network access in its profile |
 | Rate limiting | Parses `x-ratelimit-remaining` headers; warns at < 100, backs off at < 10 |
-| Process | Firecracker `jailer` available for chroot + seccomp-BPF + UID/GID drop |
+| Process | Firecracker `jailer` for chroot + seccomp-BPF + UID/GID drop (enable via `jailer_path` config) |
 | Host hardening | systemd: `NoNewPrivileges`, `ProtectSystem=strict`, `MemoryDenyWriteExecute`, restricted capabilities |
 | Cleanup | All VM artifacts deleted after every job, even on failure |
 

@@ -26,6 +26,10 @@ vcpu_count = 2
 mem_size_mib = 2048
 tap_interface = "tap-fc0"
 vm_config_template = "/etc/fc-runner/vm-config.json.template"
+# jailer_path = "/usr/local/bin/jailer"
+# jailer_uid = 1000
+# jailer_gid = 1000
+# jailer_chroot_base = "/srv/jailer"
 
 [runner]
 work_dir = "/var/lib/fc-runner/vms"
@@ -64,6 +68,10 @@ dns = ["8.8.8.8", "1.1.1.1"]
 | `mem_size_mib` | No | `2048` | Memory in MiB per VM |
 | `tap_interface` | No | `tap-fc0` | TAP device name for guest networking |
 | `vm_config_template` | Yes | — | Path to `vm-config.json.template` |
+| `jailer_path` | No | — | Path to the jailer binary. Enables chroot + seccomp-BPF + UID/GID drop |
+| `jailer_uid` | If jailer | — | UID the jailer drops to before starting the VMM |
+| `jailer_gid` | If jailer | — | GID the jailer drops to before starting the VMM |
+| `jailer_chroot_base` | No | `/srv/jailer` | Base directory for jailer chroot environments |
 
 ### `[runner]`
 

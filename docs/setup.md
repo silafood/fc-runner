@@ -72,6 +72,15 @@ At minimum, set:
 - `github.owner` — repository owner
 - `github.repo` — repository name
 
+For production hardening, enable the jailer:
+```toml
+[firecracker]
+jailer_path = "/usr/local/bin/jailer"
+jailer_uid = 1000
+jailer_gid = 1000
+```
+This runs each VM inside a chroot with seccomp-BPF filtering and dropped privileges. `jailer_uid` and `jailer_gid` are required when `jailer_path` is set.
+
 ### 4. Install the binary and start
 
 ```bash

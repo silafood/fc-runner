@@ -90,8 +90,11 @@ Active job count is tracked via `Arc<Mutex<usize>>`.
 - `umount_with_retry()`: 3 attempts with 200ms delay, then lazy umount fallback to prevent leaked mounts
 - Cleanup runs unconditionally, even on failure
 
-### Network
-- The `jailer` binary is installed but not wired in by default — enable it for production hardening
+### Jailer Integration
+- When `firecracker.jailer_path` is set in config, VMs launch inside a jailer chroot
+- Jailer applies: chroot isolation, seccomp-BPF syscall filtering, UID/GID drop to unprivileged user
+- Requires `jailer_uid` and `jailer_gid` — validated at config load time
+- Jailer chroot directories are cleaned up automatically after each VM exits
 
 ### Rate Limiting
 - GitHub API rate-limit headers (`x-ratelimit-remaining`) are parsed after every response

@@ -49,6 +49,16 @@ pub struct FirecrackerConfig {
     #[serde(default = "default_tap_interface")]
     pub tap_interface: String,
     pub vm_config_template: String,
+    /// Path to the jailer binary. When set, VMs run inside a jailer chroot
+    /// with seccomp-BPF and dropped privileges.
+    pub jailer_path: Option<String>,
+    /// UID the jailer drops to (required when jailer_path is set)
+    pub jailer_uid: Option<u32>,
+    /// GID the jailer drops to (required when jailer_path is set)
+    pub jailer_gid: Option<u32>,
+    /// Chroot base directory for jailer (default: /srv/jailer)
+    #[serde(default = "default_jailer_chroot_base")]
+    pub jailer_chroot_base: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -103,6 +113,10 @@ fn default_mem_size_mib() -> u32 {
 
 fn default_tap_interface() -> String {
     "tap-fc0".into()
+}
+
+fn default_jailer_chroot_base() -> String {
+    "/srv/jailer".into()
 }
 
 fn default_work_dir() -> String {
@@ -226,6 +240,21 @@ impl AppConfig {
             reject_symlink(name, p)?;
             if !p.exists() {
                 bail!("{} does not exist: {}", name, path);
+            }
+        }
+
+        // Validate jailer configuration
+        if let Some(jailer_path) = &self.firecracker.jailer_path {
+            let p = Path::new(jailer_path);
+            reject_symlink("firecracker.jailer_path", p)?;
+            if !p.exists() {
+                bail!("firecracker.jailer_path does not exist: {}", jailer_path);
+            }
+            if self.firecracker.jailer_uid.is_none() {
+                bail!("firecracker.jailer_uid is required when jailer_path is set");
+            }
+            if self.firecracker.jailer_gid.is_none() {
+                bail!("firecracker.jailer_gid is required when jailer_path is set");
             }
         }
 
