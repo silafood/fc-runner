@@ -17,18 +17,37 @@ pub struct AppConfig {
 pub struct GitHubConfig {
     pub token: SecretString,
     pub owner: String,
-    pub repo: String,
+    /// Single repo (backward-compatible). Use `repos` for multiple.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// List of repos under the same owner. If both `repo` and `repos` are set,
+    /// they are merged (deduplicated).
+    #[serde(default)]
+    pub repos: Vec<String>,
     #[serde(default = "default_runner_group_id")]
     pub runner_group_id: u64,
     #[serde(default = "default_labels")]
     pub labels: Vec<String>,
 }
 
+impl GitHubConfig {
+    /// Returns the deduplicated list of repos to poll.
+    pub fn all_repos(&self) -> Vec<String> {
+        let mut repos = self.repos.clone();
+        if let Some(ref r) = self.repo {
+            if !r.is_empty() && !repos.contains(r) {
+                repos.insert(0, r.clone());
+            }
+        }
+        repos
+    }
+}
+
 impl std::fmt::Debug for GitHubConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GitHubConfig")
             .field("owner", &self.owner)
-            .field("repo", &self.repo)
+            .field("repos", &self.all_repos())
             .field("runner_group_id", &self.runner_group_id)
             .field("labels", &self.labels)
             .field("token", &"[REDACTED]")
@@ -226,8 +245,8 @@ impl AppConfig {
         if self.github.owner.is_empty() {
             bail!("github.owner must not be empty");
         }
-        if self.github.repo.is_empty() {
-            bail!("github.repo must not be empty");
+        if self.github.all_repos().is_empty() {
+            bail!("at least one repo must be configured (set github.repo or github.repos)");
         }
         if self.firecracker.vcpu_count == 0 {
             bail!("firecracker.vcpu_count must be > 0");

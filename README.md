@@ -100,6 +100,8 @@ Set at minimum:
 token = "ghp_your_personal_access_token"
 owner = "your-org"
 repo = "your-repo"
+# Or serve multiple repos:
+# repos = ["repo-one", "repo-two"]
 ```
 
 ### 4. Start
@@ -128,7 +130,7 @@ Full example at [`config.toml.example`](config.toml.example). Key sections:
 
 | Section | Key fields |
 |---------|-----------|
-| `[github]` | `token`, `owner`, `repo`, `runner_group_id` (default: 1), `labels` |
+| `[github]` | `token`, `owner`, `repo` or `repos` (multi-repo), `runner_group_id` (default: 1), `labels` |
 | `[firecracker]` | `kernel_path`, `rootfs_golden`, `vcpu_count` (default: 2), `mem_size_mib` (default: 2048) |
 | `[runner]` | `work_dir`, `poll_interval_secs` (default: 5), `max_concurrent_jobs` (default: 4), `vm_timeout_secs` (default: 3600) |
 | `[network]` | `tap_device` (default: tap-fc0), `host_ip`, `guest_ip`, `cidr`, `dns` (default: 8.8.8.8, 1.1.1.1) |

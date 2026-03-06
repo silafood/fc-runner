@@ -14,7 +14,10 @@ fc-runner /path/to/config.toml
 [github]
 token = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 owner = "your-org"
+# Single repo
 repo = "your-repo"
+# Or multiple repos under the same owner
+# repos = ["repo-one", "repo-two", "repo-three"]
 runner_group_id = 1
 labels = ["self-hosted", "linux", "firecracker"]
 
@@ -52,11 +55,16 @@ dns = ["8.8.8.8", "1.1.1.1"]
 
 | Key | Required | Default | Description |
 |-----|----------|---------|-------------|
-| `token` | Yes | — | GitHub PAT with `repo` scope |
+| `token` | Yes | — | GitHub PAT ([setup guide](setup.md#github-token-setup)) |
 | `owner` | Yes | — | Repository owner (user or org) |
-| `repo` | Yes | — | Repository name |
+| `repo` | One of `repo`/`repos` | — | Single repository name |
+| `repos` | One of `repo`/`repos` | `[]` | List of repos under the same owner |
 | `runner_group_id` | No | `1` | Runner group ID (1 = default) |
 | `labels` | No | `["self-hosted", "linux", "firecracker"]` | Labels to match and advertise |
+
+> **Multi-repo:** Set `repos` to poll multiple repositories with a single fc-runner instance.
+> Both `repo` and `repos` can be set — they are merged and deduplicated.
+> All repos must share the same `owner`, `token`, `labels`, and `runner_group_id`.
 
 ### `[firecracker]`
 

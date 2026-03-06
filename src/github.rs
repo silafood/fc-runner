@@ -39,7 +39,6 @@ pub struct JitConfigResponse {
 pub struct GitHubClient {
     client: Client,
     config: GitHubConfig,
-    base_url: String,
     rate_limit_remaining: Arc<AtomicU32>,
 }
 
@@ -50,16 +49,29 @@ impl GitHubClient {
             .timeout(Duration::from_secs(30))
             .build()
             .context("building HTTP client")?;
-        let base_url = format!(
-            "https://api.github.com/repos/{}/{}",
-            config.owner, config.repo
-        );
         Ok(Self {
             client,
             config,
-            base_url,
             rate_limit_remaining: Arc::new(AtomicU32::new(5000)),
         })
+    }
+
+    /// Returns the base API URL for a given repo.
+    fn repo_url(&self, repo: &str) -> String {
+        format!(
+            "https://api.github.com/repos/{}/{}",
+            self.config.owner, repo
+        )
+    }
+
+    /// Returns the list of repos to poll.
+    pub fn repos(&self) -> Vec<String> {
+        self.config.all_repos()
+    }
+
+    /// Returns the owner name.
+    pub fn owner(&self) -> &str {
+        &self.config.owner
     }
 
     fn request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
@@ -89,8 +101,8 @@ impl GitHubClient {
         }
     }
 
-    pub async fn list_queued_runs(&self) -> anyhow::Result<Vec<WorkflowRun>> {
-        let url = format!("{}/actions/runs?status=queued", self.base_url);
+    pub async fn list_queued_runs(&self, repo: &str) -> anyhow::Result<Vec<WorkflowRun>> {
+        let url = format!("{}/actions/runs?status=queued", self.repo_url(repo));
         let resp = self
             .request(reqwest::Method::GET, &url)
             .send()
@@ -98,16 +110,17 @@ impl GitHubClient {
         self.check_rate_limit(&resp).await;
         let data = resp
             .error_for_status()
-            .context("listing queued runs")?
+            .with_context(|| format!("listing queued runs for {}/{}", self.config.owner, repo))?
             .json::<WorkflowRunsResponse>()
             .await?;
         Ok(data.workflow_runs)
     }
 
-    pub async fn list_queued_jobs(&self, run_id: u64) -> anyhow::Result<Vec<Job>> {
+    pub async fn list_queued_jobs(&self, repo: &str, run_id: u64) -> anyhow::Result<Vec<Job>> {
         let url = format!(
             "{}/actions/runs/{}/jobs?filter=queued",
-            self.base_url, run_id
+            self.repo_url(repo),
+            run_id
         );
         let resp = self
             .request(reqwest::Method::GET, &url)
@@ -116,14 +129,14 @@ impl GitHubClient {
         self.check_rate_limit(&resp).await;
         let data = resp
             .error_for_status()
-            .context("listing queued jobs")?
+            .with_context(|| format!("listing queued jobs for {}/{} run {}", self.config.owner, repo, run_id))?
             .json::<JobsResponse>()
             .await?;
         Ok(data.jobs)
     }
 
-    pub async fn generate_jit_config(&self, job_id: u64) -> anyhow::Result<String> {
-        let url = format!("{}/actions/runners/generate-jit-config", self.base_url);
+    pub async fn generate_jit_config(&self, repo: &str, job_id: u64) -> anyhow::Result<String> {
+        let url = format!("{}/actions/runners/generate-jit-config", self.repo_url(repo));
         let body = serde_json::json!({
             "name": format!("fc-{}", job_id),
             "runner_group_id": self.config.runner_group_id,
@@ -138,7 +151,7 @@ impl GitHubClient {
         self.check_rate_limit(&resp).await;
         let data = resp
             .error_for_status()
-            .context("generating JIT config")?
+            .with_context(|| format!("generating JIT config for {}/{} job {}", self.config.owner, repo, job_id))?
             .json::<JitConfigResponse>()
             .await?;
         Ok(data.encoded_jit_config)

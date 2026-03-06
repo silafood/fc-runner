@@ -2,10 +2,13 @@
 # Copy to /etc/fc-runner/config.toml and fill in your values.
 
 [github]
-# Personal access token with 'repo' scope
+# Personal access token (see docs/setup.md for generation guide)
 token = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 owner = "your-org"
+# Single repo (simple setup)
 repo = "your-repo"
+# Multiple repos under the same owner (overrides repo if both set)
+# repos = ["repo-one", "repo-two", "repo-three"]
 # Runner group ID (1 = default group)
 runner_group_id = 1
 # Labels the runner advertises — must match workflow's runs-on
