@@ -44,6 +44,12 @@
   /usr/bin/chmod ix,
   /usr/sbin/sysctl ix,
   /usr/sbin/iptables ix,
+  /usr/sbin/iptables-legacy ix,
+  /usr/sbin/iptables-nft ix,
+  /usr/sbin/xtables-legacy-multi ix,
+  /usr/sbin/xtables-nft-multi ix,
+  /etc/alternatives/iptables r,
+  /usr/sbin/ipset ix,
   /usr/bin/ip ix,
   /usr/bin/bash ix,
 
@@ -51,6 +57,7 @@
   /dev/net/tun rw,
   /proc/sys/net/ipv4/ip_forward rw,
   capability net_admin,
+  capability net_raw,
 
   # Process info
   /proc/cpuinfo r,
