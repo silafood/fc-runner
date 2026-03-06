@@ -9,7 +9,7 @@ echo "NOTE: Network setup (TAP, NAT, IP forwarding) is handled by fc-runner at s
 # --- 1. System dependencies ---
 echo "[1/5] Installing system dependencies..."
 apt-get update -qq
-apt-get install -y -qq debootstrap curl jq e2fsprogs unzip wget iptables iproute2
+apt-get install -y -qq debootstrap curl jq e2fsprogs unzip wget iptables iproute2 apparmor-utils
 
 # --- 2. Firecracker binaries ---
 echo "[2/5] Installing Firecracker v${FC_VERSION}..."
@@ -21,13 +21,25 @@ install -m 0755 "${TMP_FC}/release-v${FC_VERSION}-${ARCH}/firecracker-v${FC_VERS
 install -m 0755 "${TMP_FC}/release-v${FC_VERSION}-${ARCH}/jailer-v${FC_VERSION}-${ARCH}" /usr/local/bin/jailer
 rm -rf "$TMP_FC"
 
-# --- 3. Directories ---
-echo "[3/5] Creating directories..."
+# --- 3. AppArmor profiles ---
+echo "[3/6] Installing AppArmor profiles..."
+if [ -d apparmor ]; then
+    cp apparmor/usr.local.bin.firecracker /etc/apparmor.d/usr.local.bin.firecracker
+    cp apparmor/usr.local.bin.fc-runner /etc/apparmor.d/usr.local.bin.fc-runner
+    apparmor_parser -r -W /etc/apparmor.d/usr.local.bin.firecracker 2>/dev/null || true
+    apparmor_parser -r -W /etc/apparmor.d/usr.local.bin.fc-runner 2>/dev/null || true
+    echo "  AppArmor profiles installed. fc-runner will enforce them at startup."
+else
+    echo "  apparmor/ directory not found — skipping profile install."
+fi
+
+# --- 4. Directories ---
+echo "[4/6] Creating directories..."
 mkdir -p /etc/fc-runner
 mkdir -p /var/lib/fc-runner/vms
 
-# --- 4. Config files ---
-echo "[4/5] Installing config files..."
+# --- 5. Config files ---
+echo "[5/6] Installing config files..."
 if [ ! -f /etc/fc-runner/config.toml ]; then
     cp config.toml.example /etc/fc-runner/config.toml
     echo "  Copied config.toml.example -> /etc/fc-runner/config.toml (edit with your token!)"
@@ -36,8 +48,8 @@ else
 fi
 cp vm-config.json.template /etc/fc-runner/vm-config.json.template
 
-# --- 5. Systemd service ---
-echo "[5/5] Installing systemd service..."
+# --- 6. Systemd service ---
+echo "[6/6] Installing systemd service..."
 cp fc-runner.service /etc/systemd/system/fc-runner.service
 systemctl daemon-reload
 systemctl enable fc-runner

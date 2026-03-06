@@ -1,0 +1,68 @@
+# AppArmor profile for the fc-runner orchestrator binary
+# Allows the operations needed to manage VMs while restricting unnecessary access.
+
+#include <tunables/global>
+
+/usr/local/bin/fc-runner {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+
+  # fc-runner binary itself
+  /usr/local/bin/fc-runner mr,
+
+  # Configuration files (read-only)
+  /etc/fc-runner/ r,
+  /etc/fc-runner/** r,
+
+  # VM work directory (create/delete rootfs copies, configs, logs)
+  /var/lib/fc-runner/ r,
+  /var/lib/fc-runner/vms/ rw,
+  /var/lib/fc-runner/vms/** rwl,
+
+  # Golden rootfs and kernel (read-only, or write during initial provisioning)
+  /opt/fc-runner/ rw,
+  /opt/fc-runner/** rw,
+
+  # Mount operations for rootfs injection
+  capability sys_admin,
+  mount fstype=ext4 /var/lib/fc-runner/vms/*.ext4 -> /var/lib/fc-runner/vms/*/,
+  umount /var/lib/fc-runner/vms/*/,
+
+  # Spawn Firecracker child processes
+  /usr/local/bin/firecracker Px,
+  /usr/local/bin/jailer Px,
+
+  # System tools used during setup
+  /usr/bin/cp ix,
+  /usr/bin/mount ix,
+  /usr/bin/umount ix,
+  /usr/bin/curl ix,
+  /usr/sbin/debootstrap ix,
+  /usr/bin/chroot ix,
+  /usr/bin/dd ix,
+  /usr/sbin/mkfs.ext4 ix,
+  /usr/bin/chmod ix,
+  /usr/sbin/sysctl ix,
+  /usr/sbin/iptables ix,
+  /usr/bin/ip ix,
+  /usr/bin/bash ix,
+
+  # Network configuration
+  /dev/net/tun rw,
+  /proc/sys/net/ipv4/ip_forward rw,
+  capability net_admin,
+
+  # Process info
+  /proc/cpuinfo r,
+  /proc/sys/** r,
+
+  # Temp files for rootfs building
+  /tmp/** rw,
+
+  # HTTPS for GitHub API and downloads
+  #include <abstractions/ssl_certs>
+  network inet stream,
+  network inet dgram,
+  network inet6 stream,
+  network inet6 dgram,
+}

@@ -61,5 +61,28 @@ Each job runs in its own tokio task. There is currently no concurrency limit —
 
 - JIT tokens are written into the ext4 image (not kernel cmdline) and deleted on VM teardown
 - `--no-api` disables the Firecracker management socket
-- The GitHub PAT is never logged (custom Debug impl redacts it)
+- The GitHub PAT is never logged (`secrecy::SecretString` with custom Debug impl redacts it, zeroized on drop)
 - The `jailer` binary is installed but not wired in by default — enable it for production hardening
+
+### AppArmor
+
+fc-runner ships with AppArmor profiles for both binaries:
+
+| Profile | Binary | Restrictions |
+|---------|--------|-------------|
+| `usr.local.bin.firecracker` | Firecracker VMM | Read-only kernel, r/w only per-VM rootfs copies in work dir, KVM and TAP device access, no network, no arbitrary filesystem access |
+| `usr.local.bin.fc-runner` | Orchestrator | Config read-only, VM work dir r/w, mount/umount for rootfs injection, network admin for TAP/NAT, child exec only Firecracker/jailer |
+
+Profiles are installed by `install.sh` to `/etc/apparmor.d/` and enforced automatically at startup by `setup.rs`. If AppArmor or `apparmor-utils` is not available, fc-runner continues without enforcement and logs a warning.
+
+**Manual management:**
+```bash
+# Check enforcement status
+sudo aa-status | grep -E '(firecracker|fc-runner)'
+
+# Switch to complain mode (log violations without blocking)
+sudo aa-complain /etc/apparmor.d/usr.local.bin.firecracker
+
+# Re-enforce
+sudo aa-enforce /etc/apparmor.d/usr.local.bin.firecracker
+```

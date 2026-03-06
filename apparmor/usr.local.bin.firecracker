@@ -1,0 +1,39 @@
+# AppArmor profile for the Firecracker VMM binary
+# Restricts filesystem, network, and capability access to the minimum required.
+
+#include <tunables/global>
+
+/usr/local/bin/firecracker {
+  #include <abstractions/base>
+
+  # Firecracker binary itself
+  /usr/local/bin/firecracker mr,
+
+  # KVM device access (required for VM execution)
+  /dev/kvm rw,
+
+  # Guest kernel (read-only)
+  /opt/fc-runner/vmlinux.bin r,
+
+  # Per-VM rootfs copies (read-write, created and destroyed per job)
+  /var/lib/fc-runner/vms/*.ext4 rw,
+
+  # Per-VM config files (read-only after creation)
+  /var/lib/fc-runner/vms/*.json r,
+
+  # Per-VM log files
+  /var/lib/fc-runner/vms/*.log w,
+
+  # API sockets (if --no-api is removed in the future)
+  /var/lib/fc-runner/vms/*.sock rw,
+
+  # TAP device access for guest networking
+  /dev/net/tun rw,
+
+  # Proc and sys access required by Firecracker
+  /proc/cpuinfo r,
+  /proc/sys/net/** r,
+  /sys/devices/system/cpu/** r,
+
+  # Deny everything else by default (enforced by AppArmor)
+}

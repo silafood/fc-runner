@@ -10,12 +10,13 @@ const KERNEL_URL: &str =
 const RUNNER_VERSION: &str = "2.323.0";
 const ROOTFS_SIZE_MIB: u32 = 4096;
 
-/// Ensures all VM prerequisites are in place: KVM, kernel, rootfs, and network.
+/// Ensures all VM prerequisites are in place: KVM, kernel, rootfs, network, and AppArmor.
 pub async fn ensure_vm_assets(config: &AppConfig) -> anyhow::Result<()> {
     preflight_kvm()?;
     ensure_kernel(&config.firecracker.kernel_path).await?;
     ensure_golden_rootfs(&config.firecracker.rootfs_golden, &config.network).await?;
     ensure_network(&config.network).await?;
+    ensure_apparmor(&config.firecracker.binary_path).await?;
     Ok(())
 }
 
@@ -440,5 +441,96 @@ async fn add_iptables_rule_if_missing(add_args: &[&str], check_args: &[&str]) ->
         .await
         .context("adding iptables rule")?;
     ensure!(status.success(), "iptables rule failed: {:?}", add_args);
+    Ok(())
+}
+
+/// Loads and enforces AppArmor profiles for fc-runner and Firecracker if AppArmor is available.
+async fn ensure_apparmor(firecracker_binary: &str) -> anyhow::Result<()> {
+    // Check if AppArmor is enabled on this system
+    if !Path::new("/sys/module/apparmor").exists() {
+        tracing::info!("AppArmor not available on this system, skipping profile enforcement");
+        return Ok(());
+    }
+
+    // Check if aa-enforce is installed
+    let which = Command::new("which")
+        .arg("aa-enforce")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+
+    if !which.map(|s| s.success()).unwrap_or(false) {
+        tracing::warn!(
+            "apparmor-utils not installed, skipping profile enforcement. \
+             Install with: sudo apt install -y apparmor-utils"
+        );
+        return Ok(());
+    }
+
+    let profiles = [
+        ("/etc/apparmor.d/usr.local.bin.firecracker", firecracker_binary),
+        ("/etc/apparmor.d/usr.local.bin.fc-runner", "/usr/local/bin/fc-runner"),
+    ];
+
+    for (profile_path, binary) in &profiles {
+        if !Path::new(profile_path).exists() {
+            tracing::info!(
+                profile = profile_path,
+                "AppArmor profile not installed, skipping. \
+                 Copy from apparmor/ directory to /etc/apparmor.d/"
+            );
+            continue;
+        }
+
+        // Check if already enforced via aa-status
+        let output = Command::new("aa-status")
+            .arg("--json")
+            .output()
+            .await;
+
+        let already_enforced = output
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.contains(binary))
+            .unwrap_or(false);
+
+        if already_enforced {
+            tracing::info!(profile = profile_path, "AppArmor profile already loaded");
+            continue;
+        }
+
+        // Load and enforce the profile
+        tracing::info!(profile = profile_path, "loading AppArmor profile");
+        let status = Command::new("apparmor_parser")
+            .args(["-r", "-W", profile_path])
+            .status()
+            .await
+            .context("loading AppArmor profile")?;
+
+        if !status.success() {
+            tracing::warn!(
+                profile = profile_path,
+                "failed to load AppArmor profile, continuing without enforcement"
+            );
+            continue;
+        }
+
+        let status = Command::new("aa-enforce")
+            .arg(profile_path)
+            .status()
+            .await
+            .context("enforcing AppArmor profile")?;
+
+        if status.success() {
+            tracing::info!(profile = profile_path, "AppArmor profile enforced");
+        } else {
+            tracing::warn!(
+                profile = profile_path,
+                "failed to enforce AppArmor profile, continuing"
+            );
+        }
+    }
+
     Ok(())
 }
