@@ -1,5 +1,6 @@
 use anyhow::Context;
 use reqwest::Client;
+use secrecy::ExposeSecret;
 use serde::Deserialize;
 
 use crate::config::GitHubConfig;
@@ -57,7 +58,7 @@ impl GitHubClient {
     fn request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
         self.client
             .request(method, url)
-            .bearer_auth(&self.config.token)
+            .bearer_auth(self.config.token.expose_secret())
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
     }

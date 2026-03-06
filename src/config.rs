@@ -1,4 +1,5 @@
 use anyhow::{bail, Context};
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use std::path::Path;
 
@@ -11,7 +12,7 @@ pub struct AppConfig {
 
 #[derive(Clone, Deserialize)]
 pub struct GitHubConfig {
-    pub token: String,
+    pub token: SecretString,
     pub owner: String,
     pub repo: String,
     #[serde(default = "default_runner_group_id")]
@@ -102,7 +103,7 @@ impl AppConfig {
     }
 
     fn validate(&self) -> anyhow::Result<()> {
-        if self.github.token.is_empty() {
+        if self.github.token.expose_secret().is_empty() {
             bail!("github.token must not be empty");
         }
         if self.github.owner.is_empty() {
