@@ -49,6 +49,7 @@ else
     echo "  /etc/fc-runner/config.toml already exists — not overwriting."
 fi
 # Ensure config is not world-readable (fc-runner refuses to start otherwise)
+chown root:root /etc/fc-runner/config.toml
 chmod 0600 /etc/fc-runner/config.toml
 cp vm-config.json.template /etc/fc-runner/vm-config.json.template
 
