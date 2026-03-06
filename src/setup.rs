@@ -78,22 +78,24 @@ struct GitHubMeta {
 /// Fetches GitHub's published IP ranges from the /meta endpoint.
 /// Returns CIDRs needed for Actions runners (actions + git + api + web).
 async fn fetch_github_cidrs() -> anyhow::Result<Vec<String>> {
-    let output = Command::new("curl")
-        .args([
-            "-fsSL",
-            "--proto", "=https",
-            "--tlsv1.2",
-            "--max-time", "15",
-            "https://api.github.com/meta",
-        ])
-        .output()
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("fc-runner/0.1")
+        .build()
+        .context("building HTTP client for GitHub meta")?;
+
+    let resp = client
+        .get("https://api.github.com/meta")
+        .send()
         .await
-        .context("fetching GitHub meta API")?;
+        .context("fetching https://api.github.com/meta")?;
 
-    ensure!(output.status.success(), "curl https://api.github.com/meta failed");
-
-    let meta: GitHubMeta =
-        serde_json::from_slice(&output.stdout).context("parsing GitHub meta response")?;
+    let meta: GitHubMeta = resp
+        .error_for_status()
+        .context("GitHub meta API returned error")?
+        .json()
+        .await
+        .context("parsing GitHub meta response")?;
 
     let mut cidrs = Vec::new();
     cidrs.extend(meta.actions);
