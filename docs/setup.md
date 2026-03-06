@@ -14,10 +14,18 @@ fc-runner checks KVM access automatically at startup and will provide clear erro
 # 1. Verify CPU supports virtualization (must return > 0)
 grep -Eoc '(vmx|svm)' /proc/cpuinfo
 
-# 2. Load KVM module if not already loaded
-sudo modprobe kvm_intel   # Intel CPUs
-# or
-sudo modprobe kvm_amd     # AMD CPUs
+# 2. Detect CPU vendor and load the correct KVM module
+CPU_VENDOR=$(lscpu | awk -F: '/Vendor ID/{gsub(/^ +/,"",$2); print $2}')
+if [ "$CPU_VENDOR" = "GenuineIntel" ]; then
+    echo "Intel CPU detected"
+    sudo modprobe kvm_intel
+elif [ "$CPU_VENDOR" = "AuthenticAMD" ]; then
+    echo "AMD CPU detected"
+    sudo modprobe kvm_amd
+else
+    echo "Unknown CPU vendor: $CPU_VENDOR"
+    exit 1
+fi
 
 # 3. Verify /dev/kvm exists
 ls -la /dev/kvm
@@ -26,6 +34,18 @@ ls -la /dev/kvm
 # 4. Add your user to the kvm group (avoids needing root for KVM access)
 sudo usermod -aG kvm $USER
 newgrp kvm
+```
+
+You can also check manually:
+```bash
+# Quick check: "vmx" = Intel, "svm" = AMD
+grep -Eoc 'vmx' /proc/cpuinfo   # Intel (VT-x)
+grep -Eoc 'svm' /proc/cpuinfo   # AMD (AMD-V)
+
+# Or use lscpu
+lscpu | grep "Vendor ID"
+# GenuineIntel → use kvm_intel
+# AuthenticAMD → use kvm_amd
 ```
 
 After this, fc-runner handles everything else automatically at startup:

@@ -59,9 +59,11 @@ GitHub Actions                fc-runner                    Firecracker
 # Verify CPU virtualization (must return > 0)
 grep -Eoc '(vmx|svm)' /proc/cpuinfo
 
-# Load KVM module
-sudo modprobe kvm_intel   # Intel
-sudo modprobe kvm_amd     # AMD
+# Detect CPU vendor and load the correct KVM module
+# "vmx" in cpuinfo = Intel (use kvm_intel), "svm" = AMD (use kvm_amd)
+lscpu | grep "Vendor ID"
+sudo modprobe kvm_intel   # Intel (GenuineIntel)
+sudo modprobe kvm_amd     # AMD (AuthenticAMD)
 
 # Add your user to the kvm group
 sudo usermod -aG kvm $USER
