@@ -221,11 +221,10 @@ impl AppConfig {
                 .with_context(|| format!("reading config metadata: {}", path))?;
             let mode = meta.mode() & 0o777;
             if mode & 0o007 != 0 {
-                tracing::warn!(
-                    path = path,
-                    mode = format!("{:o}", mode),
-                    "config file is world-readable — contains secrets! Fix with: chmod 640 {}",
-                    path
+                bail!(
+                    "config file is world-readable (mode {:o}) — contains secrets!\n\
+                     Fix with: chmod 600 {}",
+                    mode, path
                 );
             }
         }
@@ -296,13 +295,20 @@ impl AppConfig {
             std::fs::create_dir_all(work_dir)
                 .with_context(|| format!("creating work_dir: {}", self.runner.work_dir))?;
         }
-        // Restrict work_dir to owner only (contains VM rootfs with tokens)
+        // Try to restrict work_dir to owner only (contains VM rootfs with tokens).
+        // This may fail under systemd ProtectSystem=strict — that's fine since
+        // systemd already restricts access.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o700);
-            std::fs::set_permissions(work_dir, perms)
-                .with_context(|| format!("setting work_dir permissions: {}", self.runner.work_dir))?;
+            if let Err(e) = std::fs::set_permissions(work_dir, perms) {
+                tracing::warn!(
+                    path = %self.runner.work_dir,
+                    error = %e,
+                    "could not set work_dir permissions to 0700 (ok if running under systemd ProtectSystem)"
+                );
+            }
         }
 
         Ok(())
