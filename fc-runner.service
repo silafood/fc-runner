@@ -25,6 +25,7 @@ RestrictSUIDSGID=true
 MemoryDenyWriteExecute=true
 # Needed for TAP/NAT and mount/loop operations
 AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_MKNOD
+SupplementaryGroups=kvm
 
 [Install]
 WantedBy=multi-user.target
