@@ -23,14 +23,15 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| "/etc/fc-runner/config.toml".into());
 
     tracing::info!(path = %config_path, "loading configuration");
-    let config = Arc::new(
-        config::AppConfig::load(&config_path).context("failed to load configuration")?,
-    );
+    let mut config =
+        config::AppConfig::load(&config_path).context("failed to load configuration")?;
 
-    // Download kernel / build golden rootfs if missing
-    setup::ensure_vm_assets(&config)
+    // Download kernel / build golden rootfs / resolve network allowlists if missing
+    setup::ensure_vm_assets(&mut config)
         .await
         .context("failed to provision VM assets")?;
+
+    let config = Arc::new(config);
 
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();

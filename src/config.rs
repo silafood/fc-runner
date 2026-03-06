@@ -85,6 +85,16 @@ pub struct NetworkConfig {
     pub cidr: String,
     #[serde(default = "default_dns")]
     pub dns: Vec<String>,
+    /// Allowed outbound network CIDRs for guest VMs.
+    /// Use "github" as a magic keyword to auto-fetch GitHub Actions CIDRs
+    /// from https://api.github.com/meta at startup.
+    /// When empty (default), all outbound traffic is allowed.
+    /// Example: ["github", "10.0.0.0/8", "192.168.1.0/24"]
+    #[serde(default)]
+    pub allowed_networks: Vec<String>,
+    /// Resolved CIDRs after expanding "github" keyword (populated at runtime)
+    #[serde(skip)]
+    pub resolved_networks: Vec<String>,
 }
 
 fn default_runner_group_id() -> u64 {
@@ -163,6 +173,8 @@ impl Default for NetworkConfig {
             guest_ip: default_guest_ip(),
             cidr: default_cidr(),
             dns: default_dns(),
+            allowed_networks: Vec::new(),
+            resolved_networks: Vec::new(),
         }
     }
 }

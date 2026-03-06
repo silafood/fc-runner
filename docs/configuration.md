@@ -43,6 +43,7 @@ host_ip = "172.16.0.1"
 guest_ip = "172.16.0.2"
 cidr = "24"
 dns = ["8.8.8.8", "1.1.1.1"]
+# allowed_networks = ["github"]
 ```
 
 ## Sections
@@ -91,6 +92,24 @@ dns = ["8.8.8.8", "1.1.1.1"]
 | `guest_ip` | No | `172.16.0.2` | Guest-side IP address assigned inside the VM |
 | `cidr` | No | `24` | CIDR prefix length for the TAP subnet |
 | `dns` | No | `["8.8.8.8", "1.1.1.1"]` | DNS servers configured inside guest VMs |
+| `allowed_networks` | No | `[]` (all allowed) | Outbound network allowlist. Use `"github"` to auto-fetch GitHub CIDRs. DNS servers are always allowed. |
+
+### Network Allowlist
+
+When `allowed_networks` is set, iptables FORWARD rules restrict guest VM outbound traffic to only the listed CIDRs. All other outbound traffic is dropped.
+
+The special keyword `"github"` fetches all GitHub Actions, Git, API, and Web CIDRs from `https://api.github.com/meta` at startup. This ensures the runner can reach GitHub without manually tracking IP ranges.
+
+```toml
+[network]
+# Only allow GitHub + internal network
+allowed_networks = ["github", "10.0.0.0/8"]
+
+# Allow everything (default when omitted)
+# allowed_networks = []
+```
+
+DNS servers from the `dns` field are always added to the allowlist automatically.
 
 ## VM Config Template
 

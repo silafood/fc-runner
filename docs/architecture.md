@@ -96,6 +96,13 @@ Active job count is tracked via `Arc<Mutex<usize>>`.
 - Requires `jailer_uid` and `jailer_gid` — validated at config load time
 - Jailer chroot directories are cleaned up automatically after each VM exits
 
+### Network Allowlist
+- When `network.allowed_networks` is configured, iptables FORWARD rules restrict guest outbound traffic to only listed CIDRs
+- The `"github"` keyword auto-fetches GitHub Actions/Git/API/Web CIDRs from `https://api.github.com/meta` at startup
+- DNS servers are always added to the allowlist automatically
+- Unmatched outbound traffic is dropped via a trailing DROP rule
+- When the list is empty (default), all outbound traffic is permitted
+
 ### Rate Limiting
 - GitHub API rate-limit headers (`x-ratelimit-remaining`) are parsed after every response
 - Warning at < 100 remaining requests, 60-second backoff at < 10

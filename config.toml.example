@@ -43,3 +43,10 @@ guest_ip = "172.16.0.2"
 cidr = "24"
 # DNS servers for guest VMs (multiple for redundancy)
 dns = ["8.8.8.8", "1.1.1.1"]
+# Allowed outbound networks for guest VMs.
+# "github" is a magic keyword that auto-fetches GitHub Actions/API/Git/Web CIDRs
+# from https://api.github.com/meta at startup.
+# When empty or omitted, all outbound traffic is allowed.
+# DNS servers are always allowed automatically.
+# allowed_networks = ["github"]
+# allowed_networks = ["github", "10.0.0.0/8", "192.168.1.0/24"]

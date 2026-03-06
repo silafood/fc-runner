@@ -11,13 +11,101 @@ const RUNNER_VERSION: &str = "2.323.0";
 const ROOTFS_SIZE_MIB: u32 = 4096;
 
 /// Ensures all VM prerequisites are in place: KVM, kernel, rootfs, network, and AppArmor.
-pub async fn ensure_vm_assets(config: &AppConfig) -> anyhow::Result<()> {
+pub async fn ensure_vm_assets(config: &mut AppConfig) -> anyhow::Result<()> {
     preflight_kvm()?;
+    resolve_allowed_networks(&mut config.network).await?;
     ensure_kernel(&config.firecracker.kernel_path).await?;
     ensure_golden_rootfs(&config.firecracker.rootfs_golden, &config.network).await?;
     ensure_network(&config.network).await?;
     ensure_apparmor(&config.firecracker.binary_path).await?;
     Ok(())
+}
+
+/// Resolves the `allowed_networks` list by expanding the "github" keyword
+/// into actual CIDRs from https://api.github.com/meta.
+async fn resolve_allowed_networks(network: &mut NetworkConfig) -> anyhow::Result<()> {
+    if network.allowed_networks.is_empty() {
+        tracing::info!("no allowed_networks configured, all outbound traffic permitted");
+        return Ok(());
+    }
+
+    let mut resolved = Vec::new();
+    for entry in &network.allowed_networks {
+        if entry.eq_ignore_ascii_case("github") {
+            tracing::info!("resolving GitHub network ranges from api.github.com/meta...");
+            match fetch_github_cidrs().await {
+                Ok(cidrs) => {
+                    tracing::info!(count = cidrs.len(), "fetched GitHub Actions CIDRs");
+                    resolved.extend(cidrs);
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to fetch GitHub CIDRs — GitHub access may be blocked");
+                    return Err(e).context("resolving GitHub network ranges");
+                }
+            }
+        } else {
+            resolved.push(entry.clone());
+        }
+    }
+
+    // Always allow DNS servers
+    for dns in &network.dns {
+        let dns_cidr = format!("{}/32", dns);
+        if !resolved.contains(&dns_cidr) {
+            resolved.push(dns_cidr);
+        }
+    }
+
+    tracing::info!(
+        count = resolved.len(),
+        "resolved allowed networks (outbound firewall will restrict to these CIDRs)"
+    );
+    network.resolved_networks = resolved;
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct GitHubMeta {
+    actions: Vec<String>,
+    #[serde(default)]
+    git: Vec<String>,
+    #[serde(default)]
+    api: Vec<String>,
+    #[serde(default)]
+    web: Vec<String>,
+}
+
+/// Fetches GitHub's published IP ranges from the /meta endpoint.
+/// Returns CIDRs needed for Actions runners (actions + git + api + web).
+async fn fetch_github_cidrs() -> anyhow::Result<Vec<String>> {
+    let output = Command::new("curl")
+        .args([
+            "-fsSL",
+            "--proto", "=https",
+            "--tlsv1.2",
+            "--max-time", "15",
+            "https://api.github.com/meta",
+        ])
+        .output()
+        .await
+        .context("fetching GitHub meta API")?;
+
+    ensure!(output.status.success(), "curl https://api.github.com/meta failed");
+
+    let meta: GitHubMeta =
+        serde_json::from_slice(&output.stdout).context("parsing GitHub meta response")?;
+
+    let mut cidrs = Vec::new();
+    cidrs.extend(meta.actions);
+    cidrs.extend(meta.git);
+    cidrs.extend(meta.api);
+    cidrs.extend(meta.web);
+
+    // Deduplicate
+    cidrs.sort();
+    cidrs.dedup();
+
+    Ok(cidrs)
 }
 
 /// Verifies KVM is available and the current user has access.
@@ -411,18 +499,56 @@ async fn ensure_nat_rules(network: &NetworkConfig) -> anyhow::Result<()> {
         "-j", "MASQUERADE",
     ]).await?;
 
-    // FORWARD — allow TAP → internet
-    add_iptables_rule_if_missing(&[
-        "-A", "FORWARD",
-        "-i", &network.tap_device,
-        "-o", &default_iface,
-        "-j", "ACCEPT",
-    ], &[
-        "-C", "FORWARD",
-        "-i", &network.tap_device,
-        "-o", &default_iface,
-        "-j", "ACCEPT",
-    ]).await?;
+    if network.resolved_networks.is_empty() {
+        // No allowlist — allow all outbound traffic from TAP
+        add_iptables_rule_if_missing(&[
+            "-A", "FORWARD",
+            "-i", &network.tap_device,
+            "-o", &default_iface,
+            "-j", "ACCEPT",
+        ], &[
+            "-C", "FORWARD",
+            "-i", &network.tap_device,
+            "-o", &default_iface,
+            "-j", "ACCEPT",
+        ]).await?;
+    } else {
+        // Allowlist mode — only permit traffic to resolved CIDRs
+        tracing::info!(
+            count = network.resolved_networks.len(),
+            "applying network allowlist (only listed CIDRs reachable from guest)"
+        );
+        for cidr in &network.resolved_networks {
+            add_iptables_rule_if_missing(&[
+                "-A", "FORWARD",
+                "-i", &network.tap_device,
+                "-o", &default_iface,
+                "-d", cidr,
+                "-j", "ACCEPT",
+            ], &[
+                "-C", "FORWARD",
+                "-i", &network.tap_device,
+                "-o", &default_iface,
+                "-d", cidr,
+                "-j", "ACCEPT",
+            ]).await?;
+        }
+
+        // Drop all other outbound traffic from TAP
+        add_iptables_rule_if_missing(&[
+            "-A", "FORWARD",
+            "-i", &network.tap_device,
+            "-o", &default_iface,
+            "-j", "DROP",
+        ], &[
+            "-C", "FORWARD",
+            "-i", &network.tap_device,
+            "-o", &default_iface,
+            "-j", "DROP",
+        ]).await?;
+
+        tracing::info!("network allowlist applied — unmatched outbound traffic will be dropped");
+    }
 
     // FORWARD — allow established return traffic
     add_iptables_rule_if_missing(&[
