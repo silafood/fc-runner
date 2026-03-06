@@ -9,8 +9,22 @@ ExecStart=/usr/local/bin/fc-runner /etc/fc-runner/config.toml
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
-TimeoutStopSec=30
+TimeoutStopSec=300
 Environment=RUST_LOG=fc_runner=info
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/fc-runner /opt/fc-runner /tmp
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+MemoryDenyWriteExecute=true
+# Needed for TAP/NAT and mount/loop operations
+AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_MKNOD
 
 [Install]
 WantedBy=multi-user.target

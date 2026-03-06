@@ -23,6 +23,10 @@ vm_config_template = "/etc/fc-runner/vm-config.json.template"
 [runner]
 work_dir = "/var/lib/fc-runner/vms"
 poll_interval_secs = 5
+# Maximum number of VMs running simultaneously (prevents resource exhaustion)
+max_concurrent_jobs = 4
+# Maximum time (seconds) a single VM is allowed to run before being killed
+vm_timeout_secs = 3600
 
 # Network is auto-configured at startup (TAP device, IP forwarding, NAT rules)
 [network]
@@ -30,3 +34,5 @@ tap_device = "tap-fc0"
 host_ip = "172.16.0.1"
 guest_ip = "172.16.0.2"
 cidr = "24"
+# DNS servers for guest VMs (multiple for redundancy)
+dns = ["8.8.8.8", "1.1.1.1"]

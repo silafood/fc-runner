@@ -87,11 +87,11 @@ async fn ensure_kernel(kernel_path: &str) -> anyhow::Result<()> {
     }
 
     let status = Command::new("curl")
-        .args(["-fsSL", "-o", kernel_path, KERNEL_URL])
+        .args(["-fsSL", "--proto", "=https", "--tlsv1.2", "-o", kernel_path, KERNEL_URL])
         .status()
         .await
         .context("spawning curl for kernel download")?;
-    ensure!(status.success(), "failed to download kernel from {}", KERNEL_URL);
+    ensure!(status.success(), "failed to download kernel");
 
     tracing::info!(path = kernel_path, "kernel downloaded");
     Ok(())
@@ -141,6 +141,15 @@ async fn ensure_golden_rootfs(rootfs_path: &str, network: &NetworkConfig) -> any
         .context("mounting rootfs image")?;
     ensure!(status.success(), "mount failed");
 
+    // Verify mount succeeded
+    let mountpoint_ok = Command::new("mountpoint")
+        .args(["-q", &mount_dir])
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false);
+    ensure!(mountpoint_ok, "mount point verification failed for {}", mount_dir);
+
     // Run the build inside a helper script so we can clean up on failure
     let result = build_rootfs_contents(&mount_dir, network).await;
 
@@ -183,11 +192,17 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
     // Network configuration
     let network_dir = format!("{}/etc/systemd/network", mount_dir);
     tokio::fs::create_dir_all(&network_dir).await?;
+    let dns_entries: String = network
+        .dns
+        .iter()
+        .map(|d| format!("DNS={}", d))
+        .collect::<Vec<_>>()
+        .join("\n");
     tokio::fs::write(
         format!("{}/20-eth.network", network_dir),
         format!(
-            "[Match]\nName=eth0\n\n[Network]\nAddress={}/{}\nGateway={}\nDNS=8.8.8.8\n",
-            network.guest_ip, network.cidr, network.host_ip
+            "[Match]\nName=eth0\n\n[Network]\nAddress={}/{}\nGateway={}\n{}\n",
+            network.guest_ip, network.cidr, network.host_ip, dns_entries
         ),
     )
     .await?;
@@ -220,15 +235,22 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
         "https://github.com/actions/runner/releases/download/v{}/actions-runner-linux-x64-{}.tar.gz",
         RUNNER_VERSION, RUNNER_VERSION
     );
-    let status = Command::new("bash")
-        .args([
-            "-c",
-            &format!("curl -fsSL '{}' | tar xz -C '{}'", runner_url, runner_dir),
-        ])
+    let runner_tarball = format!("{}/actions-runner.tar.gz", runner_dir);
+    let status = Command::new("curl")
+        .args(["-fsSL", "--proto", "=https", "--tlsv1.2", "-o", &runner_tarball, &runner_url])
         .status()
         .await
         .context("downloading actions-runner")?;
     ensure!(status.success(), "failed to download actions-runner");
+
+    let status = Command::new("tar")
+        .args(["xzf", &runner_tarball, "-C", &runner_dir])
+        .status()
+        .await
+        .context("extracting actions-runner")?;
+    ensure!(status.success(), "failed to extract actions-runner");
+
+    let _ = tokio::fs::remove_file(&runner_tarball).await;
 
     // Install runner dependencies
     let status = Command::new("chroot")

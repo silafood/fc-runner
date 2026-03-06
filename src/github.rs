@@ -1,7 +1,11 @@
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+
 use anyhow::Context;
 use reqwest::Client;
 use secrecy::ExposeSecret;
 use serde::Deserialize;
+use tokio::time::Duration;
 
 use crate::config::GitHubConfig;
 
@@ -36,12 +40,14 @@ pub struct GitHubClient {
     client: Client,
     config: GitHubConfig,
     base_url: String,
+    rate_limit_remaining: Arc<AtomicU32>,
 }
 
 impl GitHubClient {
     pub fn new(config: GitHubConfig) -> anyhow::Result<Self> {
         let client = Client::builder()
             .user_agent("fc-runner/0.1")
+            .timeout(Duration::from_secs(30))
             .build()
             .context("building HTTP client")?;
         let base_url = format!(
@@ -52,6 +58,7 @@ impl GitHubClient {
             client,
             config,
             base_url,
+            rate_limit_remaining: Arc::new(AtomicU32::new(5000)),
         })
     }
 
@@ -63,17 +70,38 @@ impl GitHubClient {
             .header("X-GitHub-Api-Version", "2022-11-28")
     }
 
+    /// Check rate limit headers and warn/backoff if running low.
+    async fn check_rate_limit(&self, resp: &reqwest::Response) {
+        if let Some(remaining) = resp
+            .headers()
+            .get("x-ratelimit-remaining")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.parse::<u32>().ok())
+        {
+            self.rate_limit_remaining.store(remaining, Ordering::Relaxed);
+            if remaining < 100 {
+                tracing::warn!(remaining, "GitHub API rate limit running low");
+            }
+            if remaining < 10 {
+                tracing::error!(remaining, "GitHub API rate limit nearly exhausted, backing off");
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
+    }
+
     pub async fn list_queued_runs(&self) -> anyhow::Result<Vec<WorkflowRun>> {
         let url = format!("{}/actions/runs?status=queued", self.base_url);
         let resp = self
             .request(reqwest::Method::GET, &url)
             .send()
-            .await?
+            .await?;
+        self.check_rate_limit(&resp).await;
+        let data = resp
             .error_for_status()
             .context("listing queued runs")?
             .json::<WorkflowRunsResponse>()
             .await?;
-        Ok(resp.workflow_runs)
+        Ok(data.workflow_runs)
     }
 
     pub async fn list_queued_jobs(&self, run_id: u64) -> anyhow::Result<Vec<Job>> {
@@ -84,12 +112,14 @@ impl GitHubClient {
         let resp = self
             .request(reqwest::Method::GET, &url)
             .send()
-            .await?
+            .await?;
+        self.check_rate_limit(&resp).await;
+        let data = resp
             .error_for_status()
             .context("listing queued jobs")?
             .json::<JobsResponse>()
             .await?;
-        Ok(resp.jobs)
+        Ok(data.jobs)
     }
 
     pub async fn generate_jit_config(&self, job_id: u64) -> anyhow::Result<String> {
@@ -104,11 +134,13 @@ impl GitHubClient {
             .request(reqwest::Method::POST, &url)
             .json(&body)
             .send()
-            .await?
+            .await?;
+        self.check_rate_limit(&resp).await;
+        let data = resp
             .error_for_status()
             .context("generating JIT config")?
             .json::<JitConfigResponse>()
             .await?;
-        Ok(resp.encoded_jit_config)
+        Ok(data.encoded_jit_config)
     }
 }

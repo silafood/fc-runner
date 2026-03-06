@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{interval, Duration};
 use tokio_util::sync::CancellationToken;
 
@@ -14,16 +14,22 @@ pub struct Orchestrator {
     github: Arc<GitHubClient>,
     seen_jobs: Arc<Mutex<HashSet<u64>>>,
     cancel: CancellationToken,
+    semaphore: Arc<Semaphore>,
+    active_jobs: Arc<Mutex<usize>>,
 }
 
 impl Orchestrator {
     pub fn new(config: Arc<AppConfig>, cancel: CancellationToken) -> anyhow::Result<Self> {
         let github = Arc::new(GitHubClient::new(config.github.clone())?);
+        let max_jobs = config.runner.max_concurrent_jobs;
+        tracing::info!(max_concurrent_jobs = max_jobs, "concurrency limit set");
         Ok(Self {
             config,
             github,
             seen_jobs: Arc::new(Mutex::new(HashSet::new())),
             cancel,
+            semaphore: Arc::new(Semaphore::new(max_jobs)),
+            active_jobs: Arc::new(Mutex::new(0)),
         })
     }
 
@@ -37,7 +43,8 @@ impl Orchestrator {
         loop {
             tokio::select! {
                 _ = self.cancel.cancelled() => {
-                    tracing::info!("shutdown signal received, stopping poll loop");
+                    tracing::info!("shutdown signal received, waiting for in-flight jobs...");
+                    self.wait_for_active_jobs(Duration::from_secs(300)).await;
                     break;
                 }
                 _ = ticker.tick() => {
@@ -48,6 +55,24 @@ impl Orchestrator {
             }
         }
         Ok(())
+    }
+
+    /// Wait for all active jobs to finish, with a timeout.
+    async fn wait_for_active_jobs(&self, max_wait: Duration) {
+        let deadline = tokio::time::Instant::now() + max_wait;
+        loop {
+            let count = *self.active_jobs.lock().await;
+            if count == 0 {
+                tracing::info!("all in-flight jobs completed");
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(remaining = count, "shutdown timeout, some jobs still running");
+                break;
+            }
+            tracing::info!(remaining = count, "waiting for in-flight jobs...");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
     }
 
     async fn poll_once(&self) -> anyhow::Result<()> {
@@ -88,12 +113,29 @@ impl Orchestrator {
         let config = self.config.clone();
         let github = self.github.clone();
         let seen_jobs = self.seen_jobs.clone();
+        let semaphore = self.semaphore.clone();
+        let active_jobs = self.active_jobs.clone();
 
         tokio::spawn(async move {
+            // Acquire concurrency permit — blocks if at max capacity
+            let _permit = match semaphore.acquire().await {
+                Ok(permit) => permit,
+                Err(_) => {
+                    tracing::error!(job_id, "semaphore closed, cannot dispatch job");
+                    return;
+                }
+            };
+
+            *active_jobs.lock().await += 1;
+            tracing::info!(job_id, "job started (permit acquired)");
+
             if let Err(e) = run_job(config.clone(), github, job_id).await {
                 tracing::error!(job_id, error = %e, "job failed");
             }
+
+            *active_jobs.lock().await -= 1;
             seen_jobs.lock().await.remove(&job_id);
+            tracing::info!(job_id, "job completed (permit released)");
         });
     }
 }
@@ -103,11 +145,14 @@ async fn run_job(
     github: Arc<GitHubClient>,
     job_id: u64,
 ) -> anyhow::Result<()> {
+    tracing::info!(job_id, "requesting JIT token");
     let jit_token = github.generate_jit_config(job_id).await?;
+    tracing::info!(job_id, "JIT token acquired");
+
     let repo_url = format!(
         "https://github.com/{}/{}",
         config.github.owner, config.github.repo
     );
-    let vm = MicroVm::new(job_id, &config.firecracker, &config.runner.work_dir);
+    let vm = MicroVm::new(job_id, &config.firecracker, &config.runner.work_dir, config.runner.vm_timeout_secs);
     vm.execute(&jit_token, &repo_url).await
 }
