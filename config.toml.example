@@ -1,0 +1,25 @@
+# fc-runner configuration
+# Copy to /etc/fc-runner/config.toml and fill in your values.
+
+[github]
+# Personal access token with 'repo' scope
+token = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+owner = "your-org"
+repo = "your-repo"
+# Runner group ID (1 = default group)
+runner_group_id = 1
+# Labels the runner advertises — must match workflow's runs-on
+labels = ["self-hosted", "linux", "firecracker"]
+
+[firecracker]
+binary_path = "/usr/local/bin/firecracker"
+kernel_path = "/opt/fc-runner/vmlinux.bin"
+rootfs_golden = "/opt/fc-runner/runner-rootfs-golden.ext4"
+vcpu_count = 2
+mem_size_mib = 2048
+tap_interface = "tap-fc0"
+vm_config_template = "/etc/fc-runner/vm-config.json.template"
+
+[runner]
+work_dir = "/var/lib/fc-runner/vms"
+poll_interval_secs = 5

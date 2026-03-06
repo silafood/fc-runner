@@ -1,0 +1,16 @@
+[Unit]
+Description=fc-runner Firecracker CI Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fc-runner /etc/fc-runner/config.toml
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Environment=RUST_LOG=fc_runner=info
+
+[Install]
+WantedBy=multi-user.target
