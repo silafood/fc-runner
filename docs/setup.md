@@ -4,7 +4,74 @@
 
 - **Linux host** running Pop!_OS or Ubuntu 24.04 (bare-metal or nested virt enabled)
 - **Rust toolchain** — install via [rustup](https://rustup.rs/)
-- **GitHub PAT** with `repo` scope
+- **GitHub Personal Access Token (PAT)** — see below for how to generate one
+
+### GitHub Token Setup
+
+fc-runner needs a GitHub token to poll for queued jobs and register ephemeral runners. You can use either a **Fine-grained PAT** (recommended) or a **Classic PAT**.
+
+#### Option A: Fine-grained PAT (recommended)
+
+Fine-grained tokens provide least-privilege access scoped to specific repositories.
+
+1. Go to **GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens**
+   (direct link: `https://github.com/settings/personal-access-tokens/new`)
+2. Set a descriptive name (e.g., `fc-runner`)
+3. Set **Expiration** — choose a reasonable period (90 days recommended, renew before expiry)
+4. Under **Repository access**, select **Only select repositories** and pick the repo(s) you want fc-runner to serve
+5. Under **Permissions → Repository permissions**, grant:
+
+   | Permission | Access | Why |
+   |-----------|--------|-----|
+   | **Actions** | Read and write | Poll queued runs/jobs, generate JIT runner tokens |
+   | **Administration** | Read and write | Register ephemeral self-hosted runners |
+   | **Metadata** | Read-only | Required by GitHub (auto-selected) |
+
+6. Click **Generate token** and copy it immediately — you won't see it again
+
+#### Option B: Classic PAT
+
+Classic tokens are simpler but grant broader access.
+
+1. Go to **GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic)**
+   (direct link: `https://github.com/settings/tokens/new`)
+2. Set a descriptive name (e.g., `fc-runner`)
+3. Set **Expiration**
+4. Select the **`repo`** scope (full control of private repositories)
+
+   > The `repo` scope is required because the Actions runner registration API needs write access. There is no narrower classic scope available.
+
+5. Click **Generate token** and copy it
+
+#### For Organization repositories
+
+If fc-runner serves an **organization** repo, the org admin may need to:
+- Approve the fine-grained PAT under **Organization settings → Personal access tokens → Pending requests**
+- Or use a **GitHub App** installation token instead of a PAT (not covered here)
+
+#### Security best practices
+
+- Store the token only in `/etc/fc-runner/config.toml` with restricted permissions:
+  ```bash
+  sudo chmod 0600 /etc/fc-runner/config.toml
+  ```
+- fc-runner uses `secrecy::SecretString` internally — the token is zeroized from memory on drop and never appears in logs
+- Rotate tokens regularly and use the shortest practical expiration
+- Prefer fine-grained PATs scoped to specific repos over classic tokens
+
+#### Verify your token works
+
+```bash
+# Test the token (replace values)
+curl -s \
+  -H "Authorization: Bearer ghp_your_token_here" \
+  -H "Accept: application/vnd.github+json" \
+  -H "X-GitHub-Api-Version: 2022-11-28" \
+  https://api.github.com/repos/OWNER/REPO/actions/runners \
+  | jq '.total_count'
+```
+
+If you get a number (even `0`), the token has the right permissions. If you get `401` or `403`, check the scopes.
 
 ### KVM Setup (one-time, requires sudo)
 

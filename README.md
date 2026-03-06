@@ -52,7 +52,7 @@ GitHub Actions                fc-runner                    Firecracker
 
 - **Linux host** — Pop!_OS or Ubuntu 24.04 (bare-metal or nested virt enabled)
 - **Rust toolchain** — install via [rustup](https://rustup.rs/)
-- **GitHub PAT** — with `repo` scope
+- **GitHub PAT** — Fine-grained (recommended: `Actions` + `Administration` permissions) or Classic (`repo` scope). See [setup guide](docs/setup.md#github-token-setup) for step-by-step instructions.
 - **KVM access** — one-time setup:
 
 ```bash
