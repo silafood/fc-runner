@@ -8,6 +8,8 @@ pub struct AppConfig {
     pub github: GitHubConfig,
     pub firecracker: FirecrackerConfig,
     pub runner: RunnerConfig,
+    #[serde(default)]
+    pub network: NetworkConfig,
 }
 
 #[derive(Clone, Deserialize)]
@@ -56,6 +58,18 @@ pub struct RunnerConfig {
     pub poll_interval_secs: u64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct NetworkConfig {
+    #[serde(default = "default_tap_device")]
+    pub tap_device: String,
+    #[serde(default = "default_host_ip")]
+    pub host_ip: String,
+    #[serde(default = "default_guest_ip")]
+    pub guest_ip: String,
+    #[serde(default = "default_cidr")]
+    pub cidr: String,
+}
+
 fn default_runner_group_id() -> u64 {
     1
 }
@@ -90,6 +104,33 @@ fn default_work_dir() -> String {
 
 fn default_poll_interval() -> u64 {
     5
+}
+
+fn default_tap_device() -> String {
+    "tap-fc0".into()
+}
+
+fn default_host_ip() -> String {
+    "172.16.0.1".into()
+}
+
+fn default_guest_ip() -> String {
+    "172.16.0.2".into()
+}
+
+fn default_cidr() -> String {
+    "24".into()
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            tap_device: default_tap_device(),
+            host_ip: default_host_ip(),
+            guest_ip: default_guest_ip(),
+            cidr: default_cidr(),
+        }
+    }
 }
 
 impl AppConfig {

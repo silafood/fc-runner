@@ -3,17 +3,18 @@ use std::path::Path;
 use anyhow::{ensure, Context};
 use tokio::process::Command;
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, NetworkConfig};
 
 const KERNEL_URL: &str =
     "https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin";
 const RUNNER_VERSION: &str = "2.323.0";
 const ROOTFS_SIZE_MIB: u32 = 4096;
 
-/// Ensures the kernel and golden rootfs exist, downloading/building them if missing.
+/// Ensures all VM prerequisites are in place: kernel, rootfs, and network.
 pub async fn ensure_vm_assets(config: &AppConfig) -> anyhow::Result<()> {
     ensure_kernel(&config.firecracker.kernel_path).await?;
-    ensure_golden_rootfs(&config.firecracker.rootfs_golden).await?;
+    ensure_golden_rootfs(&config.firecracker.rootfs_golden, &config.network).await?;
+    ensure_network(&config.network).await?;
     Ok(())
 }
 
@@ -40,7 +41,7 @@ async fn ensure_kernel(kernel_path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn ensure_golden_rootfs(rootfs_path: &str) -> anyhow::Result<()> {
+async fn ensure_golden_rootfs(rootfs_path: &str, network: &NetworkConfig) -> anyhow::Result<()> {
     if Path::new(rootfs_path).exists() {
         tracing::info!(path = rootfs_path, "golden rootfs already exists");
         return Ok(());
@@ -85,7 +86,7 @@ async fn ensure_golden_rootfs(rootfs_path: &str) -> anyhow::Result<()> {
     ensure!(status.success(), "mount failed");
 
     // Run the build inside a helper script so we can clean up on failure
-    let result = build_rootfs_contents(&mount_dir).await;
+    let result = build_rootfs_contents(&mount_dir, network).await;
 
     // Always unmount
     let umount_status = Command::new("umount")
@@ -107,7 +108,7 @@ async fn ensure_golden_rootfs(rootfs_path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn build_rootfs_contents(mount_dir: &str) -> anyhow::Result<()> {
+async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyhow::Result<()> {
     // Debootstrap Ubuntu 24.04 Noble
     tracing::info!("running debootstrap (this takes a few minutes)...");
     let status = Command::new("debootstrap")
@@ -128,7 +129,10 @@ async fn build_rootfs_contents(mount_dir: &str) -> anyhow::Result<()> {
     tokio::fs::create_dir_all(&network_dir).await?;
     tokio::fs::write(
         format!("{}/20-eth.network", network_dir),
-        "[Match]\nName=eth0\n\n[Network]\nAddress=172.16.0.2/24\nGateway=172.16.0.1\nDNS=8.8.8.8\n",
+        format!(
+            "[Match]\nName=eth0\n\n[Network]\nAddress={}/{}\nGateway={}\nDNS=8.8.8.8\n",
+            network.guest_ip, network.cidr, network.host_ip
+        ),
     )
     .await?;
 
@@ -226,5 +230,160 @@ sudo -u runner ./run.sh
         .await?;
     ensure!(status.success(), "chmod rc.local failed");
 
+    Ok(())
+}
+
+/// Ensures TAP device exists, IP forwarding is enabled, and iptables NAT rules are in place.
+async fn ensure_network(network: &NetworkConfig) -> anyhow::Result<()> {
+    ensure_tap_device(network).await?;
+    ensure_ip_forwarding().await?;
+    ensure_nat_rules(network).await?;
+    Ok(())
+}
+
+async fn ensure_tap_device(network: &NetworkConfig) -> anyhow::Result<()> {
+    // Check if TAP device already exists
+    let status = Command::new("ip")
+        .args(["link", "show", &network.tap_device])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await?;
+
+    if status.success() {
+        tracing::info!(tap = %network.tap_device, "TAP device already exists");
+        return Ok(());
+    }
+
+    tracing::info!(tap = %network.tap_device, "creating TAP device");
+
+    let status = Command::new("ip")
+        .args(["tuntap", "add", &network.tap_device, "mode", "tap"])
+        .status()
+        .await
+        .context("creating TAP device")?;
+    ensure!(status.success(), "ip tuntap add failed");
+
+    let addr = format!("{}/{}", network.host_ip, network.cidr);
+    let status = Command::new("ip")
+        .args(["addr", "add", &addr, "dev", &network.tap_device])
+        .status()
+        .await
+        .context("assigning IP to TAP")?;
+    ensure!(status.success(), "ip addr add failed");
+
+    let status = Command::new("ip")
+        .args(["link", "set", &network.tap_device, "up"])
+        .status()
+        .await
+        .context("bringing TAP up")?;
+    ensure!(status.success(), "ip link set up failed");
+
+    tracing::info!(
+        tap = %network.tap_device,
+        addr = %addr,
+        "TAP device created and configured"
+    );
+    Ok(())
+}
+
+async fn ensure_ip_forwarding() -> anyhow::Result<()> {
+    let current = tokio::fs::read_to_string("/proc/sys/net/ipv4/ip_forward").await?;
+    if current.trim() == "1" {
+        tracing::info!("IP forwarding already enabled");
+        return Ok(());
+    }
+
+    tracing::info!("enabling IP forwarding");
+    let status = Command::new("sysctl")
+        .args(["-w", "net.ipv4.ip_forward=1"])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .await
+        .context("enabling ip_forward")?;
+    ensure!(status.success(), "sysctl ip_forward failed");
+    Ok(())
+}
+
+async fn ensure_nat_rules(network: &NetworkConfig) -> anyhow::Result<()> {
+    // Find default route interface
+    let output = Command::new("ip")
+        .args(["route"])
+        .output()
+        .await
+        .context("reading default route")?;
+    let routes = String::from_utf8_lossy(&output.stdout);
+    let default_iface = routes
+        .lines()
+        .find(|l| l.starts_with("default"))
+        .and_then(|l| l.split_whitespace().nth(4))
+        .ok_or_else(|| anyhow::anyhow!("no default route found"))?
+        .to_string();
+
+    tracing::info!(iface = %default_iface, "configuring NAT rules");
+
+    // MASQUERADE — outbound NAT
+    add_iptables_rule_if_missing(&[
+        "-t", "nat", "-A", "POSTROUTING",
+        "-o", &default_iface,
+        "-j", "MASQUERADE",
+    ], &[
+        "-t", "nat", "-C", "POSTROUTING",
+        "-o", &default_iface,
+        "-j", "MASQUERADE",
+    ]).await?;
+
+    // FORWARD — allow TAP → internet
+    add_iptables_rule_if_missing(&[
+        "-A", "FORWARD",
+        "-i", &network.tap_device,
+        "-o", &default_iface,
+        "-j", "ACCEPT",
+    ], &[
+        "-C", "FORWARD",
+        "-i", &network.tap_device,
+        "-o", &default_iface,
+        "-j", "ACCEPT",
+    ]).await?;
+
+    // FORWARD — allow established return traffic
+    add_iptables_rule_if_missing(&[
+        "-A", "FORWARD",
+        "-i", &default_iface,
+        "-o", &network.tap_device,
+        "-m", "state", "--state", "RELATED,ESTABLISHED",
+        "-j", "ACCEPT",
+    ], &[
+        "-C", "FORWARD",
+        "-i", &default_iface,
+        "-o", &network.tap_device,
+        "-m", "state", "--state", "RELATED,ESTABLISHED",
+        "-j", "ACCEPT",
+    ]).await?;
+
+    tracing::info!("NAT rules configured");
+    Ok(())
+}
+
+async fn add_iptables_rule_if_missing(add_args: &[&str], check_args: &[&str]) -> anyhow::Result<()> {
+    // Check if rule exists
+    let status = Command::new("iptables")
+        .args(check_args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await?;
+
+    if status.success() {
+        return Ok(());
+    }
+
+    // Add the rule
+    let status = Command::new("iptables")
+        .args(add_args)
+        .status()
+        .await
+        .context("adding iptables rule")?;
+    ensure!(status.success(), "iptables rule failed: {:?}", add_args);
     Ok(())
 }
