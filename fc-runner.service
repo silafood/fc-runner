@@ -13,7 +13,8 @@ TimeoutStopSec=300
 Environment=RUST_LOG=fc_runner=info
 
 # Security hardening
-NoNewPrivileges=true
+# NoNewPrivileges breaks suid binaries like iptables
+# NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
