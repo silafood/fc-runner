@@ -18,7 +18,7 @@ Fine-grained tokens provide least-privilege access scoped to specific repositori
    (direct link: `https://github.com/settings/personal-access-tokens/new`)
 2. Set a descriptive name (e.g., `fc-runner`)
 3. Set **Expiration** — choose a reasonable period (90 days recommended, renew before expiry)
-4. Under **Repository access**, select **Only select repositories** and pick the repo(s) you want fc-runner to serve
+4. Under **Repository access**, select **Only select repositories** and pick **all** the repos you want fc-runner to serve (must match `repo`/`repos` in your config)
 5. Under **Permissions → Repository permissions**, grant:
 
    | Permission | Access | Why |
@@ -161,7 +161,25 @@ sudo nano /etc/fc-runner/config.toml
 At minimum, set:
 - `github.token` — your PAT
 - `github.owner` — repository owner
-- `github.repo` — repository name
+- `github.repo` — repository name (or `github.repos` for multiple)
+
+**Single repo:**
+```toml
+[github]
+token = "ghp_..."
+owner = "your-org"
+repo = "your-repo"
+```
+
+**Multiple repos under the same owner:**
+```toml
+[github]
+token = "ghp_..."
+owner = "your-org"
+repos = ["repo-one", "repo-two", "repo-three"]
+```
+
+Both `repo` and `repos` can be set — they are merged and deduplicated. All repos share the same token, labels, and runner group. When using fine-grained PATs, make sure the token has access to all listed repos.
 
 For production hardening, enable the jailer:
 ```toml

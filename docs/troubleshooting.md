@@ -77,12 +77,13 @@ df -Th /var/lib/fc-runner/vms
 
 ### GitHub API 422 on JIT config
 
-**Cause:** Wrong `runner_group_id` or PAT missing `repo` scope.
+**Cause:** Wrong `runner_group_id`, PAT missing required permissions, or PAT doesn't have access to one of the configured repos.
 
 **Fix:**
 - Verify `runner_group_id = 1` in config (1 is the default group)
-- Re-issue the PAT with `repo` scope
-- Check if the repository has self-hosted runners enabled in Settings > Actions > Runners
+- For classic PATs: ensure the `repo` scope is selected
+- For fine-grained PATs: ensure `Actions` (R/W) and `Administration` (R/W) permissions are granted for **all** repos listed in `repo`/`repos`
+- Check if each repository has self-hosted runners enabled in Settings > Actions > Runners
 
 ---
 
@@ -163,6 +164,7 @@ ERROR: GitHub API rate limit nearly exhausted, backing off
 
 **Fix:**
 - Increase `runner.poll_interval_secs` to reduce API calls
+- With multi-repo configs, each repo adds ~2 API calls per poll cycle — reduce the number of repos or increase the interval
 - Check if multiple instances of fc-runner are sharing the same PAT
 
 ---

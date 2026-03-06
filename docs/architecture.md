@@ -6,7 +6,7 @@ fc-runner follows a poll-dispatch-cleanup lifecycle:
 
 ```
 GitHub API ──poll──▶ Orchestrator ──spawn──▶ MicroVM (Firecracker)
-                        │                        │
+  (per repo)            │                        │
                    dedup via HashSet         COW rootfs + JIT token
                         │                        │
                    tokio::spawn              run job → exit → cleanup
@@ -18,10 +18,10 @@ GitHub API ──poll──▶ Orchestrator ──spawn──▶ MicroVM (Firecr
 Entry point. Loads configuration, initializes structured logging via `tracing`, sets up signal handlers (SIGTERM/SIGINT) for graceful shutdown, and launches the orchestrator.
 
 ### `config.rs`
-Parses `/etc/fc-runner/config.toml` into typed structs using `serde` + `toml`. Validates all paths exist at load time. Redacts the GitHub token in Debug output.
+Parses `/etc/fc-runner/config.toml` into typed structs using `serde` + `toml`. Validates all paths exist at load time. Redacts the GitHub token in Debug output. Supports both single `repo` and multi-repo `repos` fields (merged and deduplicated via `all_repos()`).
 
 ### `github.rs`
-HTTP client wrapping `reqwest`. Communicates with three GitHub REST API endpoints:
+HTTP client wrapping `reqwest`. All API methods accept a `repo` parameter, allowing a single client to serve multiple repositories under the same owner. Communicates with three GitHub REST API endpoints:
 
 | Method | Endpoint | Purpose |
 |--------|----------|---------|
@@ -43,16 +43,16 @@ Manages the full VM lifecycle through the `MicroVm` struct:
 Cleanup runs unconditionally, even if earlier steps fail.
 
 ### `orchestrator.rs`
-Async poll loop using `tokio::time::interval`. Each cycle:
+Async poll loop using `tokio::time::interval`. Each cycle iterates over all configured repos:
 
-1. Fetches queued runs from GitHub
+1. For each repo, fetches queued runs from GitHub
 2. For each run, fetches queued jobs
 3. Filters jobs by label match
-4. Deduplicates via `HashSet<u64>` of job IDs
+4. Deduplicates via `HashSet<u64>` of job IDs (shared across all repos)
 5. Acquires a semaphore permit (bounded by `max_concurrent_jobs`)
-6. Spawns a `tokio::spawn` task per new job
+6. Spawns a `tokio::spawn` task per new job with its repo context
 
-The job ID is removed from the seen set after the task completes, allowing retry if the VM failed before the runner registered. Active job count is tracked for graceful shutdown.
+The job ID is removed from the seen set after the task completes, allowing retry if the VM failed before the runner registered. Active job count is tracked for graceful shutdown. If one repo fails to poll, the others continue unaffected.
 
 ## Concurrency
 
