@@ -230,6 +230,10 @@ impl MicroVm {
         self.inject_env(jit_token, repo_url).await?;
         self.write_vm_config().await?;
 
+        // Pre-create log file so Firecracker can open it
+        tokio::fs::write(&self.log_path, "").await
+            .context("creating log file")?;
+
         tracing::info!(vm_id = %self.vm_id, "launching firecracker");
         let exit_status = self.run().await?;
         tracing::info!(vm_id = %self.vm_id, code = ?exit_status.code(), "VM exited");
