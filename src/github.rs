@@ -136,7 +136,7 @@ impl GitHubClient {
     }
 
     pub async fn generate_jit_config(&self, repo: &str, job_id: u64) -> anyhow::Result<String> {
-        let url = format!("{}/actions/runners/generate-jit-config", self.repo_url(repo));
+        let url = format!("{}/actions/runners/generate-jitconfig", self.repo_url(repo));
         let body = serde_json::json!({
             "name": format!("fc-{}", job_id),
             "runner_group_id": self.config.runner_group_id,
