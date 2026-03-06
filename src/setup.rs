@@ -10,11 +10,66 @@ const KERNEL_URL: &str =
 const RUNNER_VERSION: &str = "2.323.0";
 const ROOTFS_SIZE_MIB: u32 = 4096;
 
-/// Ensures all VM prerequisites are in place: kernel, rootfs, and network.
+/// Ensures all VM prerequisites are in place: KVM, kernel, rootfs, and network.
 pub async fn ensure_vm_assets(config: &AppConfig) -> anyhow::Result<()> {
+    preflight_kvm()?;
     ensure_kernel(&config.firecracker.kernel_path).await?;
     ensure_golden_rootfs(&config.firecracker.rootfs_golden, &config.network).await?;
     ensure_network(&config.network).await?;
+    Ok(())
+}
+
+/// Verifies KVM is available and the current user has access.
+fn preflight_kvm() -> anyhow::Result<()> {
+    // Check CPU virtualization support
+    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+    let virt_count = cpuinfo
+        .lines()
+        .filter(|l| l.contains("vmx") || l.contains("svm"))
+        .count();
+    if virt_count == 0 {
+        anyhow::bail!(
+            "CPU virtualization (VT-x/AMD-V) not detected in /proc/cpuinfo.\n\
+             Firecracker requires hardware virtualization support.\n\
+             If running inside a VM, enable nested virtualization on the host."
+        );
+    }
+    tracing::info!(virt_extensions = virt_count, "CPU virtualization support detected");
+
+    // Check /dev/kvm exists
+    let kvm_path = Path::new("/dev/kvm");
+    if !kvm_path.exists() {
+        anyhow::bail!(
+            "/dev/kvm not found. Load the KVM module:\n\
+             \n\
+             Intel: sudo modprobe kvm_intel\n\
+             AMD:   sudo modprobe kvm_amd"
+        );
+    }
+
+    // Check current user can access /dev/kvm
+    use std::fs::OpenOptions;
+    match OpenOptions::new().read(true).write(true).open(kvm_path) {
+        Ok(_) => {
+            tracing::info!("/dev/kvm is accessible");
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            let user = std::env::var("USER").unwrap_or_else(|_| "your-user".into());
+            anyhow::bail!(
+                "Permission denied on /dev/kvm. Add your user to the kvm group:\n\
+                 \n\
+                 sudo usermod -aG kvm {user}\n\
+                 newgrp kvm\n\
+                 \n\
+                 Then restart fc-runner.",
+                user = user,
+            );
+        }
+        Err(e) => {
+            anyhow::bail!("Cannot open /dev/kvm: {}", e);
+        }
+    }
+
     Ok(())
 }
 

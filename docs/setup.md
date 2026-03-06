@@ -3,10 +3,35 @@
 ## Prerequisites
 
 - **Linux host** running Pop!_OS or Ubuntu 24.04 (bare-metal or nested virt enabled)
-- **KVM support** — verify with `lsmod | grep kvm`
-- **Root access** — Firecracker and loop mounts require root
 - **Rust toolchain** — install via [rustup](https://rustup.rs/)
 - **GitHub PAT** with `repo` scope
+
+### KVM Setup (one-time, requires sudo)
+
+fc-runner checks KVM access automatically at startup and will provide clear error messages if something is missing. Here's how to set it up:
+
+```bash
+# 1. Verify CPU supports virtualization (must return > 0)
+grep -Eoc '(vmx|svm)' /proc/cpuinfo
+
+# 2. Load KVM module if not already loaded
+sudo modprobe kvm_intel   # Intel CPUs
+# or
+sudo modprobe kvm_amd     # AMD CPUs
+
+# 3. Verify /dev/kvm exists
+ls -la /dev/kvm
+# Should show: crw-rw---- 1 root kvm ...
+
+# 4. Add your user to the kvm group (avoids needing root for KVM access)
+sudo usermod -aG kvm $USER
+newgrp kvm
+```
+
+After this, fc-runner handles everything else automatically at startup:
+- Downloads the guest kernel if missing
+- Builds the golden rootfs if missing
+- Creates TAP device and configures NAT rules
 
 ## Quick Start
 
@@ -20,19 +45,19 @@ cargo build --release
 
 ### 2. Run the install script
 
-The install script sets up the host: downloads Firecracker, builds the golden rootfs, configures TAP networking, and installs the systemd service.
+The install script installs system dependencies, Firecracker binaries, config files, and the systemd service.
 
 ```bash
 sudo bash install.sh
 ```
 
 This will:
+- Install system dependencies (debootstrap, curl, jq, iptables, etc.)
 - Install Firecracker v1.14.2 and jailer to `/usr/local/bin/`
-- Download the AWS quickstart kernel to `/opt/fc-runner/vmlinux.bin`
-- Debootstrap an Ubuntu 24.04 rootfs with the GitHub Actions runner pre-installed
-- Create TAP device `tap-fc0` with NAT via iptables
-- Copy config templates to `/etc/fc-runner/`
+- Create directories and copy config templates to `/etc/fc-runner/`
 - Install and enable the `fc-runner.service` systemd unit
+
+Kernel download, rootfs building, and network setup are handled automatically by fc-runner at startup.
 
 ### 3. Configure
 
