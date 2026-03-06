@@ -9,7 +9,7 @@ echo "NOTE: Network setup (TAP, NAT, IP forwarding) is handled by fc-runner at s
 # --- 1. System dependencies ---
 echo "[1/5] Installing system dependencies..."
 apt-get update -qq
-apt-get install -y -qq debootstrap curl jq e2fsprogs unzip wget iptables iproute2 apparmor-utils
+apt-get install -y -qq debootstrap curl jq e2fsprogs unzip wget iptables ipset iproute2 apparmor-utils
 
 # --- 2. Firecracker binaries ---
 echo "[2/5] Installing Firecracker v${FC_VERSION}..."

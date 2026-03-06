@@ -508,26 +508,53 @@ async fn ensure_nat_rules(network: &NetworkConfig) -> anyhow::Result<()> {
             "-j", "ACCEPT",
         ]).await?;
     } else {
-        // Allowlist mode — only permit traffic to resolved CIDRs
+        // Allowlist mode — use ipset for efficient matching (thousands of CIDRs)
         tracing::info!(
             count = network.resolved_networks.len(),
-            "applying network allowlist (only listed CIDRs reachable from guest)"
+            "applying network allowlist via ipset"
         );
+
+        // Create/flush ipset
+        let _ = Command::new("ipset")
+            .args(["destroy", "fc-allowed"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+
+        let status = Command::new("ipset")
+            .args(["create", "fc-allowed", "hash:net", "family", "inet", "hashsize", "16384", "maxelem", "65536"])
+            .status()
+            .await
+            .context("creating ipset fc-allowed")?;
+        ensure!(status.success(), "ipset create failed");
+
+        // Add all CIDRs to the set
         for cidr in &network.resolved_networks {
-            add_iptables_rule_if_missing(&[
-                "-A", "FORWARD",
-                "-i", &network.tap_device,
-                "-o", &default_iface,
-                "-d", cidr,
-                "-j", "ACCEPT",
-            ], &[
-                "-C", "FORWARD",
-                "-i", &network.tap_device,
-                "-o", &default_iface,
-                "-d", cidr,
-                "-j", "ACCEPT",
-            ]).await?;
+            let status = Command::new("ipset")
+                .args(["add", "fc-allowed", cidr, "-exist"])
+                .status()
+                .await
+                .context("adding CIDR to ipset")?;
+            if !status.success() {
+                tracing::warn!(cidr = %cidr, "failed to add CIDR to ipset, skipping");
+            }
         }
+
+        // Single iptables rule matching the ipset
+        add_iptables_rule_if_missing(&[
+            "-A", "FORWARD",
+            "-i", &network.tap_device,
+            "-o", &default_iface,
+            "-m", "set", "--match-set", "fc-allowed", "dst",
+            "-j", "ACCEPT",
+        ], &[
+            "-C", "FORWARD",
+            "-i", &network.tap_device,
+            "-o", &default_iface,
+            "-m", "set", "--match-set", "fc-allowed", "dst",
+            "-j", "ACCEPT",
+        ]).await?;
 
         // Drop all other outbound traffic from TAP
         add_iptables_rule_if_missing(&[
@@ -542,7 +569,7 @@ async fn ensure_nat_rules(network: &NetworkConfig) -> anyhow::Result<()> {
             "-j", "DROP",
         ]).await?;
 
-        tracing::info!("network allowlist applied — unmatched outbound traffic will be dropped");
+        tracing::info!("network allowlist applied via ipset — unmatched outbound traffic will be dropped");
     }
 
     // FORWARD — allow established return traffic
