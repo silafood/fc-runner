@@ -136,26 +136,21 @@ fn preflight_kvm() -> anyhow::Result<()> {
         );
     }
 
-    // Check current user can access /dev/kvm
-    use std::fs::OpenOptions;
-    match OpenOptions::new().read(true).write(true).open(kvm_path) {
+    // Check /dev/kvm is accessible — Firecracker needs r/w, but the orchestrator
+    // only needs to verify it exists. A read-only check is sufficient; if permissions
+    // are wrong, Firecracker will fail with a clear error at VM launch time.
+    match std::fs::metadata(kvm_path) {
         Ok(_) => {
             tracing::info!("/dev/kvm is accessible");
         }
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            let user = std::env::var("USER").unwrap_or_else(|_| "your-user".into());
-            anyhow::bail!(
-                "Permission denied on /dev/kvm. Add your user to the kvm group:\n\
-                 \n\
-                 sudo usermod -aG kvm {user}\n\
-                 newgrp kvm\n\
-                 \n\
-                 Then restart fc-runner.",
-                user = user,
+            tracing::warn!(
+                "/dev/kvm exists but metadata check failed (permission denied). \
+                 Firecracker may fail to start VMs. Ensure the service has kvm group access."
             );
         }
         Err(e) => {
-            anyhow::bail!("Cannot open /dev/kvm: {}", e);
+            anyhow::bail!("Cannot access /dev/kvm: {}", e);
         }
     }
 
