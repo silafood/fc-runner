@@ -538,8 +538,11 @@ async fn ensure_nat_rules(network: &NetworkConfig) -> anyhow::Result<()> {
             .context("creating ipset fc-allowed")?;
         ensure!(status.success(), "ipset create failed");
 
-        // Add all CIDRs to the set
+        // Add all IPv4 CIDRs to the set (skip IPv6 — NAT is IPv4 only)
         for cidr in &network.resolved_networks {
+            if cidr.contains(':') {
+                continue; // Skip IPv6
+            }
             let status = Command::new("ipset")
                 .args(["add", "fc-allowed", cidr, "-exist"])
                 .status()
