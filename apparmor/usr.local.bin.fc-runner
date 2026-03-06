@@ -26,11 +26,15 @@
   # Mount operations for rootfs injection (loop devices needed)
   capability sys_admin,
   capability mknod,
-  mount fstype=ext4 /var/lib/fc-runner/vms/*.ext4 -> /var/lib/fc-runner/vms/*/,
-  mount options=(rw,loop) /var/lib/fc-runner/vms/*.ext4 -> /var/lib/fc-runner/vms/*/,
-  umount /var/lib/fc-runner/vms/*/,
+  mount,
+  umount,
   /dev/loop-control rw,
   /dev/loop* rw,
+  /proc/*/mounts r,
+  /proc/*/mountinfo r,
+  /sys/block/ r,
+  /sys/block/** r,
+  /sys/devices/virtual/block/** r,
 
   # Spawn Firecracker child processes
   /usr/local/bin/firecracker Px,
