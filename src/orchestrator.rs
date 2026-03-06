@@ -154,13 +154,21 @@ impl Orchestrator {
             *active_jobs.lock().await += 1;
             tracing::info!(job_id, repo = %repo, "job started (permit acquired)");
 
-            if let Err(e) = run_job(config.clone(), github, job_id, &repo).await {
-                tracing::error!(job_id, repo = %repo, error = %e, "job failed");
-            }
+            let result = run_job(config.clone(), github, job_id, &repo).await;
 
             *active_jobs.lock().await -= 1;
-            seen_jobs.lock().await.remove(&job_id);
-            tracing::info!(job_id, repo = %repo, "job completed (permit released)");
+            match result {
+                Ok(()) => {
+                    // Job succeeded — remove from seen set so it won't block future runs
+                    seen_jobs.lock().await.remove(&job_id);
+                    tracing::info!(job_id, repo = %repo, "job completed successfully (permit released)");
+                }
+                Err(e) => {
+                    // Job failed — keep in seen set to prevent infinite retry loop.
+                    // The job will stay "seen" until the orchestrator restarts.
+                    tracing::error!(job_id, repo = %repo, error = %e, "job failed (will not retry)");
+                }
+            }
         });
     }
 }

@@ -149,11 +149,15 @@ impl GitHubClient {
             .send()
             .await?;
         self.check_rate_limit(&resp).await;
-        let data = resp
-            .error_for_status()
-            .with_context(|| format!("generating JIT config for {}/{} job {}", self.config.owner, repo, job_id))?
-            .json::<JitConfigResponse>()
-            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "JIT config for {}/{} job {} failed (HTTP {}): {}",
+                self.config.owner, repo, job_id, status, body
+            );
+        }
+        let data = resp.json::<JitConfigResponse>().await?;
         Ok(data.encoded_jit_config)
     }
 }
