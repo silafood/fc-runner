@@ -37,15 +37,19 @@ fi
 echo "[4/6] Creating directories..."
 mkdir -p /etc/fc-runner
 mkdir -p /var/lib/fc-runner/vms
+mkdir -p /opt/fc-runner
 
 # --- 5. Config files ---
 echo "[5/6] Installing config files..."
 if [ ! -f /etc/fc-runner/config.toml ]; then
     cp config.toml.example /etc/fc-runner/config.toml
+    chmod 0600 /etc/fc-runner/config.toml
     echo "  Copied config.toml.example -> /etc/fc-runner/config.toml (edit with your token!)"
 else
     echo "  /etc/fc-runner/config.toml already exists — not overwriting."
 fi
+# Ensure config is not world-readable (fc-runner refuses to start otherwise)
+chmod 0600 /etc/fc-runner/config.toml
 cp vm-config.json.template /etc/fc-runner/vm-config.json.template
 
 # --- 6. Systemd service ---

@@ -5,7 +5,6 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStartPre=/bin/mkdir -p /var/lib/fc-runner/vms /opt/fc-runner
 ExecStart=/usr/local/bin/fc-runner /etc/fc-runner/config.toml
 Restart=on-failure
 RestartSec=5
