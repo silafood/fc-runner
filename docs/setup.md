@@ -33,8 +33,12 @@ ls -la /dev/kvm
 
 # 4. Add your user to the kvm group (avoids needing root for KVM access)
 sudo usermod -aG kvm $USER
+# Apply the new group (or log out and back in)
 newgrp kvm
 ```
+
+> **Note:** `newgrp kvm` starts a new shell to apply the group immediately. If it
+> causes issues with your shell profile, simply log out and back in instead.
 
 You can also check manually:
 ```bash

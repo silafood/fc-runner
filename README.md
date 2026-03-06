@@ -65,9 +65,8 @@ lscpu | grep "Vendor ID"
 sudo modprobe kvm_intel   # Intel (GenuineIntel)
 sudo modprobe kvm_amd     # AMD (AuthenticAMD)
 
-# Add your user to the kvm group
+# Add your user to the kvm group (then log out/in, or use: newgrp kvm)
 sudo usermod -aG kvm $USER
-newgrp kvm
 ```
 
 ## Quick Start
