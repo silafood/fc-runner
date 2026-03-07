@@ -79,6 +79,8 @@ pub struct FirecrackerConfig {
     /// Chroot base directory for jailer (default: /srv/jailer)
     #[serde(default = "default_jailer_chroot_base")]
     pub jailer_chroot_base: String,
+    /// URL for the cloud image used to build the golden rootfs (optional, has default)
+    pub cloud_img_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -155,6 +157,7 @@ fn default_log_level() -> String {
 fn default_jailer_chroot_base() -> String {
     "/srv/jailer".into()
 }
+
 
 fn default_work_dir() -> String {
     "/var/lib/fc-runner/vms".into()

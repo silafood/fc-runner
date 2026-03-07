@@ -8,7 +8,7 @@ use crate::config::{AppConfig, NetworkConfig};
 const KERNEL_URL: &str =
     "https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin";
 const RUNNER_VERSION: &str = "2.332.0";
-const CLOUD_IMG_URL: &str =
+const DEFAULT_CLOUD_IMG_URL: &str =
     "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img";
 
 /// Ensures all VM prerequisites are in place: KVM, kernel, rootfs, network, and AppArmor.
@@ -16,7 +16,8 @@ pub async fn ensure_vm_assets(config: &mut AppConfig) -> anyhow::Result<()> {
     preflight_kvm()?;
     resolve_allowed_networks(&mut config.network, &config.github.token).await?;
     ensure_kernel(&config.firecracker.kernel_path).await?;
-    ensure_golden_rootfs(&config.firecracker.rootfs_golden, &config.network).await?;
+    let cloud_img_url = config.firecracker.cloud_img_url.as_deref().unwrap_or(DEFAULT_CLOUD_IMG_URL);
+    ensure_golden_rootfs(&config.firecracker.rootfs_golden, cloud_img_url, &config.network).await?;
     ensure_network(&config.network).await?;
     ensure_apparmor(&config.firecracker.binary_path).await?;
     Ok(())
@@ -190,7 +191,7 @@ async fn ensure_kernel(kernel_path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn ensure_golden_rootfs(rootfs_path: &str, network: &NetworkConfig) -> anyhow::Result<()> {
+async fn ensure_golden_rootfs(rootfs_path: &str, cloud_img_url: &str, network: &NetworkConfig) -> anyhow::Result<()> {
     if Path::new(rootfs_path).exists() {
         tracing::info!(path = rootfs_path, "golden rootfs already exists");
         return Ok(());
@@ -209,7 +210,7 @@ async fn ensure_golden_rootfs(rootfs_path: &str, network: &NetworkConfig) -> any
     if !Path::new(&cloud_img).exists() {
         tracing::info!("downloading Ubuntu minimal cloud image...");
         let status = Command::new("curl")
-            .args(["-fSL", "--proto", "=https", "--tlsv1.2", "-o", &cloud_img, CLOUD_IMG_URL])
+            .args(["-fSL", "--proto", "=https", "--tlsv1.2", "-o", &cloud_img, cloud_img_url])
             .status()
             .await
             .context("downloading cloud image")?;
