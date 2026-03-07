@@ -256,87 +256,90 @@ async fn ensure_golden_rootfs(rootfs_path: &str, cloud_img_url: &str, network: &
         tracing::info!(bytes = offset, "qcow2 → raw conversion complete");
     }
 
-    // Attach with partition scanning and find the ext4 partition
-    let output = Command::new("losetup")
-        .args(["--find", "--show", "--partscan", &raw_img])
-        .output()
-        .await
-        .context("losetup")?;
-    ensure!(output.status.success(), "losetup failed");
-    let loop_dev = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    tracing::info!(loop_dev = %loop_dev, "attached raw image to loop device");
+    // Find ext4 partition and extract it (pure Rust — no losetup/blkid/dd)
+    {
+        let raw_img_clone = raw_img.clone();
+        let rootfs_out = rootfs_path.to_string();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            use std::io::{Read, Seek, SeekFrom, Write};
 
-    // Trigger partition re-read and wait for partition devices to appear
-    let _ = Command::new("partprobe").arg(&loop_dev).status().await;
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let mut img = std::fs::File::open(&raw_img_clone)
+                .context("opening raw image")?;
 
-    // Log what partitions the kernel found
-    let ls_out = Command::new("ls")
-        .arg("-la")
-        .arg(format!("{}p*", loop_dev))
-        .output()
-        .await;
-    if let Ok(out) = &ls_out {
-        tracing::info!(partitions = %String::from_utf8_lossy(&out.stdout).trim(), "partition devices found");
-    }
+            // Parse partition table (GPT or MBR)
+            let partitions = bootsector::list_partitions(&mut img, &bootsector::Options::default())
+                .map_err(|e| anyhow::anyhow!("failed to parse partition table: {:?}", e))?;
 
-    // Find the ext4 partition (scan p1 through p15)
-    let mut ext4_part = String::new();
-    for i in 1..=15 {
-        let part = format!("{}p{}", loop_dev, i);
-        if !std::path::Path::new(&part).exists() {
-            continue;
-        }
-        let blkid_out = Command::new("blkid")
-            .arg(&part)
-            .output()
-            .await;
-        if let Ok(out) = blkid_out {
-            let info = String::from_utf8_lossy(&out.stdout);
-            tracing::info!(partition = %part, info = %info.trim(), "checking partition");
-            if out.status.success() && info.contains("ext4") {
-                ext4_part = part;
-                break;
+            tracing::info!(count = partitions.len(), "found partitions in raw image");
+
+            // Find the ext4 partition by checking superblock magic (0xEF53 at offset 1080)
+            let mut ext4_offset: Option<u64> = None;
+            let mut ext4_len: Option<u64> = None;
+            for part in &partitions {
+                tracing::info!(
+                    id = %part.id,
+                    first_byte = part.first_byte,
+                    len = part.len,
+                    "checking partition for ext4"
+                );
+                // ext4 superblock is at byte 1024 within the partition,
+                // magic number (0xEF53) is at offset 0x38 (56) within the superblock
+                img.seek(SeekFrom::Start(part.first_byte + 1024 + 56))?;
+                let mut magic = [0u8; 2];
+                if img.read_exact(&mut magic).is_ok() && u16::from_le_bytes(magic) == 0xEF53 {
+                    tracing::info!(id = %part.id, offset = part.first_byte, "found ext4 partition");
+                    ext4_offset = Some(part.first_byte);
+                    ext4_len = Some(part.len);
+                    break;
+                }
             }
-        }
-    }
-    if ext4_part.is_empty() {
-        // Also try the loop device itself (no partition table, raw ext4)
-        let blkid_out = Command::new("blkid").arg(&loop_dev).output().await;
-        if let Ok(out) = blkid_out {
-            let info = String::from_utf8_lossy(&out.stdout);
-            tracing::info!(device = %loop_dev, info = %info.trim(), "checking loop device directly");
-            if out.status.success() && info.contains("ext4") {
-                ext4_part = loop_dev.clone();
+
+            // Also check if the whole image is raw ext4 (no partition table match)
+            if ext4_offset.is_none() {
+                img.seek(SeekFrom::Start(1024 + 56))?;
+                let mut magic = [0u8; 2];
+                if img.read_exact(&mut magic).is_ok() && u16::from_le_bytes(magic) == 0xEF53 {
+                    let file_len = img.metadata()?.len();
+                    tracing::info!("raw image is ext4 (no partition table)");
+                    ext4_offset = Some(0);
+                    ext4_len = Some(file_len);
+                }
             }
-        }
-    }
-    if ext4_part.is_empty() {
-        let _ = Command::new("losetup").args(["-d", &loop_dev]).status().await;
-        let _ = tokio::fs::remove_file(&raw_img).await;
-        anyhow::bail!("no ext4 partition found in cloud image");
-    }
 
-    tracing::info!(partition = %ext4_part, "found ext4 partition, extracting...");
-    let status = Command::new("dd")
-        .arg(format!("if={}", ext4_part))
-        .arg(format!("of={}", rootfs_path))
-        .args(["bs=4M", "status=progress"])
-        .status()
+            let offset = ext4_offset
+                .ok_or_else(|| anyhow::anyhow!("no ext4 partition found in cloud image"))?;
+            let len = ext4_len.unwrap();
+
+            // Extract partition to rootfs file
+            tracing::info!(offset, len, "extracting ext4 partition...");
+            img.seek(SeekFrom::Start(offset))?;
+            let mut output = std::fs::File::create(&rootfs_out)
+                .context("creating rootfs file")?;
+
+            let buf_size: usize = 4 * 1024 * 1024; // 4 MiB
+            let mut buf = vec![0u8; buf_size];
+            let mut remaining = len;
+            while remaining > 0 {
+                let to_read = std::cmp::min(buf_size as u64, remaining) as usize;
+                let n = img.read(&mut buf[..to_read])?;
+                if n == 0 { break; }
+                output.write_all(&buf[..n])?;
+                remaining -= n as u64;
+            }
+            output.flush()?;
+            tracing::info!("ext4 partition extracted");
+
+            // Expand to 4GB
+            let file = std::fs::OpenOptions::new().write(true).open(&rootfs_out)?;
+            file.set_len(4 * 1024 * 1024 * 1024)?;
+            tracing::info!("rootfs expanded to 4 GiB");
+
+            Ok(())
+        })
         .await
-        .context("dd partition extraction")?;
-    ensure!(status.success(), "dd partition extraction failed");
-
-    let _ = Command::new("losetup").args(["-d", &loop_dev]).status().await;
+        .context("partition extraction task panicked")??;
+    }
     let _ = tokio::fs::remove_file(&raw_img).await;
-
-    // ── Step 3: Expand to 4GB, fix filesystem, resize ───────────────
-    let status = Command::new("truncate")
-        .args(["-s", "4G", rootfs_path])
-        .status()
-        .await
-        .context("truncate")?;
-    ensure!(status.success(), "truncate failed");
 
     let _ = Command::new("e2fsck")
         .args(["-f", "-y", rootfs_path])
