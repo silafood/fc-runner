@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::config::{FirecrackerConfig, NetworkConfig};
 use crate::netlink;
+use crate::vsock;
 
 /// Mount an ext4 image via loop (read-write).
 ///
@@ -282,8 +283,13 @@ impl MicroVm {
         let _ = tokio::fs::remove_dir(&self.mount_point).await;
     }
 
+    /// Compute the VSOCK CID for this VM (cid_base + slot).
+    fn vsock_cid(&self) -> u32 {
+        self.fc_config.vsock_cid_base + self.slot as u32
+    }
+
     async fn write_vm_config(&self) -> anyhow::Result<()> {
-        let config = serde_json::json!({
+        let mut config = serde_json::json!({
             "boot-source": {
                 "kernel_image_path": self.fc_config.kernel_path,
                 "boot_args": self.fc_config.boot_args
@@ -308,6 +314,23 @@ impl MicroVm {
                 "level": self.fc_config.log_level
             }
         });
+
+        // Add VSOCK device when enabled
+        if self.fc_config.vsock_enabled {
+            let cid = self.vsock_cid();
+            let uds_path = path_str(&self.socket_path)?;
+            config["vsock"] = serde_json::json!({
+                "guest_cid": cid,
+                "uds_path": uds_path
+            });
+            tracing::info!(
+                vm_id = %self.vm_id,
+                cid,
+                uds_path,
+                "VSOCK device configured"
+            );
+        }
+
         let rendered = serde_json::to_string_pretty(&config)
             .context("serializing VM config")?;
         tokio::fs::write(&self.config_path, rendered).await?;
@@ -410,8 +433,22 @@ impl MicroVm {
         tokio::fs::write(&self.log_path, "").await
             .context("creating log file")?;
 
+        // Spawn VSOCK listener before VM starts (if enabled)
+        let vsock_handle = if self.fc_config.vsock_enabled {
+            let cid = self.vsock_cid();
+            tracing::info!(vm_id = %self.vm_id, cid, "spawning VSOCK listener");
+            Some(vsock::spawn_listener(self.vm_id.clone(), cid))
+        } else {
+            None
+        };
+
         tracing::info!(vm_id = %self.vm_id, "launching firecracker");
         let run_result = self.run().await;
+
+        // Abort VSOCK listener when VM exits
+        if let Some(handle) = vsock_handle {
+            handle.abort();
+        }
 
         // Always dump guest log, regardless of how the VM exited
         self.dump_guest_log().await;

@@ -4,6 +4,7 @@ mod github;
 mod netlink;
 mod orchestrator;
 mod setup;
+mod vsock;
 
 use std::sync::Arc;
 
