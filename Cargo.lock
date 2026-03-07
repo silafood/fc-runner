@@ -840,8 +840,7 @@ dependencies = [
 [[package]]
 name = "qcow2"
 version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b209daa5b363e3e0947d3deac3e9095626e2a20d9cf8c6d3dda640d6e73138fa"
+source = "git+https://github.com/vasi/qcow2-rs#3ed3ff55b96a2f519216ace7b3a02ac29bf8ba65"
 dependencies = [
  "byteorder",
  "lru-cache",
