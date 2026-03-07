@@ -8,7 +8,7 @@ ROOTFS="/opt/fc-runner/runner-rootfs-golden.ext4"
 KERNEL="/opt/fc-runner/vmlinux.bin"
 MNT="/opt/fc-runner/rootfs-build"
 RUNNER_VERSION="2.332.0"
-KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.11/x86_64/vmlinux-6.1.102"
+KERNEL_URL="https://github.com/silafood/fc-runner/releases/download/v0.1.0/vmlinux-6.1.102"
 CLOUD_IMG_URL="https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img"
 CLOUD_IMG="/opt/fc-runner/cloud-base.img"
 
