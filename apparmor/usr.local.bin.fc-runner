@@ -19,9 +19,11 @@
   /var/lib/fc-runner/vms/ rw,
   /var/lib/fc-runner/vms/** rwl,
 
-  # Golden rootfs and kernel (read-only, or write during initial provisioning)
+  # Golden rootfs and kernel (read/write during provisioning)
+  # ix on **.mnt/** allows executing binaries inside chroot during rootfs build
   /opt/fc-runner/ rw,
   /opt/fc-runner/** rw,
+  /opt/fc-runner/**.mnt/** ixrw,
 
   # Mount operations for rootfs injection (loop devices needed)
   capability sys_admin,
@@ -73,6 +75,8 @@
   /{usr/,}{s,}bin/resize2fs ix,
   /{usr/,}{s,}bin/dumpe2fs ix,
   /etc/e2fsck.conf r,
+  /run/blkid/ r,
+  /run/blkid/** rw,
 
   # Systemctl for masking services during rootfs build
   /{usr/,}bin/systemctl ix,
