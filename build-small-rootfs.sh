@@ -96,6 +96,10 @@ chroot "$MNT" bash -c "
     rm -rf /var/lib/apt/lists/*
 "
 
+# Ensure /var/tmp exists (systemd-resolved needs it for PrivateTmp namespace)
+mkdir -p "$MNT/var/tmp"
+chmod 1777 "$MNT/var/tmp"
+
 # Restore systemd-resolved symlink
 rm -f "$MNT/etc/resolv.conf"
 ln -s /run/systemd/resolve/stub-resolv.conf "$MNT/etc/resolv.conf"

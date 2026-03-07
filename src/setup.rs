@@ -410,6 +410,11 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
         .context("installing packages in chroot")?;
     ensure!(status.success(), "apt-get install failed");
 
+    // Ensure /var/tmp exists (systemd-resolved needs it for PrivateTmp namespace)
+    let var_tmp = format!("{}/var/tmp", mount_dir);
+    tokio::fs::create_dir_all(&var_tmp).await?;
+    let _ = Command::new("chmod").args(["1777", &var_tmp]).status().await;
+
     // Restore systemd-resolved symlink
     let _ = tokio::fs::remove_file(&resolv_path).await;
     tokio::fs::symlink("/run/systemd/resolve/stub-resolv.conf", &resolv_path).await?;
