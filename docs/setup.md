@@ -107,22 +107,11 @@ newgrp kvm
 > **Note:** `newgrp kvm` starts a new shell to apply the group immediately. If it
 > causes issues with your shell profile, simply log out and back in instead.
 
-You can also check manually:
-```bash
-# Quick check: "vmx" = Intel, "svm" = AMD
-grep -Eoc 'vmx' /proc/cpuinfo   # Intel (VT-x)
-grep -Eoc 'svm' /proc/cpuinfo   # AMD (AMD-V)
-
-# Or use lscpu
-lscpu | grep "Vendor ID"
-# GenuineIntel → use kvm_intel
-# AuthenticAMD → use kvm_amd
-```
-
-After this, fc-runner handles everything else automatically at startup:
+After KVM is set up, fc-runner handles everything else automatically at startup:
 - Downloads the guest kernel if missing
-- Builds the golden rootfs if missing
-- Creates TAP device and configures NAT rules
+- Builds the golden rootfs from an Ubuntu cloud image if missing
+- Creates per-VM TAP devices and configures NAT rules
+- Loads AppArmor profiles if available
 
 ## Quick Start
 
@@ -143,9 +132,10 @@ sudo bash install.sh
 ```
 
 This will:
-- Install system dependencies (debootstrap, curl, jq, iptables, etc.)
+- Install system dependencies (curl, jq, iptables, etc.)
 - Install Firecracker v1.14.2 and jailer to `/usr/local/bin/`
 - Create directories and copy config templates to `/etc/fc-runner/`
+- Install AppArmor profiles to `/etc/apparmor.d/`
 - Install and enable the `fc-runner.service` systemd unit
 
 Kernel download, rootfs building, and network setup are handled automatically by fc-runner at startup.
@@ -198,6 +188,18 @@ sudo systemctl start fc-runner
 sudo journalctl -u fc-runner -f
 ```
 
+On first startup, fc-runner will:
+1. Verify KVM access
+2. Download the guest kernel (~5 MB) if not present
+3. Build the golden rootfs from an Ubuntu 24.04 cloud image (~2-3 minutes):
+   - Download cloud image, convert qcow2 to raw, extract ext4 partition
+   - Install packages (git, curl, jq, actions-runner) via chroot
+   - Create runner user and entrypoint script
+   - Shrink image to minimum size
+4. Configure TAP networking and iptables NAT rules
+5. Load AppArmor profiles
+6. Begin polling GitHub for queued jobs
+
 ### 5. Trigger a workflow
 
 Push a commit or manually trigger a workflow in your repo that uses:
@@ -220,12 +222,41 @@ firecracker --version
 # Check KVM is available
 ls /dev/kvm
 
-# Check TAP interface
-ip addr show tap-fc0
-
-# Check golden rootfs exists
+# Check golden rootfs exists (built automatically on first start)
 ls -lh /opt/fc-runner/runner-rootfs-golden.ext4
+
+# Check kernel exists (downloaded automatically on first start)
+ls -lh /opt/fc-runner/vmlinux.bin
+
+# Check AppArmor profiles are enforced
+sudo aa-status | grep -E '(firecracker|fc-runner)'
 
 # Check COW reflink support (btrfs/xfs only; ext4 falls back to full copy)
 df -Th /var/lib/fc-runner/vms
+```
+
+## Rebuilding the Golden Rootfs
+
+The golden rootfs is built automatically on first startup. To force a rebuild (e.g., to update packages or the runner version):
+
+```bash
+# Check no VMs are running first
+pgrep -x firecracker && echo "VMs running — wait" || echo "Safe to proceed"
+
+# Delete the golden image and restart
+sudo rm /opt/fc-runner/runner-rootfs-golden.ext4
+sudo systemctl restart fc-runner
+```
+
+fc-runner will detect the missing rootfs and rebuild it automatically.
+
+## Updating AppArmor Profiles
+
+After updating the AppArmor profile files in the repo:
+
+```bash
+sudo cp apparmor/usr.local.bin.fc-runner /etc/apparmor.d/
+sudo cp apparmor/usr.local.bin.firecracker /etc/apparmor.d/
+sudo apparmor_parser -r /etc/apparmor.d/usr.local.bin.fc-runner
+sudo apparmor_parser -r /etc/apparmor.d/usr.local.bin.firecracker
 ```

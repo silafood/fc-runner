@@ -27,7 +27,7 @@ Pop!_OS / Ubuntu 24.04.
    (default: `["self-hosted", "linux", "firecracker"]`).
 2. Requests a **JIT (Just-In-Time) runner token** for each new job.
 3. COW-copies a **golden ext4 rootfs** and injects the JIT token + repo URL into
-   `/etc/fc-runner-env` inside the image.
+   `/etc/fc-runner-env` inside the image, along with per-VM network config.
 4. Launches one **Firecracker microVM** per job — fully isolated, ~125 ms boot.
 5. Blocks until the VM exits (job complete), then **deletes all VM artefacts**.
 
@@ -56,8 +56,11 @@ fc-runner/
 ├── .github/workflows/
 │   └── release.yml       # CI: build binary + kernel + rootfs, publish release
 ├── Cargo.toml
+├── apparmor/
+│   ├── usr.local.bin.firecracker   # AppArmor profile for Firecracker VMM
+│   └── usr.local.bin.fc-runner     # AppArmor profile for orchestrator
+├── Cargo.toml
 ├── config.toml.example   # Annotated config — copy to /etc/fc-runner/config.toml
-├── vm-config.json.template  # Firecracker VM JSON with __PLACEHOLDERS__
 ├── fc-runner.service     # systemd unit
 ├── install.sh            # One-shot host setup script
 └── build-v611-linux.sh   # Manual golden rootfs + kernel provisioning script
@@ -81,7 +84,6 @@ You have access to the following tools — use them freely, but follow the
 | Path | What it is |
 |---|---|
 | `/etc/fc-runner/config.toml` | Live runtime config (token, repo, paths) |
-| `/etc/fc-runner/vm-config.json.template` | Firecracker VM JSON template |
 | `/opt/fc-runner/vmlinux.bin` | Guest kernel |
 | `/opt/fc-runner/runner-rootfs-golden.ext4` | Golden rootfs (never modified at runtime) |
 | `/var/lib/fc-runner/vms/` | Per-VM scratch files (rootfs copies, sockets) |
@@ -119,36 +121,24 @@ You have access to the following tools — use them freely, but follow the
 
 ### Boot flow
 ```
-build-v611-linux.sh (manual, run with sudo)
+setup.rs (automatic at first startup)
   └─ Downloads Ubuntu 24.04 minimal cloud image (qcow2)
-  └─ Extracts ext4 partition, expands to 4 GiB
-  └─ Installs: git, curl, jq, actions-runner v2.332.0
-  └─ Writes /entrypoint.sh (JIT runner → runs job → poweroff)
+  └─ Converts qcow2 → raw via qcow2-rs (pure Rust)
+  └─ Finds ext4 partition via bootsector crate + magic check (0xEF53)
+  └─ Extracts + expands ext4 image
+  └─ Mounts, installs packages via chroot: git, curl, jq, actions-runner v2.332.0
+  └─ Creates runner user, entrypoint, systemd units
+  └─ Shrinks to min + headroom via e2fsck + resize2fs
   └─ Produces runner-rootfs-golden.ext4
 
-OR setup.rs (automatic, pure Rust qcow2 conversion + bootsector partition parsing)
-  └─ Downloads cloud image, converts qcow2→raw via qcow2-rs
-  └─ Finds ext4 partition via bootsector crate + magic check (0xEF53)
-  └─ Mounts, customizes via chroot, shrinks to min + 512MB headroom
-
-Per-job (orchestrator.rs):
+Per-job (firecracker.rs):
   cp --reflink=auto golden.ext4 → /var/lib/fc-runner/vms/<vm-id>.ext4
-  mount image → write /etc/fc-runner-env → umount
   create TAP device (ioctl TUNSETIFF via netlink.rs)
-  firecracker --config-file <rendered-json> --no-api
-  wait for exit → delete TAP → rm *.ext4 *.sock *.json
+  mount image → write /etc/fc-runner-env + per-VM network config → umount
+  generate VM config JSON (serde_json, no template file)
+  firecracker --config-file <path> --no-api
+  wait for exit → dump guest log → delete TAP → rm *.ext4 *.json *.log
 ```
-
-### vm-config.json.template placeholders
-| Placeholder | Replaced with |
-|---|---|
-| `__KERNEL_PATH__` | `firecracker.kernel_path` from config |
-| `__ROOTFS_PATH__` | Per-VM COW copy path |
-| `__VCPU_COUNT__` | `firecracker.vcpu_count` |
-| `__MEM_MIB__` | `firecracker.mem_size_mib` |
-| `__TAP_IFACE__` | `firecracker.tap_interface` |
-| `__LOG_PATH__` | `/var/lib/fc-runner/vms/<vm-id>.log` |
-| `__VM_ID__` | UUID-based VM identifier |
 
 ### Host networking (per-VM TAP + NAT)
 ```
@@ -171,10 +161,10 @@ Boot args: `console=ttyS0 reboot=k panic=1 pci=off fsck.mode=skip quiet loglevel
 
 ### Security: jailer
 `jailer` chroots the VMM process, applies seccomp-BPF, and drops to a non-root
-UID/GID before the VMM starts. It is installed but not wired into the orchestrator
-by default. To enable it, replace the `Command::new(&self.cfg.binary_path)` call
-in `firecracker.rs` with a `jailer` invocation following the pattern in the
-README/document context.
+UID/GID before the VMM starts. It is wired into `firecracker.rs` — when
+`firecracker.jailer_path` is set in config (along with `jailer_uid` and
+`jailer_gid`), VMs automatically launch via jailer. Jailer chroot directories
+are cleaned up automatically after each VM exits.
 
 ---
 
@@ -241,14 +231,10 @@ curl -s \
   | jq '.runners[] | {id, name, status, labels: [.labels[].name]}'
 ```
 
-### Smoke-test Firecracker without a real job
+### Check AppArmor enforcement
 ```bash
-# Boot VM directly (will fail at runner registration without a valid token,
-# but verifies the kernel + rootfs + networking work)
-sudo firecracker \
-  --api-sock /tmp/test.sock \
-  --config-file /etc/fc-runner/vm-config.json.template \
-  --no-api
+sudo aa-status | grep -E '(firecracker|fc-runner)'
+sudo dmesg | grep DENIED | tail -20
 ```
 
 ### Verify COW reflink support
@@ -262,10 +248,9 @@ df -Th /var/lib/fc-runner/vms
 ```bash
 # Check no VMs are running first
 pgrep -x firecracker && echo "VMs running — wait before rebuilding rootfs" || echo "Safe to proceed"
-# Then re-run just the rootfs section of install.sh, or delete the golden image
-# to trigger a full rebuild on the next install.sh run:
+# Delete the golden image — fc-runner rebuilds automatically on next start
 sudo rm /opt/fc-runner/runner-rootfs-golden.ext4
-sudo bash install.sh   # confirm when prompted
+sudo systemctl restart fc-runner
 ```
 
 ---
@@ -280,7 +265,9 @@ sudo bash install.sh   # confirm when prompted
 | `cp --reflink` fails | `work_dir` is on tmpfs | Move `work_dir` to an ext4/btrfs mount |
 | GitHub API 422 on JIT config | Runner group ID wrong or PAT missing `repo` scope | Verify `runner_group_id = 1`; re-issue PAT |
 | Jobs dispatched twice | Poll interval < VM startup time | Increase `poll_interval_secs` or the `HashSet` dedup in `orchestrator.rs` will cover it |
-| Rootfs runs out of space mid-job | 4 GiB image too small for build artefacts | Increase `count=4096` in `dd` command and re-bootstrap |
+| Rootfs runs out of space mid-job | Image too small for build artefacts | Delete golden rootfs + restart to rebuild |
+| AppArmor `DENIED` | Missing permission in profile | Check `dmesg \| grep DENIED`, update profile, reload with `apparmor_parser -r` |
+| Guest VM emergency mode | Bad fstab or EFI mount units | Delete golden rootfs + restart (auto-fix in setup.rs) |
 
 ---
 
@@ -295,9 +282,8 @@ sudo bash install.sh   # confirm when prompted
 - **`--no-api` flag** — disables the Firecracker management API socket after
   boot. This reduces the attack surface and simplifies cleanup. Remove it only if
   you need to pause/snapshot VMs mid-job.
-- **`tokio::spawn` per job** — the orchestrator spawns an unbounded number of
-  concurrent tasks. Add a `tokio::sync::Semaphore` in `orchestrator.rs` if you
-  want to cap parallelism (e.g., limited by host RAM).
+- **`tokio::spawn` per job** — each job runs in its own tokio task. Concurrency
+  is bounded by a `tokio::sync::Semaphore` initialized from `max_concurrent_jobs`.
 - **Secret injection via mounted image** — credentials are written to ext4, not
   passed via kernel cmdline (which would appear in `/proc/cmdline` inside the VM).
   The file is deleted on VM teardown.

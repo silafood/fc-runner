@@ -25,7 +25,7 @@ GitHub Actions                fc-runner                    Firecracker
 
 - **Ephemeral VMs** — clean environment for every job, no cross-contamination
 - **Fast boot** — Firecracker microVMs start in ~125 ms
-- **Auto-provisioning** — kernel, golden rootfs, TAP networking, and NAT are set up automatically at first startup
+- **Auto-provisioning** — kernel download, golden rootfs build (from Ubuntu cloud image via pure Rust qcow2 conversion), per-VM TAP networking, and NAT are all set up automatically at first startup
 - **JIT tokens** — single-use, short-lived tokens (no static runner registration)
 - **Secret protection** — GitHub PAT stored via `secrecy::SecretString`, zeroized on drop, redacted in all logs
 - **AppArmor** — ships restrictive profiles for both `firecracker` and `fc-runner` binaries
@@ -43,7 +43,7 @@ GitHub Actions                fc-runner                    Firecracker
 | Orchestrator | Rust + Tokio (async) |
 | Hypervisor | Firecracker v1.14.2 |
 | Guest OS | Ubuntu 24.04 Noble |
-| Guest networking | virtio-net over TAP + iptables NAT |
+| Guest networking | virtio-net over per-VM TAP (pure Rust rtnetlink) + iptables NAT |
 | CI platform | GitHub Actions REST API |
 | Host init | systemd |
 | Security | AppArmor, secrecy, Firecracker jailer (optional) |
@@ -133,7 +133,7 @@ Full example at [`config.toml.example`](config.toml.example). Key sections:
 | `[github]` | `token`, `owner`, `repo` or `repos` (multi-repo), `runner_group_id` (default: 1), `labels` |
 | `[firecracker]` | `kernel_path`, `rootfs_golden`, `vcpu_count` (default: 2), `mem_size_mib` (default: 2048) |
 | `[runner]` | `work_dir`, `poll_interval_secs` (default: 5), `max_concurrent_jobs` (default: 4), `vm_timeout_secs` (default: 3600) |
-| `[network]` | `tap_device` (default: tap-fc0), `host_ip`, `guest_ip`, `cidr`, `dns` (default: 8.8.8.8, 1.1.1.1) |
+| `[network]` | `host_ip`, `guest_ip`, `cidr`, `dns` (default: 8.8.8.8, 1.1.1.1), `allowed_networks` |
 
 See [docs/configuration.md](docs/configuration.md) for the full reference.
 
@@ -195,16 +195,14 @@ fc-runner/
 ## Networking
 
 ```
-Host (172.16.0.1/24) ◄──► tap-fc0 ◄──► Guest eth0 (172.16.0.2/24)
+Host (172.16.<slot>.1/24) ◄──► tap-fc<slot> ◄──► Guest eth0 (172.16.<slot>.2/24)
          │
-    iptables MASQUERADE
+    iptables MASQUERADE + TCP MSS clamping
          │
       Internet / GitHub API
 ```
 
-TAP device, IP forwarding, and NAT rules are configured automatically at startup. All values are configurable via the `[network]` config section.
-
-For parallel VMs at scale, provision a TAP per VM with unique guest MAC/IP pairs.
+Each VM gets its own TAP device with a unique subnet. TAP creation uses pure Rust `ioctl(TUNSETIFF)` via the `nix` crate, and IP/link management uses the `rtnetlink` crate. IP forwarding and NAT rules are configured automatically at startup.
 
 ## Troubleshooting
 
@@ -215,7 +213,9 @@ For parallel VMs at scale, provision a TAP per VM with unique guest MAC/IP pairs
 | VM boots but runner never registers | Check JIT token, verify TAP NAT rules |
 | `mount: /dev/loop*: failed` | `sudo modprobe loop max_loop=64` |
 | GitHub API 422 on JIT config | Check `runner_group_id` and PAT `repo` scope |
-| Rootfs runs out of space | Increase `ROOTFS_SIZE_MIB` in `setup.rs` and rebuild |
+| Rootfs runs out of space | Delete golden rootfs and restart to rebuild |
+| AppArmor `DENIED` | Check `dmesg \| grep DENIED`, update profile, `apparmor_parser -r` |
+| Guest VM emergency mode | Delete golden rootfs and restart (fstab/EFI mount fix) |
 
 See [docs/troubleshooting.md](docs/troubleshooting.md) for detailed diagnostics.
 

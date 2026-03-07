@@ -21,22 +21,48 @@ Nested virtualization (running inside a VM) requires the host hypervisor to expo
 
 ---
 
+### Golden rootfs build fails
+
+**Cause:** The auto-provisioning process failed during rootfs build. Common reasons include AppArmor denials, network issues during package download, or insufficient disk space.
+
+**Diagnose:**
+```bash
+# Check fc-runner logs for the specific error
+sudo journalctl -u fc-runner --since "10 minutes ago" | grep -i error
+
+# Check for AppArmor denials
+sudo dmesg | grep DENIED | tail -20
+
+# Check disk space
+df -h /opt/fc-runner/
+```
+
+**Fix:**
+- If AppArmor denials: update and reload the profile (see [AppArmor issues](#apparmor-denials) below)
+- If network issues: verify DNS and internet connectivity from the host
+- If disk space: free up space in `/opt/fc-runner/`
+- To retry: delete partial build artifacts and restart:
+  ```bash
+  sudo rm -f /opt/fc-runner/runner-rootfs-golden.ext4
+  sudo rm -f /opt/fc-runner/cloud-base.img /opt/fc-runner/cloud-raw.img
+  sudo systemctl restart fc-runner
+  ```
+
+---
+
 ### VM boots but runner never registers
 
 **Cause:** Bad JIT token, expired token, or no network connectivity from the VM.
 
 **Diagnose:**
 ```bash
-# Check fc-runner logs
+# Check fc-runner logs (includes guest log dump after VM exit)
 sudo journalctl -u fc-runner --since "5 minutes ago"
 
-# Check VM log (if still present)
-ls /var/lib/fc-runner/vms/*.log
+# Look for [guest-log] lines showing what happened inside the VM
+sudo journalctl -u fc-runner | grep guest-log
 
-# Verify TAP interface is up
-ip addr show tap-fc0
-
-# Verify NAT rules
+# Check NAT rules
 sudo iptables -t nat -L POSTROUTING -v
 sudo iptables -L FORWARD -v
 ```
@@ -99,16 +125,13 @@ df -Th /var/lib/fc-runner/vms
 
 ### Rootfs runs out of space during a job
 
-**Cause:** The 4 GiB default golden image is too small for large build artifacts.
+**Cause:** The golden image is too small for large build artifacts.
 
-**Fix:** Rebuild the golden rootfs with a larger size. In `install.sh`, change:
-```bash
-ROOTFS_SIZE_MIB=4096   # Increase to 8192 or more
-```
-Then delete the existing golden image and re-run:
+**Fix:** Rebuild the golden rootfs. The auto-provisioning creates a minimal image with headroom. For larger builds, you may need to customize `setup.rs` to increase the rootfs size, or use the manual `build-v611-linux.sh` script with a custom size.
+
 ```bash
 sudo rm /opt/fc-runner/runner-rootfs-golden.ext4
-sudo bash install.sh
+sudo systemctl restart fc-runner
 ```
 
 ---
@@ -130,7 +153,7 @@ Error: VM execution timed out
 ### Config file permission warning
 
 ```
-WARN: config file is world-readable
+config file is world-readable — contains secrets!
 ```
 
 **Cause:** The config file at `/etc/fc-runner/config.toml` has permissions allowing other users to read it (it contains the GitHub PAT).
@@ -145,10 +168,10 @@ sudo chmod 0600 /etc/fc-runner/config.toml
 ### Symlink rejected on critical path
 
 ```
-Error: path is a symlink (potential path traversal)
+Error: path is a symlink (security risk)
 ```
 
-**Cause:** A critical path (`kernel_path`, `rootfs_golden`, `binary_path`, or `vm_config_template`) is a symlink. fc-runner rejects symlinks on these paths to prevent path traversal attacks.
+**Cause:** A critical path (`kernel_path`, `rootfs_golden`, `binary_path`) is a symlink. fc-runner rejects symlinks on these paths to prevent path traversal attacks.
 
 **Fix:** Use direct paths instead of symlinks for these config values.
 
@@ -166,6 +189,57 @@ ERROR: GitHub API rate limit nearly exhausted, backing off
 - Increase `runner.poll_interval_secs` to reduce API calls
 - With multi-repo configs, each repo adds ~2 API calls per poll cycle — reduce the number of repos or increase the interval
 - Check if multiple instances of fc-runner are sharing the same PAT
+
+---
+
+### AppArmor denials
+
+```
+apparmor="DENIED" operation="..." profile="/usr/local/bin/fc-runner"
+```
+
+**Cause:** The AppArmor profile is missing permissions for an operation fc-runner needs to perform (common during rootfs provisioning which runs chroot'd package installation).
+
+**Diagnose:**
+```bash
+# Check recent denials
+sudo dmesg | grep DENIED | tail -20
+
+# Check profile enforcement status
+sudo aa-status | grep -E '(firecracker|fc-runner)'
+```
+
+**Fix:**
+1. Identify the denied operation from the `dmesg` output (look at `operation`, `name`, `requested_mask`, `capname`)
+2. Update the AppArmor profile in `apparmor/usr.local.bin.fc-runner`
+3. Reload the profile:
+   ```bash
+   sudo cp apparmor/usr.local.bin.fc-runner /etc/apparmor.d/
+   sudo apparmor_parser -r /etc/apparmor.d/usr.local.bin.fc-runner
+   ```
+4. Temporarily switch to complain mode to unblock while debugging:
+   ```bash
+   sudo aa-complain /etc/apparmor.d/usr.local.bin.fc-runner
+   # Re-enforce after fixing:
+   sudo aa-enforce /etc/apparmor.d/usr.local.bin.fc-runner
+   ```
+
+---
+
+### Guest VM enters emergency mode
+
+**Cause:** Typically caused by invalid `/etc/fstab` entries (e.g., EFI mount units from the cloud image) or missing systemd services.
+
+**Fix:** The auto-provisioning in `setup.rs` handles this by:
+- Writing a clean `/etc/fstab` with only `/dev/vda`
+- Masking `boot-efi.mount` and `systemd-gpt-auto-generator`
+- Removing `/etc/fstab.d/` snippets
+
+If you still see this, force a rootfs rebuild:
+```bash
+sudo rm /opt/fc-runner/runner-rootfs-golden.ext4
+sudo systemctl restart fc-runner
+```
 
 ---
 
@@ -192,4 +266,17 @@ curl -s \
 cargo build --release
 sudo install -m 0755 target/release/fc-runner /usr/local/bin/fc-runner
 sudo systemctl restart fc-runner
+
+# Force rootfs rebuild
+sudo rm /opt/fc-runner/runner-rootfs-golden.ext4
+sudo systemctl restart fc-runner
+
+# Check AppArmor status
+sudo aa-status | grep -E '(firecracker|fc-runner)'
+
+# Check for AppArmor denials
+sudo dmesg | grep DENIED | tail -20
+
+# Reload AppArmor profile after update
+sudo apparmor_parser -r /etc/apparmor.d/usr.local.bin.fc-runner
 ```
