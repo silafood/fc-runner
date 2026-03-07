@@ -2,6 +2,7 @@
 # Copy to /etc/fc-runner/config.toml and fill in your values.
 
 [github]
+# Authentication: Use either a PAT (token) or GitHub App (app section below).
 # Personal access token (see docs/setup.md for generation guide)
 token = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 owner = "your-org"
@@ -13,6 +14,12 @@ repo = "your-repo"
 runner_group_id = 1
 # Labels the runner advertises — must match workflow's runs-on
 labels = ["self-hosted", "linux", "firecracker"]
+# GitHub App authentication (alternative to PAT, provides higher rate limits).
+# Uncomment to use instead of token above.
+# [github.app]
+# app_id = 12345
+# installation_id = 67890
+# private_key_path = "/etc/fc-runner/app-key.pem"
 
 [firecracker]
 binary_path = "/usr/local/bin/firecracker"

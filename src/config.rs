@@ -15,7 +15,9 @@ pub struct AppConfig {
 
 #[derive(Clone, Deserialize)]
 pub struct GitHubConfig {
-    pub token: SecretString,
+    /// PAT token (required unless [github.app] is configured)
+    #[serde(default)]
+    pub token: Option<SecretString>,
     pub owner: String,
     /// Single repo (backward-compatible). Use `repos` for multiple.
     #[serde(default)]
@@ -28,6 +30,15 @@ pub struct GitHubConfig {
     pub runner_group_id: u64,
     #[serde(default = "default_labels")]
     pub labels: Vec<String>,
+    /// GitHub App authentication (alternative to PAT)
+    pub app: Option<GitHubAppConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GitHubAppConfig {
+    pub app_id: u64,
+    pub installation_id: u64,
+    pub private_key_path: String,
 }
 
 impl GitHubConfig {
@@ -244,8 +255,27 @@ impl AppConfig {
     }
 
     fn validate(&self) -> anyhow::Result<()> {
-        if self.github.token.expose_secret().is_empty() {
-            bail!("github.token must not be empty");
+        let has_token = self
+            .github
+            .token
+            .as_ref()
+            .map(|t| !t.expose_secret().is_empty())
+            .unwrap_or(false);
+        let has_app = self.github.app.is_some();
+        if !has_token && !has_app {
+            bail!(
+                "either github.token or [github.app] must be configured"
+            );
+        }
+        if let Some(app) = &self.github.app {
+            let key_path = Path::new(&app.private_key_path);
+            reject_symlink("github.app.private_key_path", key_path)?;
+            if !key_path.exists() {
+                bail!(
+                    "github.app.private_key_path does not exist: {}",
+                    app.private_key_path
+                );
+            }
         }
         if self.github.owner.is_empty() {
             bail!("github.owner must not be empty");

@@ -3,11 +3,154 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use reqwest::Client;
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
+use tokio::sync::RwLock;
 use tokio::time::Duration;
 
 use crate::config::GitHubConfig;
+
+// ── Auth provider ──────────────────────────────────────────────────────
+
+enum AuthProvider {
+    Pat(SecretString),
+    App {
+        app_id: u64,
+        installation_id: u64,
+        private_key: Vec<u8>,
+        cached_token: RwLock<Option<CachedToken>>,
+    },
+}
+
+struct CachedToken {
+    token: String,
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl AuthProvider {
+    fn from_config(config: &GitHubConfig) -> anyhow::Result<Self> {
+        if let Some(app) = &config.app {
+            let private_key = std::fs::read(&app.private_key_path)
+                .with_context(|| format!("reading GitHub App private key: {}", app.private_key_path))?;
+            tracing::info!(app_id = app.app_id, installation_id = app.installation_id, "using GitHub App authentication");
+            Ok(AuthProvider::App {
+                app_id: app.app_id,
+                installation_id: app.installation_id,
+                private_key,
+                cached_token: RwLock::new(None),
+            })
+        } else if let Some(token) = &config.token {
+            tracing::info!("using PAT authentication");
+            Ok(AuthProvider::Pat(token.clone()))
+        } else {
+            anyhow::bail!("no authentication method configured");
+        }
+    }
+
+    /// Get a valid bearer token. For PAT, returns it directly.
+    /// For App, generates JWT and exchanges for installation token with caching.
+    async fn get_token(&self, client: &Client) -> anyhow::Result<String> {
+        match self {
+            AuthProvider::Pat(token) => Ok(token.expose_secret().to_string()),
+            AuthProvider::App {
+                app_id,
+                installation_id,
+                private_key,
+                cached_token,
+            } => {
+                // Check cache first
+                {
+                    let cache = cached_token.read().await;
+                    if let Some(ct) = cache.as_ref() {
+                        // Refresh 5 minutes before expiry
+                        if ct.expires_at > chrono::Utc::now() + chrono::Duration::minutes(5) {
+                            return Ok(ct.token.clone());
+                        }
+                    }
+                }
+
+                // Generate new token
+                let token = Self::exchange_installation_token(
+                    client,
+                    *app_id,
+                    *installation_id,
+                    private_key,
+                )
+                .await?;
+
+                // Cache it (installation tokens are valid for 1 hour)
+                let mut cache = cached_token.write().await;
+                *cache = Some(CachedToken {
+                    token: token.clone(),
+                    expires_at: chrono::Utc::now() + chrono::Duration::minutes(55),
+                });
+
+                Ok(token)
+            }
+        }
+    }
+
+    /// Generate a JWT and exchange it for an installation access token.
+    async fn exchange_installation_token(
+        client: &Client,
+        app_id: u64,
+        installation_id: u64,
+        private_key: &[u8],
+    ) -> anyhow::Result<String> {
+        let now = chrono::Utc::now();
+        let claims = serde_json::json!({
+            "iat": (now - chrono::Duration::seconds(60)).timestamp(),
+            "exp": (now + chrono::Duration::minutes(10)).timestamp(),
+            "iss": app_id,
+        });
+
+        let encoding_key = jsonwebtoken::EncodingKey::from_rsa_pem(private_key)
+            .context("parsing GitHub App private key as RSA PEM")?;
+
+        let jwt = jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
+            &claims,
+            &encoding_key,
+        )
+        .context("encoding JWT")?;
+
+        let url = format!(
+            "https://api.github.com/app/installations/{}/access_tokens",
+            installation_id
+        );
+
+        let resp = client
+            .post(&url)
+            .bearer_auth(&jwt)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "fc-runner/0.1")
+            .send()
+            .await
+            .context("requesting installation token")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "installation token request failed (HTTP {}): {}",
+                status,
+                body
+            );
+        }
+
+        #[derive(Deserialize)]
+        struct InstallationToken {
+            token: String,
+        }
+
+        let data = resp.json::<InstallationToken>().await?;
+        tracing::info!("GitHub App installation token acquired");
+        Ok(data.token)
+    }
+}
+
+// ── Response types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct WorkflowRunsResponse {
@@ -48,14 +191,18 @@ pub struct Runner {
     pub status: String,
 }
 
+// ── Client ─────────────────────────────────────────────────────────────
+
 pub struct GitHubClient {
     client: Client,
     config: GitHubConfig,
+    auth: AuthProvider,
     rate_limit_remaining: Arc<AtomicU32>,
 }
 
 impl GitHubClient {
     pub fn new(config: GitHubConfig) -> anyhow::Result<Self> {
+        let auth = AuthProvider::from_config(&config)?;
         let client = Client::builder()
             .user_agent("fc-runner/0.1")
             .timeout(Duration::from_secs(30))
@@ -64,6 +211,7 @@ impl GitHubClient {
         Ok(Self {
             client,
             config,
+            auth,
             rate_limit_remaining: Arc::new(AtomicU32::new(5000)),
         })
     }
@@ -86,12 +234,18 @@ impl GitHubClient {
         &self.config.owner
     }
 
-    fn request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
-        self.client
+    async fn request(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+    ) -> anyhow::Result<reqwest::RequestBuilder> {
+        let token = self.auth.get_token(&self.client).await?;
+        Ok(self
+            .client
             .request(method, url)
-            .bearer_auth(self.config.token.expose_secret())
+            .bearer_auth(token)
             .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("X-GitHub-Api-Version", "2022-11-28"))
     }
 
     /// Check rate limit headers and warn/backoff if running low.
@@ -117,6 +271,7 @@ impl GitHubClient {
         let url = format!("{}/actions/runs?status=queued", self.repo_url(repo));
         let resp = self
             .request(reqwest::Method::GET, &url)
+            .await?
             .send()
             .await?;
         self.check_rate_limit(&resp).await;
@@ -136,6 +291,7 @@ impl GitHubClient {
         );
         let resp = self
             .request(reqwest::Method::GET, &url)
+            .await?
             .send()
             .await?;
         self.check_rate_limit(&resp).await;
@@ -152,6 +308,7 @@ impl GitHubClient {
         let url = format!("{}/actions/runners/registration-token", self.repo_url(repo));
         let resp = self
             .request(reqwest::Method::POST, &url)
+            .await?
             .send()
             .await?;
         self.check_rate_limit(&resp).await;
@@ -176,6 +333,7 @@ impl GitHubClient {
         let url = format!("{}/actions/runners", self.repo_url(repo));
         let resp = self
             .request(reqwest::Method::GET, &url)
+            .await?
             .send()
             .await?;
         self.check_rate_limit(&resp).await;
@@ -192,6 +350,7 @@ impl GitHubClient {
         let url = format!("{}/actions/runners/{}", self.repo_url(repo), runner_id);
         let resp = self
             .request(reqwest::Method::DELETE, &url)
+            .await?
             .send()
             .await?;
         self.check_rate_limit(&resp).await;
@@ -244,6 +403,7 @@ impl GitHubClient {
         });
         let resp = self
             .request(reqwest::Method::POST, &url)
+            .await?
             .json(&body)
             .send()
             .await?;
