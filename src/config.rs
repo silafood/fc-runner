@@ -119,6 +119,14 @@ pub struct FirecrackerConfig {
     pub jailer_chroot_base: String,
     /// URL for the cloud image used to build the golden rootfs (optional, has default)
     pub cloud_img_url: Option<String>,
+    /// Secret injection method: "mmds" (default) uses Firecracker's MMDS service,
+    /// "mount" uses the legacy loop-mount injection into the rootfs.
+    #[serde(default = "default_secret_injection")]
+    pub secret_injection: String,
+}
+
+fn default_secret_injection() -> String {
+    "mmds".into()
 }
 
 #[derive(Debug, Clone, Deserialize)]
