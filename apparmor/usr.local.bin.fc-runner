@@ -96,6 +96,7 @@
   /{usr/,}bin/chown ix,
   /{usr/,}sbin/chroot ix,
   /{usr/,}bin/tar ix,
+  /usr/bin/which* ix,
 
   # Network configuration
   /dev/net/tun rw,
