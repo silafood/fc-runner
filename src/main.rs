@@ -3,6 +3,7 @@ mod firecracker;
 mod github;
 mod netlink;
 mod orchestrator;
+mod pool;
 mod setup;
 
 use std::sync::Arc;

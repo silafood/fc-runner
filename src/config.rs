@@ -11,6 +11,35 @@ pub struct AppConfig {
     pub runner: RunnerConfig,
     #[serde(default)]
     pub network: NetworkConfig,
+    /// Named VM pools with per-pool repos, replica counts, and resource overrides.
+    /// When configured, pools replace the flat warm_pool_size setting.
+    #[serde(default)]
+    pub pool: Vec<PoolConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PoolConfig {
+    pub name: String,
+    /// Repos this pool serves (must be subset of github.repos).
+    pub repos: Vec<String>,
+    /// Minimum number of idle VMs to keep ready.
+    #[serde(default = "default_min_ready")]
+    pub min_ready: usize,
+    /// Maximum total VMs in this pool (idle + active).
+    #[serde(default = "default_max_ready")]
+    pub max_ready: usize,
+    /// Override vcpu_count for this pool (defaults to firecracker.vcpu_count).
+    pub vcpu_count: Option<u32>,
+    /// Override mem_size_mib for this pool (defaults to firecracker.mem_size_mib).
+    pub mem_size_mib: Option<u32>,
+}
+
+fn default_min_ready() -> usize {
+    1
+}
+
+fn default_max_ready() -> usize {
+    4
 }
 
 #[derive(Clone, Deserialize)]
