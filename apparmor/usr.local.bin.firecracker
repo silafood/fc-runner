@@ -12,6 +12,11 @@
   # KVM device access (required for VM execution)
   /dev/kvm rw,
 
+  # Standard devices (needed inside jailer chroot)
+  /dev/null rw,
+  /dev/zero r,
+  /dev/urandom r,
+
   # Guest kernel (read-only)
   /opt/fc-runner/vmlinux.bin r,
 
