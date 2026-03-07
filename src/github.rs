@@ -135,6 +135,30 @@ impl GitHubClient {
         Ok(data.jobs)
     }
 
+    /// Generate a registration token for pre-registering runners (warm pool mode).
+    pub async fn generate_registration_token(&self, repo: &str) -> anyhow::Result<String> {
+        let url = format!("{}/actions/runners/registration-token", self.repo_url(repo));
+        let resp = self
+            .request(reqwest::Method::POST, &url)
+            .send()
+            .await?;
+        self.check_rate_limit(&resp).await;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "registration token for {}/{} failed (HTTP {}): {}",
+                self.config.owner, repo, status, body
+            );
+        }
+        #[derive(Deserialize)]
+        struct RegToken {
+            token: String,
+        }
+        let data = resp.json::<RegToken>().await?;
+        Ok(data.token)
+    }
+
     pub async fn generate_jit_config(&self, repo: &str, job_id: u64) -> anyhow::Result<String> {
         let url = format!("{}/actions/runners/generate-jitconfig", self.repo_url(repo));
         let body = serde_json::json!({

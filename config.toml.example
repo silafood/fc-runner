@@ -20,7 +20,6 @@ kernel_path = "/opt/fc-runner/vmlinux.bin"
 rootfs_golden = "/opt/fc-runner/runner-rootfs-golden.ext4"
 vcpu_count = 2
 mem_size_mib = 2048
-tap_interface = "tap-fc0"
 vm_config_template = "/etc/fc-runner/vm-config.json.template"
 # Jailer: chroot + seccomp-BPF + UID/GID drop (recommended for production)
 # Uncomment the lines below to enable jailer. jailer_uid and jailer_gid are
@@ -37,10 +36,15 @@ poll_interval_secs = 5
 max_concurrent_jobs = 4
 # Maximum time (seconds) a single VM is allowed to run before being killed
 vm_timeout_secs = 3600
+# Warm pool: pre-register N idle runners that wait for GitHub to assign jobs.
+# When > 0, uses registration tokens instead of JIT — runners boot and wait.
+# When a runner finishes a job, a replacement VM is spawned automatically.
+# Set to 0 (default) for reactive JIT mode (VMs created on-demand per job).
+# warm_pool_size = 2
 
-# Network is auto-configured at startup (TAP device, IP forwarding, NAT rules)
+# Network is auto-configured at startup (IP forwarding, NAT rules).
+# TAP devices are created per-VM with unique subnets (172.16.{slot}.0/24).
 [network]
-tap_device = "tap-fc0"
 host_ip = "172.16.0.1"
 guest_ip = "172.16.0.2"
 cidr = "24"

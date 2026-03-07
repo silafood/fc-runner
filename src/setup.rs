@@ -359,24 +359,58 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
         .await?;
     ensure!(status.success(), "chown failed");
 
-    // Write entrypoint
+    // Write entrypoint (supports JIT and registration modes)
     tokio::fs::write(
         format!("{}/entrypoint.sh", mount_dir),
         r#"#!/bin/bash
 set -euo pipefail
+exec > /var/log/runner.log 2>&1
+
+echo "=== fc-runner entrypoint $(date) ==="
+
+if [ ! -f /etc/fc-runner-env ]; then
+    echo "ERROR: /etc/fc-runner-env not found"
+    sleep 3
+    reboot -f
+fi
+
 source /etc/fc-runner-env
+echo "VM_ID=${VM_ID} MODE=${RUNNER_MODE:-jit}"
+
+# Wait for network connectivity
+for i in $(seq 1 30); do
+    if ip route show default | grep -q default 2>/dev/null; then
+        if curl -sf --connect-timeout 3 --max-time 5 https://github.com > /dev/null 2>&1; then
+            echo "Network ready"
+            break
+        fi
+    fi
+    echo "Waiting for network ($i/30)..."
+    sleep 1
+done
 
 cd /home/runner
-sudo -u runner ./config.sh \
-  --url "${REPO_URL}" \
-  --token "${RUNNER_TOKEN}" \
-  --name "fc-$(cat /proc/sys/kernel/hostname)" \
-  --labels "firecracker,linux,x64" \
-  --ephemeral \
-  --unattended \
-  --work /home/runner/_work
 
-sudo -u runner ./run.sh
+if [ "${RUNNER_MODE:-jit}" = "jit" ]; then
+    echo "Starting runner (JIT mode)..."
+    sudo -u runner ./run.sh --jitconfig "${RUNNER_TOKEN}"
+else
+    echo "Registering runner..."
+    sudo -u runner ./config.sh \
+        --url "${REPO_URL}" \
+        --token "${RUNNER_TOKEN}" \
+        --name "${RUNNER_NAME:-fc-$(hostname)}" \
+        --labels "firecracker,linux,x64" \
+        --ephemeral \
+        --unattended \
+        --disableupdate \
+        --work /home/runner/_work
+    echo "Starting runner (registered mode)..."
+    sudo -u runner ./run.sh
+fi
+
+echo "Runner finished, shutting down"
+reboot -f
 "#,
     )
     .await?;

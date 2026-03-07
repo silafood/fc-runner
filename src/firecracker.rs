@@ -132,7 +132,7 @@ impl MicroVm {
             .await;
     }
 
-    async fn inject_env(&self, jit_token: &str, repo_url: &str) -> anyhow::Result<()> {
+    async fn inject_env(&self, env_content: &str) -> anyhow::Result<()> {
         let rootfs = path_str(&self.rootfs_path)?;
         let mnt = path_str(&self.mount_point)?;
 
@@ -160,10 +160,6 @@ impl MicroVm {
         let env_dir = self.mount_point.join("etc");
         tokio::fs::create_dir_all(&env_dir).await?;
 
-        let env_content = format!(
-            "RUNNER_TOKEN={}\nREPO_URL={}\nVM_ID={}\n",
-            jit_token, repo_url, self.vm_id
-        );
         let env_path = env_dir.join("fc-runner-env");
         tokio::fs::write(&env_path, env_content).await?;
 
@@ -321,16 +317,16 @@ impl MicroVm {
         }
     }
 
-    pub async fn execute(self, jit_token: &str, repo_url: &str) -> anyhow::Result<()> {
-        let result = self.prepare_and_run(jit_token, repo_url).await;
+    pub async fn execute(self, env_content: &str) -> anyhow::Result<()> {
+        let result = self.prepare_and_run(env_content).await;
         self.cleanup().await;
         result
     }
 
-    async fn prepare_and_run(&self, jit_token: &str, repo_url: &str) -> anyhow::Result<()> {
+    async fn prepare_and_run(&self, env_content: &str) -> anyhow::Result<()> {
         tracing::info!(vm_id = %self.vm_id, job_id = self.job_id, slot = self.slot, "preparing VM");
         self.copy_rootfs().await?;
-        self.inject_env(jit_token, repo_url).await?;
+        self.inject_env(env_content).await?;
         self.create_tap().await?;
         self.write_vm_config().await?;
 

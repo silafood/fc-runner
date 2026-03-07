@@ -88,6 +88,11 @@ pub struct RunnerConfig {
     pub max_concurrent_jobs: usize,
     #[serde(default = "default_vm_timeout_secs")]
     pub vm_timeout_secs: u64,
+    /// Number of idle VMs to maintain in a warm pool.
+    /// When > 0, uses registration tokens to pre-register runners that wait
+    /// for GitHub to assign jobs. Replaced as they finish. Default: 0 (JIT mode).
+    #[serde(default)]
+    pub warm_pool_size: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]

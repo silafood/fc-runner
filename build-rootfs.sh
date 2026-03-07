@@ -68,37 +68,56 @@ cat > "$MNT/entrypoint.sh" << 'ENTRYEOF'
 set -euo pipefail
 exec > /var/log/runner.log 2>&1
 
-echo "=== fc-runner entrypoint ==="
-date
+echo "=== fc-runner entrypoint $(date) ==="
 
 if [ ! -f /etc/fc-runner-env ]; then
-    echo "ERROR: /etc/fc-runner-env not found!"
-    ls -la /etc/fc-runner* 2>/dev/null || echo "No fc-runner files in /etc/"
-    sleep 5
+    echo "ERROR: /etc/fc-runner-env not found"
+    sleep 3
     reboot -f
 fi
 
 source /etc/fc-runner-env
-echo "REPO_URL=${REPO_URL}"
-echo "VM_ID=${VM_ID}"
+echo "VM_ID=${VM_ID} MODE=${RUNNER_MODE:-jit}"
+
+# Wait for network connectivity
+for i in $(seq 1 30); do
+    if ip route show default | grep -q default 2>/dev/null; then
+        if curl -sf --connect-timeout 3 --max-time 5 https://github.com > /dev/null 2>&1; then
+            echo "Network ready"
+            break
+        fi
+    fi
+    echo "Waiting for network ($i/30)..."
+    sleep 1
+done
 
 cd /home/runner
-echo "Configuring runner..."
-sudo -u runner ./config.sh \
-    --url "${REPO_URL}" \
-    --token "${RUNNER_TOKEN}" \
-    --labels "firecracker,linux,x64" \
-    --ephemeral \
-    --unattended \
-    --work /home/runner/_work
 
-echo "Starting runner..."
-sudo -u runner ./run.sh
+if [ "${RUNNER_MODE:-jit}" = "jit" ]; then
+    echo "Starting runner (JIT mode)..."
+    sudo -u runner ./run.sh --jitconfig "${RUNNER_TOKEN}"
+else
+    echo "Registering runner..."
+    sudo -u runner ./config.sh \
+        --url "${REPO_URL}" \
+        --token "${RUNNER_TOKEN}" \
+        --name "${RUNNER_NAME:-fc-$(hostname)}" \
+        --labels "firecracker,linux,x64" \
+        --ephemeral \
+        --unattended \
+        --disableupdate \
+        --work /home/runner/_work
+    echo "Starting runner (registered mode)..."
+    sudo -u runner ./run.sh
+fi
 
-echo "Runner finished, shutting down..."
+echo "Runner finished, shutting down"
 reboot -f
 ENTRYEOF
 chmod +x "$MNT/entrypoint.sh"
+
+# Enable rc-local.service explicitly
+chroot "$MNT" systemctl enable rc-local.service 2>/dev/null || true
 
 cat > "$MNT/etc/rc.local" << 'RCEOF'
 #!/bin/bash
