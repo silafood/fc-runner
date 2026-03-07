@@ -712,6 +712,20 @@ async fn ensure_nat_rules(network: &NetworkConfig) -> anyhow::Result<()> {
         "-j", "MASQUERADE",
     ]).await?;
 
+    // TCP MSS clamping — prevents large-download stalls caused by PMTU black holes.
+    // Adjusts SYN packet MSS to fit the outgoing interface MTU.
+    add_iptables_rule_if_missing(&[
+        "-t", "mangle", "-A", "FORWARD",
+        "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
+        "-s", VM_SUBNET,
+        "-j", "TCPMSS", "--clamp-mss-to-pmtu",
+    ], &[
+        "-t", "mangle", "-C", "FORWARD",
+        "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
+        "-s", VM_SUBNET,
+        "-j", "TCPMSS", "--clamp-mss-to-pmtu",
+    ]).await?;
+
     // FORWARD — allow established return traffic to VM subnets.
     // Insert at top of chain (-I FORWARD 1) so it runs BEFORE UFW/Docker rules
     // which would otherwise DROP the return traffic.
