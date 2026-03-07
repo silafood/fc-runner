@@ -36,6 +36,18 @@ pub struct JitConfigResponse {
     pub encoded_jit_config: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RunnersResponse {
+    pub runners: Vec<Runner>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Runner {
+    pub id: u64,
+    pub name: String,
+    pub status: String,
+}
+
 pub struct GitHubClient {
     client: Client,
     config: GitHubConfig,
@@ -157,6 +169,69 @@ impl GitHubClient {
         }
         let data = resp.json::<RegToken>().await?;
         Ok(data.token)
+    }
+
+    /// List all self-hosted runners for a repo.
+    pub async fn list_runners(&self, repo: &str) -> anyhow::Result<Vec<Runner>> {
+        let url = format!("{}/actions/runners", self.repo_url(repo));
+        let resp = self
+            .request(reqwest::Method::GET, &url)
+            .send()
+            .await?;
+        self.check_rate_limit(&resp).await;
+        let data = resp
+            .error_for_status()
+            .with_context(|| format!("listing runners for {}/{}", self.config.owner, repo))?
+            .json::<RunnersResponse>()
+            .await?;
+        Ok(data.runners)
+    }
+
+    /// Delete a runner by ID.
+    pub async fn delete_runner(&self, repo: &str, runner_id: u64) -> anyhow::Result<()> {
+        let url = format!("{}/actions/runners/{}", self.repo_url(repo), runner_id);
+        let resp = self
+            .request(reqwest::Method::DELETE, &url)
+            .send()
+            .await?;
+        self.check_rate_limit(&resp).await;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "delete runner {} for {}/{} failed (HTTP {}): {}",
+                runner_id, self.config.owner, repo, status, body
+            );
+        }
+        Ok(())
+    }
+
+    /// Remove offline runners whose names start with "fc-" (left over from completed/crashed VMs).
+    pub async fn remove_offline_runners(&self, repo: &str) {
+        match self.list_runners(repo).await {
+            Ok(runners) => {
+                for runner in runners {
+                    if runner.name.starts_with("fc-") && runner.status == "offline" {
+                        tracing::info!(
+                            runner_id = runner.id,
+                            runner_name = %runner.name,
+                            repo = %repo,
+                            "removing offline runner"
+                        );
+                        if let Err(e) = self.delete_runner(repo, runner.id).await {
+                            tracing::warn!(
+                                runner_id = runner.id,
+                                error = %e,
+                                "failed to remove offline runner"
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(repo = %repo, error = %e, "failed to list runners for cleanup");
+            }
+        }
     }
 
     pub async fn generate_jit_config(&self, repo: &str, job_id: u64) -> anyhow::Result<String> {
