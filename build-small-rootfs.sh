@@ -76,20 +76,13 @@ mount --bind /dev/pts "$MNT/dev/pts"
 mount -t proc proc "$MNT/proc"
 mount -t sysfs sys "$MNT/sys"
 
-# ── Step 4: Strip cloud-init and unnecessary services ───────────────
-echo "[4/8] Stripping cloud-init and unnecessary packages..."
-chroot "$MNT" bash -c "
-    export DEBIAN_FRONTEND=noninteractive
-    # Mark packages we need so autoremove won't touch them
-    apt-mark manual iproute2 netplan.io libcap2-bin 2>/dev/null || true
-    apt-get -y purge cloud-init cloud-guest-utils snapd lxd-installer \
-        ubuntu-advantage-tools unattended-upgrades 2>/dev/null || true
-    apt-get -y autoremove --purge 2>/dev/null || true
-    rm -rf /var/lib/cloud /etc/cloud /var/cache/apt/archives/*.deb
-    apt-get clean
-"
+# ── Step 4: Fix DNS in chroot ───────────────────────────────────────
+echo "[4/8] Configuring DNS for chroot..."
+# Back up and inject host DNS so apt can resolve
+cp "$MNT/etc/resolv.conf" "$MNT/etc/resolv.conf.bak" 2>/dev/null || true
+echo -e "nameserver 8.8.8.8\nnameserver 1.1.1.1" > "$MNT/etc/resolv.conf"
 
-# ── Step 5: Install only what we need ───────────────────────────────
+# ── Step 5: Install only what's missing ─────────────────────────────
 echo "[5/8] Installing runner dependencies..."
 chroot "$MNT" bash -c "
     export DEBIAN_FRONTEND=noninteractive
@@ -99,6 +92,9 @@ chroot "$MNT" bash -c "
     apt-get clean
     rm -rf /var/lib/apt/lists/*
 "
+
+# Restore original resolv.conf
+mv "$MNT/etc/resolv.conf.bak" "$MNT/etc/resolv.conf" 2>/dev/null || true
 
 # ── Step 6: Configure network + runner user ─────────────────────────
 echo "[6/8] Configuring network and runner user..."
