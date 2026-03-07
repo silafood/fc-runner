@@ -4,6 +4,7 @@ mod github;
 mod metrics;
 mod netlink;
 mod orchestrator;
+mod pool;
 mod server;
 mod setup;
 

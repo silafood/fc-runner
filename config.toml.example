@@ -58,6 +58,28 @@ vm_timeout_secs = 3600
 # Set to 0 (default) for reactive JIT mode (VMs created on-demand per job).
 # warm_pool_size = 2
 
+# Named VM pools (alternative to warm_pool_size).
+# Each pool maintains its own set of pre-registered runners with independent
+# resource configs. Pools are distributed across available slots.
+# When [[pool]] is configured, warm_pool_size is ignored.
+#
+# [[pool]]
+# name = "default"
+# repos = ["repo-a", "repo-b"]
+# min_ready = 2
+# max_ready = 4
+# # Optional resource overrides (defaults to [firecracker] values)
+# # vcpu_count = 4
+# # mem_size_mib = 4096
+#
+# [[pool]]
+# name = "heavy"
+# repos = ["repo-c"]
+# min_ready = 1
+# max_ready = 2
+# vcpu_count = 8
+# mem_size_mib = 8192
+
 # Network is auto-configured at startup (IP forwarding, NAT rules).
 # TAP devices are created per-VM with unique subnets (172.16.{slot}.0/24).
 [network]
