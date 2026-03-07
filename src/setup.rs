@@ -8,7 +8,8 @@ use crate::config::{AppConfig, NetworkConfig};
 const KERNEL_URL: &str =
     "https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin";
 const RUNNER_VERSION: &str = "2.332.0";
-const ROOTFS_SIZE_MIB: u32 = 4096;
+const CLOUD_IMG_URL: &str =
+    "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img";
 
 /// Ensures all VM prerequisites are in place: KVM, kernel, rootfs, network, and AppArmor.
 pub async fn ensure_vm_assets(config: &mut AppConfig) -> anyhow::Result<()> {
@@ -195,34 +196,102 @@ async fn ensure_golden_rootfs(rootfs_path: &str, network: &NetworkConfig) -> any
         return Ok(());
     }
 
-    tracing::info!(path = rootfs_path, "golden rootfs not found, building...");
+    let parent = Path::new(rootfs_path)
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("rootfs_path has no parent dir"))?;
+    tokio::fs::create_dir_all(parent).await?;
+    let parent_str = parent.to_str().unwrap_or("/opt/fc-runner");
 
-    if let Some(parent) = Path::new(rootfs_path).parent() {
-        tokio::fs::create_dir_all(parent).await?;
+    tracing::info!(path = rootfs_path, "golden rootfs not found, building from cloud image...");
+
+    // ── Step 1: Download cloud image (cached) ───────────────────────
+    let cloud_img = format!("{}/cloud-base.img", parent_str);
+    if !Path::new(&cloud_img).exists() {
+        tracing::info!("downloading Ubuntu minimal cloud image...");
+        let status = Command::new("curl")
+            .args(["-fSL", "--proto", "=https", "--tlsv1.2", "-o", &cloud_img, CLOUD_IMG_URL])
+            .status()
+            .await
+            .context("downloading cloud image")?;
+        ensure!(status.success(), "failed to download cloud image");
+    } else {
+        tracing::info!("using cached cloud image");
     }
 
-    // Create empty ext4 image
+    // ── Step 2: Extract ext4 partition from qcow2 ───────────────────
+    tracing::info!("extracting ext4 partition from cloud image...");
+    let raw_img = format!("{}/cloud-raw.img", parent_str);
+    let status = Command::new("qemu-img")
+        .args(["convert", "-f", "qcow2", "-O", "raw", &cloud_img, &raw_img])
+        .status()
+        .await
+        .context("converting qcow2 to raw")?;
+    ensure!(status.success(), "qemu-img convert failed");
+
+    // Attach with partition scanning and find the ext4 partition
+    let output = Command::new("losetup")
+        .args(["--find", "--show", "--partscan", &raw_img])
+        .output()
+        .await
+        .context("losetup")?;
+    ensure!(output.status.success(), "losetup failed");
+    let loop_dev = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // Find the ext4 partition (usually p1)
+    let mut ext4_part = String::new();
+    for suffix in ["p1", "p2", "p15"] {
+        let part = format!("{}{}", loop_dev, suffix);
+        let blkid_out = Command::new("blkid")
+            .arg(&part)
+            .output()
+            .await;
+        if let Ok(out) = blkid_out {
+            if out.status.success() && String::from_utf8_lossy(&out.stdout).contains("ext4") {
+                ext4_part = part;
+                break;
+            }
+        }
+    }
+    if ext4_part.is_empty() {
+        let _ = Command::new("losetup").args(["-d", &loop_dev]).status().await;
+        let _ = tokio::fs::remove_file(&raw_img).await;
+        anyhow::bail!("no ext4 partition found in cloud image");
+    }
+
+    tracing::info!(partition = %ext4_part, "found ext4 partition, extracting...");
     let status = Command::new("dd")
-        .args([
-            "if=/dev/zero",
-            &format!("of={}", rootfs_path),
-            "bs=1M",
-            &format!("count={}", ROOTFS_SIZE_MIB),
-            "status=progress",
-        ])
+        .arg(format!("if={}", ext4_part))
+        .arg(format!("of={}", rootfs_path))
+        .args(["bs=4M", "status=progress"])
         .status()
         .await
-        .context("creating rootfs image")?;
-    ensure!(status.success(), "dd failed");
+        .context("dd partition extraction")?;
+    ensure!(status.success(), "dd partition extraction failed");
 
-    let status = Command::new("mkfs.ext4")
-        .args(["-F", rootfs_path])
+    let _ = Command::new("losetup").args(["-d", &loop_dev]).status().await;
+    let _ = tokio::fs::remove_file(&raw_img).await;
+
+    // ── Step 3: Expand to 4GB, fix filesystem, resize ───────────────
+    let status = Command::new("truncate")
+        .args(["-s", "4G", rootfs_path])
         .status()
         .await
-        .context("mkfs.ext4")?;
-    ensure!(status.success(), "mkfs.ext4 failed");
+        .context("truncate")?;
+    ensure!(status.success(), "truncate failed");
 
-    // Mount, debootstrap, configure
+    let _ = Command::new("e2fsck")
+        .args(["-f", "-y", rootfs_path])
+        .status()
+        .await;
+
+    let status = Command::new("resize2fs")
+        .arg(rootfs_path)
+        .status()
+        .await
+        .context("resize2fs")?;
+    ensure!(status.success(), "resize2fs failed");
+
+    // ── Step 4: Mount and customize ─────────────────────────────────
     let mount_dir = format!("{}.mnt", rootfs_path);
     tokio::fs::create_dir_all(&mount_dir).await?;
 
@@ -233,19 +302,23 @@ async fn ensure_golden_rootfs(rootfs_path: &str, network: &NetworkConfig) -> any
         .context("mounting rootfs image")?;
     ensure!(status.success(), "mount failed");
 
-    // Verify mount succeeded
-    let mountpoint_ok = Command::new("mountpoint")
-        .args(["-q", &mount_dir])
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false);
-    ensure!(mountpoint_ok, "mount point verification failed for {}", mount_dir);
+    // Mount pseudo-filesystems for chroot
+    let _ = Command::new("mount").args(["--bind", "/dev", &format!("{}/dev", mount_dir)]).status().await;
+    let _ = Command::new("mount").args(["--bind", "/dev/pts", &format!("{}/dev/pts", mount_dir)]).status().await;
+    let _ = Command::new("mount").args(["-t", "proc", "proc", &format!("{}/proc", mount_dir)]).status().await;
+    let _ = Command::new("mount").args(["-t", "sysfs", "sys", &format!("{}/sys", mount_dir)]).status().await;
 
-    // Run the build inside a helper script so we can clean up on failure
     let result = build_rootfs_contents(&mount_dir, network).await;
 
-    // Always unmount
+    // Always unmount pseudo-filesystems then rootfs
+    for sub in ["dev/pts", "dev", "proc", "sys"] {
+        let _ = Command::new("umount")
+            .arg(format!("{}/{}", mount_dir, sub))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+    }
     let umount_status = Command::new("umount")
         .arg(&mount_dir)
         .status()
@@ -255,41 +328,89 @@ async fn ensure_golden_rootfs(rootfs_path: &str, network: &NetworkConfig) -> any
     let _ = tokio::fs::remove_dir(&mount_dir).await;
 
     if let Err(e) = result {
-        // Clean up the partial image
         let _ = tokio::fs::remove_file(rootfs_path).await;
         return Err(e).context("building rootfs contents");
     }
     ensure!(umount_status.success(), "umount failed");
+
+    // ── Step 5: Shrink image ────────────────────────────────────────
+    tracing::info!("shrinking rootfs image...");
+    let _ = Command::new("e2fsck").args(["-f", "-y", rootfs_path]).status().await;
+    let _ = Command::new("resize2fs").args(["-M", rootfs_path]).status().await;
+
+    // Calculate final size: min blocks + 512MB headroom
+    let output = Command::new("dumpe2fs")
+        .args(["-h", rootfs_path])
+        .output()
+        .await
+        .context("dumpe2fs")?;
+    let dumpe2fs_out = String::from_utf8_lossy(&output.stdout);
+    let block_count: u64 = dumpe2fs_out
+        .lines()
+        .find(|l| l.starts_with("Block count:"))
+        .and_then(|l| l.split_whitespace().last())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let block_size: u64 = dumpe2fs_out
+        .lines()
+        .find(|l| l.starts_with("Block size:"))
+        .and_then(|l| l.split_whitespace().last())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4096);
+
+    if block_count > 0 {
+        let final_bytes = block_count * block_size + 512 * 1024 * 1024;
+        let final_blocks = final_bytes / block_size;
+        let _ = Command::new("resize2fs")
+            .args([rootfs_path, &final_blocks.to_string()])
+            .status()
+            .await;
+        let _ = Command::new("truncate")
+            .args(["-s", &final_bytes.to_string(), rootfs_path])
+            .status()
+            .await;
+    }
 
     tracing::info!(path = rootfs_path, "golden rootfs built");
     Ok(())
 }
 
 async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyhow::Result<()> {
-    // Debootstrap Ubuntu 24.04 Noble
-    tracing::info!("running debootstrap (this takes a few minutes)...");
-    let status = Command::new("debootstrap")
-        .args([
-            "--arch=amd64",
-            "--include=systemd,systemd-sysv,curl,git,jq,ca-certificates,sudo,openssh-client,unzip,libicu74",
-            "noble",
-            mount_dir,
-            "http://archive.ubuntu.com/ubuntu",
-        ])
-        .status()
-        .await
-        .context("debootstrap")?;
-    ensure!(status.success(), "debootstrap failed");
-
-    // Overwrite fstab: debootstrap writes the build-time loop device UUID,
-    // but inside Firecracker the root device is always /dev/vda.
+    // ── Fix fstab for Firecracker's /dev/vda ────────────────────────
     tokio::fs::write(
         format!("{}/etc/fstab", mount_dir),
         "/dev/vda\t/\text4\tdefaults,noatime\t0\t1\n",
     )
     .await?;
 
-    // Network configuration
+    // ── Fix DNS for chroot (cloud image symlinks to systemd-resolved) ─
+    tracing::info!("configuring DNS for chroot...");
+    let resolv_path = format!("{}/etc/resolv.conf", mount_dir);
+    let _ = tokio::fs::remove_file(&resolv_path).await;
+    tokio::fs::write(&resolv_path, "nameserver 8.8.8.8\nnameserver 1.1.1.1\n").await?;
+
+    // ── Install missing packages ────────────────────────────────────
+    tracing::info!("installing runner dependencies...");
+    let status = Command::new("chroot")
+        .args([
+            mount_dir, "bash", "-c",
+            "export DEBIAN_FRONTEND=noninteractive && \
+             apt-get update -q && \
+             apt-get install -y --no-install-recommends \
+                 curl git jq ca-certificates sudo libicu74 iproute2 && \
+             apt-get clean && \
+             rm -rf /var/lib/apt/lists/*",
+        ])
+        .status()
+        .await
+        .context("installing packages in chroot")?;
+    ensure!(status.success(), "apt-get install failed");
+
+    // Restore systemd-resolved symlink
+    let _ = tokio::fs::remove_file(&resolv_path).await;
+    tokio::fs::symlink("/run/systemd/resolve/stub-resolv.conf", &resolv_path).await?;
+
+    // ── Network configuration ───────────────────────────────────────
     let network_dir = format!("{}/etc/systemd/network", mount_dir);
     tokio::fs::create_dir_all(&network_dir).await?;
     let dns_entries: String = network
@@ -307,14 +428,24 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
     )
     .await?;
 
-    // Enable systemd-networkd
     let status = Command::new("chroot")
         .args([mount_dir, "systemctl", "enable", "systemd-networkd", "systemd-resolved"])
         .status()
         .await?;
     ensure!(status.success(), "enabling systemd-networkd failed");
 
-    // Create runner user
+    // Disable services that slow boot and aren't needed in ephemeral VMs
+    let _ = Command::new("chroot")
+        .args([
+            mount_dir, "bash", "-c",
+            "systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true; \
+             systemctl disable motd-news.timer 2>/dev/null || true; \
+             systemctl mask systemd-timesyncd.service 2>/dev/null || true",
+        ])
+        .status()
+        .await;
+
+    // ── Create runner user ──────────────────────────────────────────
     let _ = Command::new("chroot")
         .args([mount_dir, "useradd", "-m", "-s", "/bin/bash", "runner"])
         .status()
@@ -326,7 +457,7 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
     )
     .await?;
 
-    // Download and install GitHub Actions runner
+    // ── Install GitHub Actions runner ───────────────────────────────
     tracing::info!("installing GitHub Actions runner v{}...", RUNNER_VERSION);
     let runner_dir = format!("{}/home/runner", mount_dir);
     tokio::fs::create_dir_all(&runner_dir).await?;
@@ -351,14 +482,6 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
     ensure!(status.success(), "failed to extract actions-runner");
 
     let _ = tokio::fs::remove_file(&runner_tarball).await;
-
-    // Install runner dependencies
-    let status = Command::new("chroot")
-        .args([mount_dir, "/home/runner/bin/installdependencies.sh"])
-        .status()
-        .await
-        .context("installing runner dependencies")?;
-    ensure!(status.success(), "installdependencies.sh failed");
 
     // Fix ownership
     let status = Command::new("chroot")
