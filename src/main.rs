@@ -1,8 +1,10 @@
 mod config;
 mod firecracker;
 mod github;
+mod metrics;
 mod netlink;
 mod orchestrator;
+mod pool;
 mod server;
 mod setup;
 
@@ -59,6 +61,9 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+
+    // Initialize metrics with initial slot count
+    metrics::POOL_SLOTS_AVAILABLE.set(config.runner.max_concurrent_jobs as i64);
 
     let orchestrator = orchestrator::Orchestrator::new(config, cancel, server_state)?;
     orchestrator.run().await?;

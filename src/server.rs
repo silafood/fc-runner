@@ -11,6 +11,7 @@ use serde::Serialize;
 use tokio::sync::Mutex;
 
 use crate::config::ServerConfig;
+use crate::metrics;
 
 // ── Shared state ───────────────────────────────────────────────────────
 
@@ -61,6 +62,7 @@ impl ServerState {
 
 pub async fn start(listen_addr: SocketAddr, state: Arc<ServerState>) -> anyhow::Result<()> {
     let app = Router::new()
+        .route("/metrics", get(metrics_handler))
         .route("/healthz", get(healthz_handler))
         .route("/api/v1/status", get(status_handler))
         .route("/api/v1/vms", get(list_vms_handler))
@@ -91,6 +93,21 @@ fn check_auth(state: &ServerState, headers: &HeaderMap) -> Result<(), StatusCode
 }
 
 // ── Handlers ───────────────────────────────────────────────────────────
+
+async fn metrics_handler(
+    State(state): State<Arc<ServerState>>,
+) -> impl IntoResponse {
+    // Update uptime before gathering
+    metrics::UPTIME_SECONDS
+        .with_label_values(&[&state.version])
+        .set(state.start_time.elapsed().as_secs_f64());
+
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+        metrics::gather(),
+    )
+}
 
 async fn healthz_handler() -> impl IntoResponse {
     (StatusCode::OK, "ok")

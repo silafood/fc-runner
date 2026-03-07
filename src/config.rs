@@ -13,6 +13,10 @@ pub struct AppConfig {
     pub network: NetworkConfig,
     #[serde(default)]
     pub server: ServerConfig,
+    /// Named VM pools with per-pool repos, replica counts, and resource overrides.
+    /// When configured, pools replace the flat warm_pool_size setting.
+    #[serde(default)]
+    pub pool: Vec<PoolConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -43,9 +47,36 @@ fn default_server_enabled() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct PoolConfig {
+    pub name: String,
+    /// Repos this pool serves (must be subset of github.repos).
+    pub repos: Vec<String>,
+    /// Minimum number of idle VMs to keep ready.
+    #[serde(default = "default_min_ready")]
+    pub min_ready: usize,
+    /// Maximum total VMs in this pool (idle + active).
+    #[serde(default = "default_max_ready")]
+    pub max_ready: usize,
+    /// Override vcpu_count for this pool (defaults to firecracker.vcpu_count).
+    pub vcpu_count: Option<u32>,
+    /// Override mem_size_mib for this pool (defaults to firecracker.mem_size_mib).
+    pub mem_size_mib: Option<u32>,
+}
+
+fn default_min_ready() -> usize {
+    1
+}
+
+fn default_max_ready() -> usize {
+    4
+}
+
 #[derive(Clone, Deserialize)]
 pub struct GitHubConfig {
-    pub token: SecretString,
+    /// PAT token (required unless [github.app] is configured)
+    #[serde(default)]
+    pub token: Option<SecretString>,
     pub owner: String,
     /// Single repo (backward-compatible). Use `repos` for multiple.
     #[serde(default)]
@@ -58,6 +89,15 @@ pub struct GitHubConfig {
     pub runner_group_id: u64,
     #[serde(default = "default_labels")]
     pub labels: Vec<String>,
+    /// GitHub App authentication (alternative to PAT)
+    pub app: Option<GitHubAppConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GitHubAppConfig {
+    pub app_id: u64,
+    pub installation_id: u64,
+    pub private_key_path: String,
 }
 
 impl GitHubConfig {
@@ -111,6 +151,14 @@ pub struct FirecrackerConfig {
     pub jailer_chroot_base: String,
     /// URL for the cloud image used to build the golden rootfs (optional, has default)
     pub cloud_img_url: Option<String>,
+    /// Secret injection method: "mmds" (default) uses Firecracker's MMDS service,
+    /// "mount" uses the legacy loop-mount injection into the rootfs.
+    #[serde(default = "default_secret_injection")]
+    pub secret_injection: String,
+}
+
+fn default_secret_injection() -> String {
+    "mmds".into()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -274,8 +322,27 @@ impl AppConfig {
     }
 
     fn validate(&self) -> anyhow::Result<()> {
-        if self.github.token.expose_secret().is_empty() {
-            bail!("github.token must not be empty");
+        let has_token = self
+            .github
+            .token
+            .as_ref()
+            .map(|t| !t.expose_secret().is_empty())
+            .unwrap_or(false);
+        let has_app = self.github.app.is_some();
+        if !has_token && !has_app {
+            bail!(
+                "either github.token or [github.app] must be configured"
+            );
+        }
+        if let Some(app) = &self.github.app {
+            let key_path = Path::new(&app.private_key_path);
+            reject_symlink("github.app.private_key_path", key_path)?;
+            if !key_path.exists() {
+                bail!(
+                    "github.app.private_key_path does not exist: {}",
+                    app.private_key_path
+                );
+            }
         }
         if self.github.owner.is_empty() {
             bail!("github.owner must not be empty");
