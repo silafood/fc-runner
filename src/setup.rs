@@ -590,12 +590,24 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
     }
 
     // Disable services that slow boot and aren't needed in ephemeral VMs
+    // Mask EFI/boot mount units — cloud image ships these but Firecracker has no
+    // EFI partition, causing emergency mode on boot
     let _ = chroot_command(mount_dir, "bash", &["-c",
             "systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true; \
              systemctl disable motd-news.timer 2>/dev/null || true; \
-             systemctl mask systemd-timesyncd.service 2>/dev/null || true"])
+             systemctl mask systemd-timesyncd.service 2>/dev/null || true; \
+             systemctl mask boot-efi.mount 2>/dev/null || true; \
+             systemctl mask systemd-gpt-auto-generator 2>/dev/null || true"])
         .status()
         .await;
+
+    // Remove any cloud-image fstab entries beyond root (EFI, swap, BOOT label, etc.)
+    // Our fstab was already written above with just /dev/vda → /
+    // Also remove /etc/fstab.d/ snippets if present
+    let fstab_d = format!("{}/etc/fstab.d", mount_dir);
+    if Path::new(&fstab_d).exists() {
+        let _ = tokio::fs::remove_dir_all(&fstab_d).await;
+    }
 
     // ── Create runner user ──────────────────────────────────────────
     let _ = chroot_command(mount_dir, "useradd", &["-m", "-s", "/bin/bash", "runner"])
