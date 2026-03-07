@@ -13,9 +13,14 @@ on:
         description: 'Kernel version to build (e.g. 6.1.102)'
         required: false
         default: '6.1.102'
+      runner_version:
+        description: 'GitHub Actions runner version (e.g. 2.332.0)'
+        required: false
+        default: '2.332.0'
 
 env:
   KERNEL_VERSION: ${{ github.event.inputs.kernel_version || '6.1.102' }}
+  RUNNER_VERSION: ${{ github.event.inputs.runner_version || '2.332.0' }}
   RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 permissions:
@@ -91,9 +96,230 @@ jobs:
           path: linux-${{ env.KERNEL_VERSION }}/vmlinux
           retention-days: 90
 
+  build-rootfs:
+    name: Build golden rootfs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-utils e2fsprogs
+
+      - name: Download Ubuntu minimal cloud image
+        run: |
+          wget -q -O cloud-base.img \
+            https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img
+
+      - name: Extract ext4 partition from qcow2
+        run: |
+          qemu-img convert -f qcow2 -O raw cloud-base.img cloud-raw.img
+          LOOP=$(sudo losetup --find --show --partscan cloud-raw.img)
+          # Find the ext4 partition
+          PART=""
+          for p in "${LOOP}p1" "${LOOP}p2" "${LOOP}p15"; do
+            if [ -b "$p" ] && sudo blkid "$p" 2>/dev/null | grep -q ext4; then
+              PART="$p"
+              break
+            fi
+          done
+          if [ -z "$PART" ]; then
+            echo "ERROR: No ext4 partition found in cloud image"
+            sudo losetup -d "$LOOP"
+            exit 1
+          fi
+          echo "Found ext4 partition: $PART"
+          sudo dd if="$PART" of=rootfs.ext4 bs=4M status=progress
+          sudo losetup -d "$LOOP"
+          rm -f cloud-raw.img
+          # Expand to 4GB
+          truncate -s 4G rootfs.ext4
+          sudo e2fsck -f -y rootfs.ext4 || true
+          sudo resize2fs rootfs.ext4
+
+      - name: Configure rootfs
+        run: |
+          MNT=$(mktemp -d)
+          sudo mount -o loop rootfs.ext4 "$MNT"
+
+          # Fix fstab for Firecracker's /dev/vda
+          printf '/dev/vda\t/\text4\tdefaults,noatime\t0\t1\n' | sudo tee "$MNT/etc/fstab" > /dev/null
+
+          # Fix DNS for chroot
+          sudo rm -f "$MNT/etc/resolv.conf"
+          printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\n' | sudo tee "$MNT/etc/resolv.conf" > /dev/null
+
+          # Mount pseudo-filesystems
+          sudo mount --bind /dev "$MNT/dev"
+          sudo mount --bind /dev/pts "$MNT/dev/pts"
+          sudo mount -t proc proc "$MNT/proc"
+          sudo mount -t sysfs sys "$MNT/sys"
+
+          # Install runner dependencies
+          sudo chroot "$MNT" bash -c "
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -q
+            apt-get install -y --no-install-recommends \
+              curl git jq ca-certificates sudo libicu74 iproute2 systemd-resolved
+            apt-get clean
+            rm -rf /var/lib/apt/lists/*
+          "
+
+          # Ensure /var/tmp exists for systemd-resolved PrivateTmp
+          sudo mkdir -p "$MNT/var/tmp"
+          sudo chmod 1777 "$MNT/var/tmp"
+
+          # Restore systemd-resolved symlink
+          sudo rm -f "$MNT/etc/resolv.conf"
+          sudo ln -s /run/systemd/resolve/stub-resolv.conf "$MNT/etc/resolv.conf"
+
+          # Configure network
+          sudo mkdir -p "$MNT/etc/systemd/network"
+          cat << 'EOF' | sudo tee "$MNT/etc/systemd/network/20-eth.network" > /dev/null
+          [Match]
+          Name=eth0
+
+          [Network]
+          Address=172.16.0.2/24
+          Gateway=172.16.0.1
+          DNS=8.8.8.8
+          DNS=1.1.1.1
+          EOF
+
+          # Enable systemd services (manual symlinks for reliability)
+          sudo mkdir -p "$MNT/etc/systemd/system/multi-user.target.wants"
+          sudo ln -sf /lib/systemd/system/systemd-networkd.service "$MNT/etc/systemd/system/multi-user.target.wants/systemd-networkd.service"
+          sudo ln -sf /lib/systemd/system/systemd-resolved.service "$MNT/etc/systemd/system/multi-user.target.wants/systemd-resolved.service"
+
+          # Disable unnecessary services
+          sudo chroot "$MNT" bash -c "
+            systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+            systemctl disable motd-news.timer 2>/dev/null || true
+            systemctl mask systemd-timesyncd.service 2>/dev/null || true
+          " 2>/dev/null || true
+
+          # Create runner user
+          sudo chroot "$MNT" useradd -m -s /bin/bash runner 2>/dev/null || true
+          echo "runner ALL=(ALL) NOPASSWD:ALL" | sudo tee "$MNT/etc/sudoers.d/runner" > /dev/null
+
+          # Install GitHub Actions runner
+          echo "Installing GitHub Actions runner v${RUNNER_VERSION}..."
+          curl -fsSL -o "$MNT/home/runner/actions-runner.tar.gz" \
+            "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
+          sudo tar xzf "$MNT/home/runner/actions-runner.tar.gz" -C "$MNT/home/runner/"
+          rm "$MNT/home/runner/actions-runner.tar.gz"
+          sudo chroot "$MNT" chown -R runner:runner /home/runner
+
+          # Write entrypoint
+          cat << 'ENTRYEOF' | sudo tee "$MNT/entrypoint.sh" > /dev/null
+          #!/bin/bash
+          set -euo pipefail
+          exec > /var/log/runner.log 2>&1
+
+          echo "=== fc-runner entrypoint $(date) ==="
+
+          if [ ! -f /etc/fc-runner-env ]; then
+              echo "ERROR: /etc/fc-runner-env not found"
+              sleep 3
+              poweroff -f
+          fi
+
+          source /etc/fc-runner-env
+          echo "VM_ID=${VM_ID} MODE=${RUNNER_MODE:-jit}"
+
+          # Wait for network connectivity
+          for i in $(seq 1 30); do
+              if ip route show default | grep -q default 2>/dev/null; then
+                  if curl -sf --connect-timeout 3 --max-time 5 https://github.com > /dev/null 2>&1; then
+                      echo "Network ready"
+                      break
+                  fi
+              fi
+              echo "Waiting for network ($i/30)..."
+              sleep 1
+          done
+
+          cd /home/runner
+
+          if [ "${RUNNER_MODE:-jit}" = "jit" ]; then
+              echo "Starting runner (JIT mode)..."
+              sudo -u runner ./run.sh --jitconfig "${RUNNER_TOKEN}"
+          else
+              echo "Registering runner..."
+              sudo -u runner ./config.sh \
+                  --url "${REPO_URL}" \
+                  --token "${RUNNER_TOKEN}" \
+                  --name "${RUNNER_NAME:-fc-$(hostname)}" \
+                  --labels "firecracker,linux,x64" \
+                  --ephemeral \
+                  --unattended \
+                  --disableupdate \
+                  --work /home/runner/_work
+              echo "Starting runner (registered mode)..."
+              sudo -u runner ./run.sh
+          fi
+
+          echo "Runner finished, shutting down"
+          poweroff -f
+          ENTRYEOF
+          sudo chmod +x "$MNT/entrypoint.sh"
+
+          # Create rc-local.service unit (not shipped in Ubuntu 24.04 cloud images)
+          cat << 'SVCEOF' | sudo tee "$MNT/etc/systemd/system/rc-local.service" > /dev/null
+          [Unit]
+          Description=/etc/rc.local Compatibility
+          ConditionFileIsExecutable=/etc/rc.local
+
+          [Service]
+          Type=forking
+          ExecStart=/etc/rc.local
+          TimeoutSec=0
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+          SVCEOF
+          sudo ln -sf /etc/systemd/system/rc-local.service "$MNT/etc/systemd/system/multi-user.target.wants/rc-local.service"
+
+          # Create rc.local
+          cat << 'RCEOF' | sudo tee "$MNT/etc/rc.local" > /dev/null
+          #!/bin/bash
+          /entrypoint.sh &
+          exit 0
+          RCEOF
+          sudo chmod +x "$MNT/etc/rc.local"
+
+          # Unmount
+          sudo umount "$MNT/dev/pts"
+          sudo umount "$MNT/dev"
+          sudo umount "$MNT/proc"
+          sudo umount "$MNT/sys"
+          sudo umount "$MNT"
+          rmdir "$MNT"
+
+      - name: Shrink rootfs image
+        run: |
+          sudo e2fsck -f -y rootfs.ext4 || true
+          sudo resize2fs -M rootfs.ext4
+          MINBLOCKS=$(sudo dumpe2fs -h rootfs.ext4 2>/dev/null | grep "Block count" | awk '{print $3}')
+          BLOCKSIZE=$(sudo dumpe2fs -h rootfs.ext4 2>/dev/null | grep "Block size" | awk '{print $3}')
+          MINBYTES=$((MINBLOCKS * BLOCKSIZE))
+          FINALBYTES=$((MINBYTES + 512 * 1024 * 1024))
+          sudo resize2fs rootfs.ext4 "$((FINALBYTES / BLOCKSIZE))" 2>/dev/null || true
+          truncate -s "$FINALBYTES" rootfs.ext4
+          ls -lh rootfs.ext4
+
+      - name: Upload rootfs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-rootfs-golden
+          path: rootfs.ext4
+          retention-days: 90
+
   release:
     name: Create GitHub Release
-    needs: [build-binary, build-kernel]
+    needs: [build-binary, build-kernel, build-rootfs]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -110,10 +336,17 @@ jobs:
           name: vmlinux-${{ env.KERNEL_VERSION }}
           path: artifacts/
 
+      - name: Download rootfs
+        uses: actions/download-artifact@v4
+        with:
+          name: runner-rootfs-golden
+          path: artifacts/
+
       - name: Prepare release assets
         run: |
           chmod +x artifacts/fc-runner
           mv artifacts/vmlinux artifacts/vmlinux-${KERNEL_VERSION}
+          mv artifacts/rootfs.ext4 artifacts/runner-rootfs-golden.ext4
 
       - name: Create release
         env:
@@ -124,6 +357,7 @@ jobs:
             --generate-notes \
             artifacts/fc-runner \
             artifacts/vmlinux-${KERNEL_VERSION} \
+            artifacts/runner-rootfs-golden.ext4 \
             config.toml.example \
             fc-runner.service \
             install.sh \
