@@ -24,10 +24,32 @@ else
     curl -fSL -o "$CLOUD_IMG" "$CLOUD_IMG_URL"
 fi
 
-# ── Step 2: Convert qcow2 → raw ext4 ───────────────────────────────
-echo "[2/8] Converting qcow2 → raw ext4 (2GB)..."
-qemu-img convert -f qcow2 -O raw "$CLOUD_IMG" "$ROOTFS"
-# Expand to 2GB so there's room for the runner + workspace
+# ── Step 2: Extract ext4 partition from cloud image ─────────────────
+echo "[2/8] Extracting ext4 partition from cloud image..."
+RAWIMG="/opt/fc-runner/cloud-raw.img"
+qemu-img convert -f qcow2 -O raw "$CLOUD_IMG" "$RAWIMG"
+
+# Attach with partition scanning, extract the root partition (p1)
+LOOP=$(losetup --find --show --partscan "$RAWIMG")
+# Find the ext4 partition (usually p1, but check)
+PART=""
+for p in "${LOOP}p1" "${LOOP}p2" "${LOOP}p15"; do
+    if [ -b "$p" ] && blkid "$p" 2>/dev/null | grep -q ext4; then
+        PART="$p"
+        break
+    fi
+done
+if [ -z "$PART" ]; then
+    echo "ERROR: No ext4 partition found in cloud image"
+    losetup -d "$LOOP"
+    exit 1
+fi
+echo "  Found ext4 partition: $PART"
+dd if="$PART" of="$ROOTFS" bs=4M status=progress
+losetup -d "$LOOP"
+rm -f "$RAWIMG"
+
+# Expand to 2GB for runner + workspace
 truncate -s 2G "$ROOTFS"
 e2fsck -f -y "$ROOTFS" || true
 resize2fs "$ROOTFS"
