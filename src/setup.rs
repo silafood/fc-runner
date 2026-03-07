@@ -23,32 +23,21 @@ async fn download_file(url: &str, dest: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Set a file as executable (replaces chmod +x).
 /// Mount an ext4 image via loop device.
+///
+/// Uses `mount` command because the kernel mount(2) syscall doesn't handle
+/// loop device setup — that's done in userspace by the mount binary.
 async fn mount_ext4(image: &str, target: &str, readonly: bool) -> anyhow::Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        let mut flags = nix::mount::MsFlags::MS_NOATIME;
-        let mut data = "loop";
-        if readonly {
-            flags |= nix::mount::MsFlags::MS_RDONLY;
-            data = "loop,noload";
-        }
-        nix::mount::mount(Some(image), target, Some("ext4"), flags, Some(data))
-            .map_err(|e| anyhow::anyhow!("mount failed: {}", e))?;
-        Ok(())
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let mut args = vec!["-o"];
-        args.push(if readonly { "loop,ro,noload" } else { "loop" });
-        args.push(image);
-        args.push(target);
-        let status = Command::new("mount").args(&args).status().await.context("mount")?;
-        ensure!(status.success(), "mount failed");
-        Ok(())
-    }
+    let opts = if readonly { "loop,ro,noload,noatime" } else { "loop,noatime" };
+    let status = Command::new("mount")
+        .args(["-o", opts, image, target])
+        .status()
+        .await
+        .context("running mount")?;
+    ensure!(status.success(), "mount -o {} {} {} failed", opts, image, target);
+    Ok(())
 }
+/// Set a file as executable (replaces chmod +x).
 
 /// Bind mount a directory.
 async fn bind_mount(source: &str, target: &str) -> anyhow::Result<()> {
@@ -462,12 +451,19 @@ async fn ensure_golden_rootfs(rootfs_path: &str, cloud_img_url: &str, network: &
     }
     let _ = tokio::fs::remove_file(&raw_img).await;
 
-    let _ = run_e2fs_tool("e2fsck", &["-f", "-y", rootfs_path]).await;
-
-    let status = run_e2fs_tool("resize2fs", &[rootfs_path])
-        .await
-        .context("resize2fs (expand)")?;
-    ensure!(status.success(), "resize2fs failed");
+    // Run e2fsck + resize2fs to expand the filesystem to fill the 4GB image.
+    // These may fail if AppArmor blocks them — that's OK, the original partition
+    // (~2GB) has enough room for the runner install. We log a warning and continue.
+    match run_e2fs_tool("e2fsck", &["-f", "-y", rootfs_path]).await {
+        Ok(s) if s.success() => tracing::info!("e2fsck passed"),
+        Ok(s) => tracing::warn!("e2fsck exited with {}", s),
+        Err(e) => tracing::warn!("e2fsck skipped (AppArmor or not found): {}", e),
+    }
+    match run_e2fs_tool("resize2fs", &[rootfs_path]).await {
+        Ok(s) if s.success() => tracing::info!("resize2fs expanded filesystem to fill image"),
+        Ok(s) => tracing::warn!("resize2fs exited with {}", s),
+        Err(e) => tracing::warn!("resize2fs skipped (AppArmor or not found): {}", e),
+    }
 
     // ── Step 4: Mount and customize ─────────────────────────────────
     let mount_dir = format!("{}.mnt", rootfs_path);

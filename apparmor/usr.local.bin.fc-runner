@@ -42,11 +42,11 @@
 
   # System tools used during setup
   /usr/bin/cp ix,
-  /usr/bin/mount ix,
-  /usr/bin/umount ix,
+  /{usr/,}{s,}bin/mount ix,
+  /{usr/,}{s,}bin/umount ix,
   /usr/sbin/mount.* ix,
   /usr/bin/mountpoint ix,
-  /usr/sbin/losetup ix,
+  /{usr/,}{s,}bin/losetup ix,
   /usr/bin/curl ix,
   /usr/sbin/debootstrap ix,
   /usr/bin/chroot ix,
@@ -66,15 +66,31 @@
   /usr/bin/ip ix,
   /usr/bin/bash ix,
 
+  # e2fsprogs tools for rootfs resize/check
+  /{usr/,}{s,}bin/e2fsck ix,
+  /{usr/,}{s,}bin/resize2fs ix,
+  /{usr/,}{s,}bin/dumpe2fs ix,
+  /etc/e2fsck.conf r,
+
+  # Systemctl for masking services during rootfs build
+  /{usr/,}bin/systemctl ix,
+  /{usr/,}bin/useradd ix,
+  /{usr/,}bin/chown ix,
+  /{usr/,}sbin/chroot ix,
+  /{usr/,}bin/tar ix,
+
   # Network configuration
   /dev/net/tun rw,
   /proc/sys/net/ipv4/ip_forward rw,
   capability net_admin,
   capability net_raw,
+  network netlink raw,
 
   # Process info
   /proc/cpuinfo r,
   /proc/sys/** r,
+  /proc/*/cgroup r,
+  /proc/*/cgroup/** r,
 
   # Temp files for rootfs building
   /tmp/** rw,
