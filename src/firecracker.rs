@@ -8,6 +8,62 @@ use uuid::Uuid;
 
 use crate::config::{FirecrackerConfig, NetworkConfig};
 
+/// Mount an ext4 image via loop (read-write).
+fn mount_loop_ext4(image: &str, target: &str) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        nix::mount::mount(Some(image), target, Some("ext4"), nix::mount::MsFlags::MS_NOATIME, Some("loop"))
+            .map_err(|e| anyhow::anyhow!("mount failed: {}", e))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let status = std::process::Command::new("mount").args(["-o", "loop", image, target]).status()?;
+        ensure!(status.success(), "mount failed");
+        Ok(())
+    }
+}
+
+/// Mount an ext4 image via loop (read-only, noload for dirty fs).
+fn mount_loop_ext4_ro(image: &str, target: &str) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        nix::mount::mount(
+            Some(image), target, Some("ext4"),
+            nix::mount::MsFlags::MS_RDONLY | nix::mount::MsFlags::MS_NOATIME,
+            Some("loop,noload"),
+        ).map_err(|e| anyhow::anyhow!("mount ro failed: {}", e))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let status = std::process::Command::new("mount").args(["-o", "loop,ro,noload", image, target]).status()?;
+        ensure!(status.success(), "mount ro failed");
+        Ok(())
+    }
+}
+
+/// Try a normal umount, returns true on success.
+fn try_umount(target: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    { nix::mount::umount(target).is_ok() }
+    #[cfg(not(target_os = "linux"))]
+    { std::process::Command::new("umount").arg(target).status().map(|s| s.success()).unwrap_or(false) }
+}
+
+/// Lazy (detach) umount.
+fn lazy_umount_sync(target: &str) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        nix::mount::umount2(target, nix::mount::MntFlags::MNT_DETACH)
+            .map_err(|e| anyhow::anyhow!("lazy umount failed: {}", e))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let status = std::process::Command::new("umount").args(["-l", target]).status()?;
+        ensure!(status.success(), "lazy umount failed");
+        Ok(())
+    }
+}
+
 pub struct MicroVm {
     pub vm_id: String,
     pub job_id: u64,
@@ -138,23 +194,7 @@ impl MicroVm {
 
         tokio::fs::create_dir_all(&self.mount_point).await?;
 
-        let status = Command::new("mount")
-            .args(["-o", "loop", rootfs, mnt])
-            .status()
-            .await
-            .context("mounting rootfs")?;
-        ensure!(status.success(), "mount failed");
-
-        // Verify mount actually succeeded (TOCTOU protection)
-        let mountpoint_ok = Command::new("mountpoint")
-            .args(["-q", mnt])
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !mountpoint_ok {
-            anyhow::bail!("mount point verification failed for {}", mnt);
-        }
+        mount_loop_ext4(rootfs, mnt).context("mounting rootfs")?;
 
         // Write environment file
         let env_dir = self.mount_point.join("etc");
@@ -164,10 +204,10 @@ impl MicroVm {
         tokio::fs::write(&env_path, env_content).await?;
 
         // Restrict permissions on the env file (contains token)
-        Command::new("chmod")
-            .args(["0600", path_str(&env_path)?])
-            .status()
-            .await?;
+        std::fs::set_permissions(
+            &env_path,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )?;
 
         // Write per-VM guest network config (unique IP/gateway per slot)
         let network_dir = self.mount_point.join("etc/systemd/network");
@@ -197,12 +237,7 @@ impl MicroVm {
         let mnt = path_str(&self.mount_point)?;
 
         for attempt in 0..3 {
-            let status = Command::new("umount")
-                .arg(mnt)
-                .status()
-                .await
-                .context("unmounting rootfs")?;
-            if status.success() {
+            if try_umount(mnt) {
                 return Ok(());
             }
             if attempt < 2 {
@@ -213,12 +248,7 @@ impl MicroVm {
 
         // Fallback: lazy unmount to prevent leaked mount
         tracing::warn!(vm_id = %self.vm_id, "falling back to lazy umount");
-        let status = Command::new("umount")
-            .args(["-l", mnt])
-            .status()
-            .await
-            .context("lazy umount")?;
-        ensure!(status.success(), "lazy umount failed");
+        lazy_umount_sync(mnt).context("lazy umount failed")?;
         Ok(())
     }
 
@@ -238,24 +268,10 @@ impl MicroVm {
         }
 
         // noload skips journal replay so we can mount a dirty ext4 after VM kill
-        let mount_out = Command::new("mount")
-            .args(["-o", "loop,ro,noload", rootfs, &mnt])
-            .output()
-            .await;
-
-        match &mount_out {
-            Ok(output) if output.status.success() => {}
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                tracing::warn!(vm_id = %self.vm_id, stderr = %stderr, "mount failed for guest log dump");
-                let _ = tokio::fs::remove_dir(&self.mount_point).await;
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(vm_id = %self.vm_id, error = %e, "could not spawn mount for guest log dump");
-                let _ = tokio::fs::remove_dir(&self.mount_point).await;
-                return;
-            }
+        if let Err(e) = mount_loop_ext4_ro(rootfs, &mnt) {
+            tracing::warn!(vm_id = %self.vm_id, error = %e, "mount failed for guest log dump");
+            let _ = tokio::fs::remove_dir(&self.mount_point).await;
+            return;
         }
 
         let log_path = self.mount_point.join("var/log/runner.log");
@@ -293,12 +309,7 @@ impl MicroVm {
             }
         }
 
-        let _ = Command::new("umount")
-            .arg(&mnt)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
+        let _ = lazy_umount_sync(&mnt);
         let _ = tokio::fs::remove_dir(&self.mount_point).await;
     }
 

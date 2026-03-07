@@ -24,6 +24,83 @@ async fn download_file(url: &str, dest: &str) -> anyhow::Result<()> {
 }
 
 /// Set a file as executable (replaces chmod +x).
+/// Mount an ext4 image via loop device.
+async fn mount_ext4(image: &str, target: &str, readonly: bool) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut flags = nix::mount::MsFlags::MS_NOATIME;
+        let mut data = "loop";
+        if readonly {
+            flags |= nix::mount::MsFlags::MS_RDONLY;
+            data = "loop,noload";
+        }
+        nix::mount::mount(Some(image), target, Some("ext4"), flags, Some(data))
+            .map_err(|e| anyhow::anyhow!("mount failed: {}", e))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut args = vec!["-o"];
+        args.push(if readonly { "loop,ro,noload" } else { "loop" });
+        args.push(image);
+        args.push(target);
+        let status = Command::new("mount").args(&args).status().await.context("mount")?;
+        ensure!(status.success(), "mount failed");
+        Ok(())
+    }
+}
+
+/// Bind mount a directory.
+async fn bind_mount(source: &str, target: &str) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        nix::mount::mount(Some(source), target, None::<&str>, nix::mount::MsFlags::MS_BIND, None::<&str>)
+            .map_err(|e| anyhow::anyhow!("bind mount failed: {}", e))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let status = Command::new("mount").args(["--bind", source, target]).status().await?;
+        ensure!(status.success(), "bind mount failed");
+        Ok(())
+    }
+}
+
+/// Mount a pseudo-filesystem (proc, sysfs).
+async fn mount_pseudo(fstype: &str, target: &str) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        nix::mount::mount(None::<&str>, target, Some(fstype), nix::mount::MsFlags::empty(), None::<&str>)
+            .map_err(|e| anyhow::anyhow!("mount {} failed: {}", fstype, e))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let status = Command::new("mount").args(["-t", fstype, fstype, target]).status().await?;
+        ensure!(status.success(), "mount {} failed", fstype);
+        Ok(())
+    }
+}
+
+/// Lazy unmount a filesystem.
+async fn lazy_umount(target: &str) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        nix::mount::umount2(target, nix::mount::MntFlags::MNT_DETACH)
+            .map_err(|e| anyhow::anyhow!("umount failed: {}", e))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let status = Command::new("umount").args(["-l", target])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status().await?;
+        ensure!(status.success(), "umount failed");
+        Ok(())
+    }
+}
+
 fn set_executable(path: &str) -> anyhow::Result<()> {
     let meta = std::fs::metadata(path)?;
     let mut perms = meta.permissions();
@@ -374,35 +451,22 @@ async fn ensure_golden_rootfs(rootfs_path: &str, cloud_img_url: &str, network: &
     let mount_dir = format!("{}.mnt", rootfs_path);
     tokio::fs::create_dir_all(&mount_dir).await?;
 
-    let status = Command::new("mount")
-        .args(["-o", "loop", rootfs_path, &mount_dir])
-        .status()
-        .await
+    mount_ext4(rootfs_path, &mount_dir, false).await
         .context("mounting rootfs image")?;
-    ensure!(status.success(), "mount failed");
 
     // Mount pseudo-filesystems for chroot
-    let _ = Command::new("mount").args(["--bind", "/dev", &format!("{}/dev", mount_dir)]).status().await;
-    let _ = Command::new("mount").args(["--bind", "/dev/pts", &format!("{}/dev/pts", mount_dir)]).status().await;
-    let _ = Command::new("mount").args(["-t", "proc", "proc", &format!("{}/proc", mount_dir)]).status().await;
-    let _ = Command::new("mount").args(["-t", "sysfs", "sys", &format!("{}/sys", mount_dir)]).status().await;
+    let _ = bind_mount("/dev", &format!("{}/dev", mount_dir)).await;
+    let _ = bind_mount("/dev/pts", &format!("{}/dev/pts", mount_dir)).await;
+    let _ = mount_pseudo("proc", &format!("{}/proc", mount_dir)).await;
+    let _ = mount_pseudo("sysfs", &format!("{}/sys", mount_dir)).await;
 
     let result = build_rootfs_contents(&mount_dir, network).await;
 
     // Always unmount pseudo-filesystems then rootfs
     for sub in ["dev/pts", "dev", "proc", "sys"] {
-        let _ = Command::new("umount")
-            .arg(format!("{}/{}", mount_dir, sub))
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .await;
+        let _ = lazy_umount(&format!("{}/{}", mount_dir, sub)).await;
     }
-    let umount_status = Command::new("umount")
-        .arg(&mount_dir)
-        .status()
-        .await
-        .context("unmounting rootfs")?;
+    let umount_result = lazy_umount(&mount_dir).await;
 
     let _ = tokio::fs::remove_dir(&mount_dir).await;
 
@@ -410,7 +474,7 @@ async fn ensure_golden_rootfs(rootfs_path: &str, cloud_img_url: &str, network: &
         let _ = tokio::fs::remove_file(rootfs_path).await;
         return Err(e).context("building rootfs contents");
     }
-    ensure!(umount_status.success(), "umount failed");
+    umount_result.context("unmounting rootfs")?;
 
     // ── Step 5: Shrink image ────────────────────────────────────────
     tracing::info!("shrinking rootfs image...");
