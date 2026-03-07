@@ -22,9 +22,13 @@ echo "[3/7] Mounting..."
 mkdir -p "$MNT"
 mount -o loop "$ROOTFS" "$MNT"
 
-# Ensure cleanup on exit
+# Ensure cleanup on exit (unmount pseudo-fs first, then rootfs)
 cleanup() {
-    echo "Cleaning up mount..."
+    echo "Cleaning up mounts..."
+    umount "$MNT/dev/pts" 2>/dev/null || true
+    umount "$MNT/dev" 2>/dev/null || true
+    umount "$MNT/proc" 2>/dev/null || true
+    umount "$MNT/sys" 2>/dev/null || true
     umount -l "$MNT" 2>/dev/null || true
     rmdir "$MNT" 2>/dev/null || true
 }
@@ -34,6 +38,12 @@ echo "[4/7] Running debootstrap (takes ~5 minutes)..."
 debootstrap --arch=amd64 \
     --include=systemd,systemd-sysv,curl,git,jq,ca-certificates,sudo,openssh-client,unzip,libicu74 \
     noble "$MNT" http://archive.ubuntu.com/ubuntu
+
+# Mount pseudo-filesystems needed by chroot commands
+mount --bind /dev "$MNT/dev"
+mount --bind /dev/pts "$MNT/dev/pts"
+mount -t proc proc "$MNT/proc"
+mount -t sysfs sys "$MNT/sys"
 
 echo "[5/7] Configuring network..."
 mkdir -p "$MNT/etc/systemd/network"
@@ -126,7 +136,11 @@ exit 0
 RCEOF
 chmod +x "$MNT/etc/rc.local"
 
-# Unmount (trap will handle cleanup)
+# Unmount pseudo-filesystems, then rootfs
+umount "$MNT/dev/pts"
+umount "$MNT/dev"
+umount "$MNT/proc"
+umount "$MNT/sys"
 umount "$MNT"
 rmdir "$MNT"
 trap - EXIT
