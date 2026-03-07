@@ -25,6 +25,8 @@ pub struct ServerConfig {
     pub listen_addr: String,
     #[serde(default = "default_server_enabled")]
     pub enabled: bool,
+    /// Optional API key for management endpoints (if unset, no auth required)
+    pub api_key: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -32,6 +34,7 @@ impl Default for ServerConfig {
         Self {
             listen_addr: default_listen_addr(),
             enabled: default_server_enabled(),
+            api_key: None,
         }
     }
 }

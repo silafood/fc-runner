@@ -96,9 +96,11 @@ dns = ["8.8.8.8", "1.1.1.1"]
 # allowed_networks = ["github"]
 # allowed_networks = ["github", "10.0.0.0/8", "192.168.1.0/24"]
 
-# Metrics and health HTTP server
+# Management and metrics HTTP server
 [server]
 # Set to false to disable the HTTP server entirely
 # enabled = true
-# Listen address for /metrics (Prometheus) and /healthz endpoints
+# Listen address for /metrics (Prometheus), /healthz, /api/v1/* endpoints
 # listen_addr = "0.0.0.0:9090"
+# Optional API key for management endpoints (X-Api-Key header)
+# api_key = "your-secret-key"
