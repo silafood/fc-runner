@@ -15,8 +15,8 @@ GitHub Actions                fc-runner                    Firecracker
 ```
 
 1. **Poll** — queries the GitHub REST API for queued workflow runs matching configured labels
-2. **Token** — requests a single-use JIT runner token for each new job
-3. **Prepare** — COW-copies the golden ext4 rootfs, mounts it, injects the JIT token
+2. **Token** — requests a single-use JIT runner token for each new job (PAT or GitHub App)
+3. **Prepare** — COW-copies the golden ext4 rootfs, injects secrets via MMDS or loop-mount
 4. **Boot** — launches a Firecracker microVM with the prepared rootfs (~125 ms boot)
 5. **Run** — the VM registers as an ephemeral GitHub runner, executes the job
 6. **Cleanup** — VM exits, all artifacts (rootfs copy, config, logs) are deleted
@@ -27,6 +27,12 @@ GitHub Actions                fc-runner                    Firecracker
 - **Fast boot** — Firecracker microVMs start in ~125 ms
 - **Auto-provisioning** — kernel download, golden rootfs build (from Ubuntu cloud image via pure Rust qcow2 conversion), per-VM TAP networking, and NAT are all set up automatically at first startup
 - **JIT tokens** — single-use, short-lived tokens (no static runner registration)
+- **GitHub App auth** — authenticate as a GitHub App for higher rate limits and no PAT expiry management
+- **MMDS secret injection** — inject secrets via Firecracker's built-in metadata service (no loop-mount needed)
+- **Pool-based scaling** — named VM pools with per-pool repos, replica counts, and resource overrides
+- **Prometheus metrics** — `/metrics` endpoint with job counts, VM boot duration, API rate limits, and more
+- **Management API** — REST API (`/api/v1/status`, `/api/v1/vms`) for monitoring and VM management
+- **VSOCK guest agent** — optional host-guest communication channel via virtio-vsock
 - **Secret protection** — GitHub PAT stored via `secrecy::SecretString`, zeroized on drop, redacted in all logs
 - **AppArmor** — ships restrictive profiles for both `firecracker` and `fc-runner` binaries
 - **Concurrency control** — bounded by `max_concurrent_jobs` via `tokio::sync::Semaphore` (default: 4)
@@ -52,7 +58,7 @@ GitHub Actions                fc-runner                    Firecracker
 
 - **Linux host** — Pop!_OS or Ubuntu 24.04 (bare-metal or nested virt enabled)
 - **Rust toolchain** — install via [rustup](https://rustup.rs/)
-- **GitHub PAT** — Fine-grained (recommended: `Actions` + `Administration` permissions) or Classic (`repo` scope). See [setup guide](docs/setup.md#github-token-setup) for step-by-step instructions.
+- **GitHub PAT or App** — Fine-grained PAT (recommended: `Actions` + `Administration` permissions), Classic PAT (`repo` scope), or GitHub App. See [setup guide](docs/setup.md#github-token-setup) for step-by-step instructions.
 - **KVM access** — one-time setup:
 
 ```bash
@@ -102,6 +108,12 @@ owner = "your-org"
 repo = "your-repo"
 # Or serve multiple repos:
 # repos = ["repo-one", "repo-two"]
+
+# Or use GitHub App authentication instead of a PAT:
+# [github.app]
+# app_id = 12345
+# installation_id = 67890
+# private_key_path = "/etc/fc-runner/app-key.pem"
 ```
 
 ### 4. Start
@@ -130,10 +142,12 @@ Full example at [`config.toml.example`](config.toml.example). Key sections:
 
 | Section | Key fields |
 |---------|-----------|
-| `[github]` | `token`, `owner`, `repo` or `repos` (multi-repo), `runner_group_id` (default: 1), `labels` |
-| `[firecracker]` | `kernel_path`, `rootfs_golden`, `vcpu_count` (default: 2), `mem_size_mib` (default: 2048) |
-| `[runner]` | `work_dir`, `poll_interval_secs` (default: 5), `max_concurrent_jobs` (default: 4), `vm_timeout_secs` (default: 3600) |
-| `[network]` | `host_ip`, `guest_ip`, `cidr`, `dns` (default: 8.8.8.8, 1.1.1.1), `allowed_networks` |
+| `[github]` | `token`, `owner`, `repo` or `repos`, `labels`; or `[github.app]` for App auth |
+| `[firecracker]` | `kernel_path`, `rootfs_golden`, `vcpu_count`, `mem_size_mib`, `secret_injection`, `vsock_enabled` |
+| `[runner]` | `work_dir`, `poll_interval_secs`, `max_concurrent_jobs`, `vm_timeout_secs`, `warm_pool_size` |
+| `[[pool]]` | Named pools: `name`, `repos`, `min_ready`, `max_ready`, per-pool `vcpu_count`/`mem_size_mib` |
+| `[network]` | `host_ip`, `guest_ip`, `cidr`, `dns`, `allowed_networks` |
+| `[server]` | `enabled`, `listen_addr`, `api_key` — Prometheus metrics + management API |
 
 See [docs/configuration.md](docs/configuration.md) for the full reference.
 
@@ -144,12 +158,18 @@ fc-runner/
 ├── src/
 │   ├── main.rs           # Entry point, signal handling, config loading
 │   ├── config.rs         # Typed TOML config with validation
-│   ├── github.rs         # GitHub API client (poll + JIT tokens)
-│   ├── firecracker.rs    # MicroVm lifecycle: prepare → run → cleanup
+│   ├── github.rs         # GitHub API client (PAT + App auth, poll + JIT tokens)
+│   ├── firecracker.rs    # MicroVm lifecycle: prepare → run → cleanup (MMDS + mount modes)
 │   ├── netlink.rs        # Pure-Rust TAP device management (rtnetlink + nix ioctl)
-│   ├── orchestrator.rs   # Poll/dispatch loop with dedup
-│   └── setup.rs          # KVM checks, kernel/rootfs provisioning, network, AppArmor
-├── guest_configs/        # Firecracker kernel configs (x86_64 + aarch64)
+│   ├── orchestrator.rs   # Poll/dispatch loop with dedup (JIT, warm pool, named pools)
+│   ├── setup.rs          # KVM checks, kernel/rootfs provisioning, network, AppArmor
+│   ├── metrics.rs        # Prometheus metrics registry and counters
+│   ├── server.rs         # HTTP server: /metrics, /healthz, management API
+│   ├── pool.rs           # Named VM pool manager with min/max ready counts
+│   └── vsock.rs          # Host-side VSOCK listener for guest agent communication
+├── guest_configs/
+│   ├── fetch-mmds-env.sh            # Guest-side MMDS metadata fetch script
+│   └── microvm-kernel-ci-*.config   # Firecracker kernel configs (x86_64 + aarch64)
 ├── .github/workflows/
 │   └── release.yml       # CI: build binary + kernel + rootfs, publish release
 ├── apparmor/
@@ -162,7 +182,6 @@ fc-runner/
 │   └── troubleshooting.md
 ├── Cargo.toml
 ├── config.toml.example
-├── vm-config.json.template
 ├── fc-runner.service      # systemd unit
 ├── install.sh             # Host setup script
 └── build-v611-linux.sh    # Manual golden rootfs + kernel provisioning
@@ -177,7 +196,7 @@ fc-runner/
 | VM isolation | Firecracker microVM (KVM-based, minimal attack surface) |
 | Secret handling | `secrecy::SecretString` — zeroized on drop, redacted in Debug/logs |
 | Token scope | JIT tokens are single-use, short-lived, per-job |
-| Token injection | Written to ext4 image file (not kernel cmdline or env vars visible in `/proc`), `chmod 0600` |
+| Token injection | MMDS metadata service (default) or written to ext4 image file — never kernel cmdline or `/proc`-visible env vars |
 | Path validation | Symlink checks on all critical paths at config load time |
 | Mount safety | TOCTOU protection via `mountpoint -q` verification; umount retry with lazy fallback |
 | Filesystem | AppArmor profiles restrict both binaries to minimum required paths |
@@ -235,6 +254,15 @@ sudo systemctl restart fc-runner
 
 # Check for running VMs
 pgrep -a firecracker
+
+# Prometheus metrics (default port 9090)
+curl -s http://localhost:9090/metrics
+
+# Management API — list active VMs
+curl -s http://localhost:9090/api/v1/vms | jq .
+
+# Health check
+curl -s http://localhost:9090/healthz
 
 # Check AppArmor enforcement
 sudo aa-status | grep -E '(firecracker|fc-runner)'

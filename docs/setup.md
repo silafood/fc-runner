@@ -4,11 +4,11 @@
 
 - **Linux host** running Pop!_OS or Ubuntu 24.04 (bare-metal or nested virt enabled)
 - **Rust toolchain** — install via [rustup](https://rustup.rs/)
-- **GitHub Personal Access Token (PAT)** — see below for how to generate one
+- **GitHub credentials** — PAT or GitHub App (see below)
 
 ### GitHub Token Setup
 
-fc-runner needs a GitHub token to poll for queued jobs and register ephemeral runners. You can use either a **Fine-grained PAT** (recommended) or a **Classic PAT**.
+fc-runner needs GitHub credentials to poll for queued jobs and register ephemeral runners. You can use a **Fine-grained PAT** (recommended), **Classic PAT**, or **GitHub App**.
 
 #### Option A: Fine-grained PAT (recommended)
 
@@ -43,11 +43,50 @@ Classic tokens are simpler but grant broader access.
 
 5. Click **Generate token** and copy it
 
+#### Option C: GitHub App (best for organizations)
+
+GitHub Apps provide the highest rate limits (5,000/hour per installation), no token expiry management, and are preferred for organization deployments.
+
+1. Go to **GitHub → Settings → Developer settings → GitHub Apps → New GitHub App**
+2. Set a name (e.g., `fc-runner`) and homepage URL
+3. Uncheck **Webhook → Active** (fc-runner polls, it doesn't use webhooks)
+4. Under **Repository permissions**, grant:
+
+   | Permission | Access | Why |
+   |-----------|--------|-----|
+   | **Actions** | Read and write | Poll queued runs/jobs, generate JIT runner tokens |
+   | **Administration** | Read and write | Register ephemeral self-hosted runners |
+   | **Metadata** | Read-only | Required by GitHub (auto-selected) |
+
+5. Under **Where can this GitHub App be installed?**, select **Only on this account**
+6. Click **Create GitHub App**
+7. Note the **App ID** from the app settings page
+8. Scroll down to **Private keys** and click **Generate a private key** — save the `.pem` file
+9. Click **Install App** in the sidebar, then install it on the org/user that owns your repos
+10. Note the **Installation ID** from the URL: `https://github.com/settings/installations/<ID>`
+
+Configure in `config.toml`:
+```toml
+[github]
+owner = "your-org"
+repos = ["repo-a", "repo-b"]
+
+[github.app]
+app_id = 12345
+installation_id = 67890
+private_key_path = "/etc/fc-runner/app-key.pem"
+```
+
+Secure the private key:
+```bash
+sudo chmod 0600 /etc/fc-runner/app-key.pem
+```
+
 #### For Organization repositories
 
-If fc-runner serves an **organization** repo, the org admin may need to:
-- Approve the fine-grained PAT under **Organization settings → Personal access tokens → Pending requests**
-- Or use a **GitHub App** installation token instead of a PAT (not covered here)
+If fc-runner serves an **organization** repo:
+- **PAT:** The org admin may need to approve the fine-grained PAT under **Organization settings → Personal access tokens → Pending requests**
+- **GitHub App:** Install the App on the organization and ensure it has access to the required repos
 
 #### Security best practices
 
@@ -149,11 +188,11 @@ sudo nano /etc/fc-runner/config.toml
 ```
 
 At minimum, set:
-- `github.token` — your PAT
+- `github.token` (or `[github.app]`) — authentication credentials
 - `github.owner` — repository owner
 - `github.repo` — repository name (or `github.repos` for multiple)
 
-**Single repo:**
+**Single repo with PAT:**
 ```toml
 [github]
 token = "ghp_..."
@@ -161,7 +200,7 @@ owner = "your-org"
 repo = "your-repo"
 ```
 
-**Multiple repos under the same owner:**
+**Multiple repos with PAT:**
 ```toml
 [github]
 token = "ghp_..."
@@ -169,7 +208,19 @@ owner = "your-org"
 repos = ["repo-one", "repo-two", "repo-three"]
 ```
 
-Both `repo` and `repos` can be set — they are merged and deduplicated. All repos share the same token, labels, and runner group. When using fine-grained PATs, make sure the token has access to all listed repos.
+**GitHub App (recommended for orgs):**
+```toml
+[github]
+owner = "your-org"
+repos = ["repo-one", "repo-two"]
+
+[github.app]
+app_id = 12345
+installation_id = 67890
+private_key_path = "/etc/fc-runner/app-key.pem"
+```
+
+Both `repo` and `repos` can be set — they are merged and deduplicated. All repos share the same token/app, labels, and runner group. When using fine-grained PATs, make sure the token has access to all listed repos.
 
 For production hardening, enable the jailer:
 ```toml
