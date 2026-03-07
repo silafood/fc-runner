@@ -463,16 +463,11 @@ async fn ensure_golden_rootfs(rootfs_path: &str, cloud_img_url: &str, network: &
     }
     let _ = tokio::fs::remove_file(&raw_img).await;
 
-    let _ = Command::new("e2fsck")
-        .args(["-f", "-y", rootfs_path])
-        .status()
-        .await;
+    let _ = run_e2fs_tool("e2fsck", &["-f", "-y", rootfs_path]).await;
 
-    let status = Command::new("resize2fs")
-        .arg(rootfs_path)
-        .status()
+    let status = run_e2fs_tool("resize2fs", &[rootfs_path])
         .await
-        .context("resize2fs")?;
+        .context("resize2fs (expand)")?;
     ensure!(status.success(), "resize2fs failed");
 
     // ── Step 4: Mount and customize ─────────────────────────────────
@@ -506,36 +501,17 @@ async fn ensure_golden_rootfs(rootfs_path: &str, cloud_img_url: &str, network: &
 
     // ── Step 5: Shrink image ────────────────────────────────────────
     tracing::info!("shrinking rootfs image...");
-    let _ = Command::new("e2fsck").args(["-f", "-y", rootfs_path]).status().await;
-    let _ = Command::new("resize2fs").args(["-M", rootfs_path]).status().await;
+    let _ = run_e2fs_tool("e2fsck", &["-f", "-y", rootfs_path]).await;
+    let _ = run_e2fs_tool("resize2fs", &["-M", rootfs_path]).await;
 
-    // Calculate final size: min blocks + 512MB headroom
-    let output = Command::new("dumpe2fs")
-        .args(["-h", rootfs_path])
-        .output()
-        .await
-        .context("dumpe2fs")?;
-    let dumpe2fs_out = String::from_utf8_lossy(&output.stdout);
-    let block_count: u64 = dumpe2fs_out
-        .lines()
-        .find(|l| l.starts_with("Block count:"))
-        .and_then(|l| l.split_whitespace().last())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let block_size: u64 = dumpe2fs_out
-        .lines()
-        .find(|l| l.starts_with("Block size:"))
-        .and_then(|l| l.split_whitespace().last())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(4096);
+    // Read block count + block size directly from ext4 superblock (replaces dumpe2fs)
+    let (block_count, block_size) = read_ext4_superblock(rootfs_path)
+        .context("reading ext4 superblock")?;
 
     if block_count > 0 {
         let final_bytes = block_count * block_size + 512 * 1024 * 1024;
         let final_blocks = final_bytes / block_size;
-        let _ = Command::new("resize2fs")
-            .args([rootfs_path, &final_blocks.to_string()])
-            .status()
-            .await;
+        let _ = run_e2fs_tool("resize2fs", &[rootfs_path, &final_blocks.to_string()]).await;
         let f = std::fs::OpenOptions::new().write(true).open(rootfs_path)?;
         f.set_len(final_bytes)?;
     }
@@ -1076,4 +1052,61 @@ async fn ensure_apparmor(firecracker_binary: &str) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Run an e2fsprogs tool (e2fsck, resize2fs) using absolute path with fallback.
+///
+/// Systemd services often have a restricted PATH that doesn't include /sbin.
+/// Try /sbin/ first, then /usr/sbin/, then bare name as fallback.
+async fn run_e2fs_tool(tool: &str, args: &[&str]) -> anyhow::Result<std::process::ExitStatus> {
+    for prefix in ["/sbin/", "/usr/sbin/", ""] {
+        let bin = format!("{}{}", prefix, tool);
+        match Command::new(&bin).args(args).status().await {
+            Ok(status) => return Ok(status),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("running {}", bin)),
+        }
+    }
+    anyhow::bail!("{} not found in /sbin, /usr/sbin, or PATH", tool)
+}
+
+/// Read block_count and block_size from the ext4 superblock (replaces dumpe2fs).
+///
+/// The ext4 superblock starts at byte offset 1024 in the filesystem image.
+/// - block_size = 2^(10 + s_log_block_size)  [offset 24, 4 bytes LE]
+/// - block_count = s_blocks_count_lo          [offset 4, 4 bytes LE]
+///              + (s_blocks_count_hi << 32)   [offset 336, 4 bytes LE] (64-bit ext4)
+fn read_ext4_superblock(path: &str) -> anyhow::Result<(u64, u64)> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut f = std::fs::File::open(path)
+        .with_context(|| format!("opening {} for superblock read", path))?;
+
+    // Superblock starts at offset 1024
+    f.seek(SeekFrom::Start(1024))?;
+    let mut sb = [0u8; 512];
+    f.read_exact(&mut sb)?;
+
+    // Verify ext4 magic at offset 56: 0xEF53
+    let magic = u16::from_le_bytes([sb[56], sb[57]]);
+    ensure!(magic == 0xEF53, "not a valid ext4 image (magic: {:#06x})", magic);
+
+    // s_blocks_count_lo at offset 4 (4 bytes)
+    let blocks_lo = u32::from_le_bytes([sb[4], sb[5], sb[6], sb[7]]) as u64;
+    // s_blocks_count_hi at offset 336 (4 bytes) — present in 64-bit ext4
+    let blocks_hi = u32::from_le_bytes([sb[336], sb[337], sb[338], sb[339]]) as u64;
+    let block_count = blocks_lo | (blocks_hi << 32);
+
+    // s_log_block_size at offset 24 (4 bytes)
+    let log_block_size = u32::from_le_bytes([sb[24], sb[25], sb[26], sb[27]]);
+    let block_size = 1u64 << (10 + log_block_size);
+
+    tracing::info!(
+        block_count = block_count,
+        block_size = block_size,
+        total_size_mb = (block_count * block_size) / (1024 * 1024),
+        "read ext4 superblock"
+    );
+
+    Ok((block_count, block_size))
 }
