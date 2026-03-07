@@ -22,8 +22,8 @@
   # Golden rootfs and kernel (read/write during provisioning)
   # ix on **.mnt/** allows executing binaries inside chroot during rootfs build
   /opt/fc-runner/ rw,
-  /opt/fc-runner/** rw,
-  /opt/fc-runner/**.mnt/** ixrwk,
+  /opt/fc-runner/** rwl,
+  /opt/fc-runner/**.mnt/** ixrwkl,
 
   # Mount operations for rootfs injection (loop devices needed)
   capability sys_admin,
@@ -40,6 +40,7 @@
   capability setuid,
   capability setgid,
   capability kill,
+  capability syslog,
 
   mount,
   umount,
