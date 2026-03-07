@@ -16,7 +16,7 @@ Environment=RUST_LOG=fc_runner=info
 # NoNewPrivileges breaks suid binaries like iptables
 # NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=strict
+ProtectSystem=full
 ProtectHome=true
 ReadWritePaths=/var/lib/fc-runner /opt/fc-runner /tmp
 ProtectKernelModules=true
