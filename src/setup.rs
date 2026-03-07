@@ -264,19 +264,50 @@ async fn ensure_golden_rootfs(rootfs_path: &str, cloud_img_url: &str, network: &
         .context("losetup")?;
     ensure!(output.status.success(), "losetup failed");
     let loop_dev = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    tracing::info!(loop_dev = %loop_dev, "attached raw image to loop device");
 
-    // Find the ext4 partition (usually p1)
+    // Trigger partition re-read and wait for partition devices to appear
+    let _ = Command::new("partprobe").arg(&loop_dev).status().await;
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    // Log what partitions the kernel found
+    let ls_out = Command::new("ls")
+        .arg("-la")
+        .arg(format!("{}p*", loop_dev))
+        .output()
+        .await;
+    if let Ok(out) = &ls_out {
+        tracing::info!(partitions = %String::from_utf8_lossy(&out.stdout).trim(), "partition devices found");
+    }
+
+    // Find the ext4 partition (scan p1 through p15)
     let mut ext4_part = String::new();
-    for suffix in ["p1", "p2", "p15"] {
-        let part = format!("{}{}", loop_dev, suffix);
+    for i in 1..=15 {
+        let part = format!("{}p{}", loop_dev, i);
+        if !std::path::Path::new(&part).exists() {
+            continue;
+        }
         let blkid_out = Command::new("blkid")
             .arg(&part)
             .output()
             .await;
         if let Ok(out) = blkid_out {
-            if out.status.success() && String::from_utf8_lossy(&out.stdout).contains("ext4") {
+            let info = String::from_utf8_lossy(&out.stdout);
+            tracing::info!(partition = %part, info = %info.trim(), "checking partition");
+            if out.status.success() && info.contains("ext4") {
                 ext4_part = part;
                 break;
+            }
+        }
+    }
+    if ext4_part.is_empty() {
+        // Also try the loop device itself (no partition table, raw ext4)
+        let blkid_out = Command::new("blkid").arg(&loop_dev).output().await;
+        if let Ok(out) = blkid_out {
+            let info = String::from_utf8_lossy(&out.stdout);
+            tracing::info!(device = %loop_dev, info = %info.trim(), "checking loop device directly");
+            if out.status.success() && info.contains("ext4") {
+                ext4_part = loop_dev.clone();
             }
         }
     }
