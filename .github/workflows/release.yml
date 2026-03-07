@@ -1,0 +1,129 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.0)'
+        required: true
+      kernel_version:
+        description: 'Kernel version to build (e.g. 6.1.102)'
+        required: false
+        default: '6.1.102'
+
+env:
+  KERNEL_VERSION: ${{ github.event.inputs.kernel_version || '6.1.102' }}
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+permissions:
+  contents: write
+
+jobs:
+  build-binary:
+    name: Build fc-runner binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fc-runner
+          path: target/release/fc-runner
+
+  build-kernel:
+    name: Build Linux ${{ github.event.inputs.kernel_version || '6.1.102' }} kernel
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential libncurses-dev bison flex \
+            libssl-dev libelf-dev bc wget
+
+      - name: Download kernel source
+        run: |
+          wget -q https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VERSION}.tar.xz
+          tar -xf linux-${KERNEL_VERSION}.tar.xz
+
+      - name: Apply Firecracker kernel config
+        working-directory: linux-${{ env.KERNEL_VERSION }}
+        run: |
+          wget -q https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/resources/guest_configs/microvm-kernel-x86_64-6.1.config \
+            -O .config
+          make olddefconfig
+
+      - name: Build vmlinux
+        working-directory: linux-${{ env.KERNEL_VERSION }}
+        run: make vmlinux -j$(nproc)
+
+      - name: Verify output
+        working-directory: linux-${{ env.KERNEL_VERSION }}
+        run: |
+          ls -lh vmlinux
+          file vmlinux | grep -q "ELF 64-bit" || (echo "ERROR: vmlinux is not a valid ELF binary" && exit 1)
+
+      - name: Upload kernel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vmlinux-${{ env.KERNEL_VERSION }}
+          path: linux-${{ env.KERNEL_VERSION }}/vmlinux
+          retention-days: 90
+
+  release:
+    name: Create GitHub Release
+    needs: [build-binary, build-kernel]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download fc-runner binary
+        uses: actions/download-artifact@v4
+        with:
+          name: fc-runner
+          path: artifacts/
+
+      - name: Download vmlinux kernel
+        uses: actions/download-artifact@v4
+        with:
+          name: vmlinux-${{ env.KERNEL_VERSION }}
+          path: artifacts/
+
+      - name: Prepare release assets
+        run: |
+          chmod +x artifacts/fc-runner
+          mv artifacts/vmlinux artifacts/vmlinux-${KERNEL_VERSION}
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${RELEASE_TAG}" \
+            --title "fc-runner ${RELEASE_TAG}" \
+            --generate-notes \
+            artifacts/fc-runner \
+            artifacts/vmlinux-${KERNEL_VERSION} \
+            config.toml.example \
+            fc-runner.service \
+            install.sh \
+            build-v611-linux.sh
