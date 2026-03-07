@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::AppConfig;
 use crate::firecracker::MicroVm;
 use crate::github::GitHubClient;
+use crate::metrics;
 
 pub struct Orchestrator {
     config: Arc<AppConfig>,
@@ -81,6 +82,7 @@ impl Orchestrator {
     async fn poll_once(&self) -> anyhow::Result<()> {
         for repo in self.github.repos() {
             if let Err(e) = self.poll_repo(&repo).await {
+                metrics::POLL_CYCLES.with_label_values(&["error"]).inc();
                 tracing::error!(
                     repo = %repo,
                     error = %e,
@@ -88,6 +90,7 @@ impl Orchestrator {
                 );
             }
         }
+        metrics::POLL_CYCLES.with_label_values(&["ok"]).inc();
         Ok(())
     }
 
@@ -116,6 +119,7 @@ impl Orchestrator {
                     repo = %repo,
                     "dispatching new job"
                 );
+                metrics::JOBS_DISPATCHED.with_label_values(&[repo]).inc();
                 self.dispatch_jit_job(job.id, repo.to_string());
             }
         }
@@ -153,12 +157,18 @@ impl Orchestrator {
             };
 
             *active_jobs.lock().await += 1;
+            metrics::JOBS_ACTIVE.inc();
+            metrics::POOL_SLOTS_AVAILABLE.dec();
             tracing::info!(job_id, repo = %repo, slot, "job started (permit acquired, slot assigned)");
 
+            let timer = metrics::VM_BOOT_DURATION.with_label_values(&[&repo]).start_timer();
             let result = run_jit_job(config.clone(), github.clone(), job_id, &repo, slot).await;
+            timer.observe_duration();
 
             slot_pool.lock().await.push(slot);
             *active_jobs.lock().await -= 1;
+            metrics::JOBS_ACTIVE.dec();
+            metrics::POOL_SLOTS_AVAILABLE.inc();
 
             // Clean up offline runners left by this (and any previous) VMs
             github.remove_offline_runners(&repo).await;
@@ -166,9 +176,11 @@ impl Orchestrator {
             match result {
                 Ok(()) => {
                     seen_jobs.lock().await.remove(&job_id);
+                    metrics::JOBS_COMPLETED.with_label_values(&[&repo]).inc();
                     tracing::info!(job_id, repo = %repo, slot, "job completed successfully");
                 }
                 Err(e) => {
+                    metrics::JOBS_FAILED.with_label_values(&[&repo]).inc();
                     tracing::error!(job_id, repo = %repo, slot, error = %e, "job failed (will not retry)");
                 }
             }
@@ -248,23 +260,31 @@ impl Orchestrator {
 
         tokio::spawn(async move {
             *active_jobs.lock().await += 1;
+            metrics::JOBS_ACTIVE.inc();
+            metrics::POOL_SLOTS_AVAILABLE.dec();
             tracing::info!(slot, repo = %repo, "starting warm pool VM");
 
+            let timer = metrics::VM_BOOT_DURATION.with_label_values(&[&repo]).start_timer();
             let result = run_warm_vm(config, github.clone(), slot, &repo).await;
+            timer.observe_duration();
 
             // Clean up offline runners left by this VM
             github.remove_offline_runners(&repo).await;
 
             match &result {
                 Ok(()) => {
+                    metrics::JOBS_COMPLETED.with_label_values(&[&repo]).inc();
                     tracing::info!(slot, repo = %repo, "warm pool VM completed job successfully");
                 }
                 Err(e) => {
+                    metrics::JOBS_FAILED.with_label_values(&[&repo]).inc();
                     tracing::error!(slot, repo = %repo, error = %e, "warm pool VM failed");
                 }
             }
 
             *active_jobs.lock().await -= 1;
+            metrics::JOBS_ACTIVE.dec();
+            metrics::POOL_SLOTS_AVAILABLE.inc();
 
             // Signal that this slot is done and needs replacement
             let _ = done_tx.send((slot, repo)).await;

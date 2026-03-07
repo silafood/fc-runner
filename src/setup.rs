@@ -116,7 +116,7 @@ const DEFAULT_CLOUD_IMG_URL: &str =
 /// Ensures all VM prerequisites are in place: KVM, kernel, rootfs, network, and AppArmor.
 pub async fn ensure_vm_assets(config: &mut AppConfig) -> anyhow::Result<()> {
     preflight_kvm()?;
-    resolve_allowed_networks(&mut config.network, &config.github.token).await?;
+    resolve_allowed_networks(&mut config.network, config.github.token.as_ref()).await?;
     ensure_kernel(&config.firecracker.kernel_path).await?;
     let cloud_img_url = config.firecracker.cloud_img_url.as_deref().unwrap_or(DEFAULT_CLOUD_IMG_URL);
     ensure_golden_rootfs(&config.firecracker.rootfs_golden, cloud_img_url, &config.network).await?;
@@ -127,7 +127,7 @@ pub async fn ensure_vm_assets(config: &mut AppConfig) -> anyhow::Result<()> {
 
 /// Resolves the `allowed_networks` list by expanding the "github" keyword
 /// into actual CIDRs from https://api.github.com/meta.
-async fn resolve_allowed_networks(network: &mut NetworkConfig, token: &secrecy::SecretString) -> anyhow::Result<()> {
+async fn resolve_allowed_networks(network: &mut NetworkConfig, token: Option<&secrecy::SecretString>) -> anyhow::Result<()> {
     if network.allowed_networks.is_empty() {
         tracing::info!("no allowed_networks configured, all outbound traffic permitted");
         return Ok(());
@@ -185,7 +185,7 @@ struct GitHubMeta {
 
 /// Fetches GitHub's published IP ranges from the /meta endpoint.
 /// Returns CIDRs needed for Actions runners (actions + git + api + web).
-async fn fetch_github_cidrs(token: &secrecy::SecretString) -> anyhow::Result<Vec<String>> {
+async fn fetch_github_cidrs(token: Option<&secrecy::SecretString>) -> anyhow::Result<Vec<String>> {
     use secrecy::ExposeSecret;
 
     let client = reqwest::Client::builder()
@@ -194,9 +194,11 @@ async fn fetch_github_cidrs(token: &secrecy::SecretString) -> anyhow::Result<Vec
         .build()
         .context("building HTTP client for GitHub meta")?;
 
-    let resp = client
-        .get("https://api.github.com/meta")
-        .bearer_auth(token.expose_secret())
+    let mut req = client.get("https://api.github.com/meta");
+    if let Some(token) = token {
+        req = req.bearer_auth(token.expose_secret());
+    }
+    let resp = req
         .send()
         .await
         .context("fetching https://api.github.com/meta")?;
