@@ -23,13 +23,24 @@
   # ix on **.mnt/** allows executing binaries inside chroot during rootfs build
   /opt/fc-runner/ rw,
   /opt/fc-runner/** rw,
-  /opt/fc-runner/**.mnt/** ixrw,
+  /opt/fc-runner/**.mnt/** ixrwk,
 
   # Mount operations for rootfs injection (loop devices needed)
   capability sys_admin,
   capability sys_chroot,
   capability sys_nice,
   capability mknod,
+
+  # Capabilities needed by chroot'd tools (apt-get, useradd, chown, etc.)
+  capability chown,
+  capability fowner,
+  capability fsetid,
+  capability dac_override,
+  capability dac_read_search,
+  capability setuid,
+  capability setgid,
+  capability kill,
+
   mount,
   umount,
   /dev/loop-control rw,
