@@ -49,8 +49,8 @@ dd if="$PART" of="$ROOTFS" bs=4M status=progress
 losetup -d "$LOOP"
 rm -f "$RAWIMG"
 
-# Expand to 2GB for runner + workspace
-truncate -s 2G "$ROOTFS"
+# Expand to 4GB to ensure it's larger than the source partition
+truncate -s 4G "$ROOTFS"
 e2fsck -f -y "$ROOTFS" || true
 resize2fs "$ROOTFS"
 
