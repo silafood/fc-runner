@@ -35,3 +35,4 @@ libc = "0.2"
 nix = { version = "0.31", features = ["mount", "fs", "user", "ioctl", "net"] }
 rtnetlink = "0.20"
 futures = "0.3"
+tokio-vsock = "0.6"

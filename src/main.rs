@@ -7,6 +7,7 @@ mod orchestrator;
 mod pool;
 mod server;
 mod setup;
+mod vsock;
 
 use std::sync::Arc;
 

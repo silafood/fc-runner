@@ -155,10 +155,21 @@ pub struct FirecrackerConfig {
     /// "mount" uses the legacy loop-mount injection into the rootfs.
     #[serde(default = "default_secret_injection")]
     pub secret_injection: String,
+    /// Enable VSOCK device for guest agent communication.
+    /// When enabled, each VM gets a VSOCK device with CID = vsock_cid_base + slot.
+    #[serde(default)]
+    pub vsock_enabled: bool,
+    /// Base CID for VSOCK devices (default: 3, since CID 1 and 2 are reserved).
+    #[serde(default = "default_vsock_cid_base")]
+    pub vsock_cid_base: u32,
 }
 
 fn default_secret_injection() -> String {
     "mmds".into()
+}
+
+fn default_vsock_cid_base() -> u32 {
+    3
 }
 
 #[derive(Debug, Clone, Deserialize)]
