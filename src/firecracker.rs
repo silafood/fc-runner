@@ -395,15 +395,23 @@ impl MicroVm {
             .context("creating log file")?;
 
         tracing::info!(vm_id = %self.vm_id, "launching firecracker");
-        let exit_status = self.run().await?;
-        tracing::info!(vm_id = %self.vm_id, code = ?exit_status.code(), "VM exited");
+        let run_result = self.run().await;
 
-        // Read guest logs before cleanup destroys the rootfs
+        // Always dump guest log, regardless of how the VM exited
         self.dump_guest_log().await;
 
-        if !exit_status.success() {
-            anyhow::bail!("firecracker exited with status {:?}", exit_status.code());
+        match run_result {
+            Ok(exit_status) => {
+                tracing::info!(vm_id = %self.vm_id, code = ?exit_status.code(), "VM exited");
+                if !exit_status.success() {
+                    anyhow::bail!("firecracker exited with status {:?}", exit_status.code());
+                }
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!(vm_id = %self.vm_id, error = %e, "VM run failed");
+                Err(e)
+            }
         }
-        Ok(())
     }
 }
