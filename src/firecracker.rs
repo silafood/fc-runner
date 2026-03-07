@@ -222,6 +222,60 @@ impl MicroVm {
         Ok(())
     }
 
+    /// Mount the VM rootfs after exit and dump /var/log/runner.log for debugging.
+    async fn dump_guest_log(&self) {
+        let rootfs = match path_str(&self.rootfs_path) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let mnt = match path_str(&self.mount_point) {
+            Ok(s) => s.to_string(),
+            Err(_) => return,
+        };
+
+        if tokio::fs::create_dir_all(&self.mount_point).await.is_err() {
+            return;
+        }
+
+        let mounted = Command::new("mount")
+            .args(["-o", "loop,ro", rootfs, &mnt])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if !mounted {
+            tracing::warn!(vm_id = %self.vm_id, "could not mount rootfs to read guest log");
+            return;
+        }
+
+        let log_path = self.mount_point.join("var/log/runner.log");
+        match tokio::fs::read_to_string(&log_path).await {
+            Ok(contents) => {
+                // Log each line for visibility
+                for line in contents.lines().take(50) {
+                    tracing::info!(vm_id = %self.vm_id, "[guest-log] {}", line);
+                }
+                if contents.lines().count() > 50 {
+                    tracing::info!(vm_id = %self.vm_id, "[guest-log] ... (truncated)");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(vm_id = %self.vm_id, error = %e, "could not read guest runner.log");
+            }
+        }
+
+        let _ = Command::new("umount")
+            .arg(&mnt)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+        let _ = tokio::fs::remove_dir(&self.mount_point).await;
+    }
+
     async fn write_vm_config(&self) -> anyhow::Result<()> {
         let template = tokio::fs::read_to_string(&self.fc_config.vm_config_template)
             .await
@@ -337,6 +391,9 @@ impl MicroVm {
         tracing::info!(vm_id = %self.vm_id, "launching firecracker");
         let exit_status = self.run().await?;
         tracing::info!(vm_id = %self.vm_id, code = ?exit_status.code(), "VM exited");
+
+        // Read guest logs before cleanup destroys the rootfs
+        self.dump_guest_log().await;
 
         if !exit_status.success() {
             anyhow::bail!("firecracker exited with status {:?}", exit_status.code());
