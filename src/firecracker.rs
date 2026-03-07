@@ -262,7 +262,8 @@ impl MicroVm {
         match tokio::fs::read_to_string(&log_path).await {
             Ok(contents) => {
                 // Strip ANSI escape sequences and log each line
-                for line in contents.lines().take(50) {
+                let lines: Vec<&str> = contents.lines().collect();
+                for line in lines.iter().take(50) {
                     let clean: String = line
                         .chars()
                         .scan(false, |in_escape, c| {
@@ -283,7 +284,7 @@ impl MicroVm {
                         tracing::info!(vm_id = %self.vm_id, "[guest-log] {}", clean);
                     }
                 }
-                if contents.lines().count() > 50 {
+                if lines.len() > 50 {
                     tracing::info!(vm_id = %self.vm_id, "[guest-log] ... (truncated)");
                 }
             }
