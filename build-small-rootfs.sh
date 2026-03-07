@@ -114,7 +114,12 @@ DNS=8.8.8.8
 DNS=1.1.1.1
 EOF
 
-chroot "$MNT" systemctl enable systemd-networkd systemd-resolved
+chroot "$MNT" systemctl enable systemd-networkd systemd-resolved 2>/dev/null || true
+
+# Belt-and-suspenders: create symlinks manually in case chroot systemctl fails
+mkdir -p "$MNT/etc/systemd/system/multi-user.target.wants"
+ln -sf /lib/systemd/system/systemd-networkd.service "$MNT/etc/systemd/system/multi-user.target.wants/systemd-networkd.service"
+ln -sf /lib/systemd/system/systemd-resolved.service "$MNT/etc/systemd/system/multi-user.target.wants/systemd-resolved.service"
 
 # Disable services that slow boot and aren't needed
 chroot "$MNT" bash -c "

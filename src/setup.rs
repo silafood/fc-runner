@@ -432,11 +432,21 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
     )
     .await?;
 
-    let status = Command::new("chroot")
+    let _ = Command::new("chroot")
         .args([mount_dir, "systemctl", "enable", "systemd-networkd", "systemd-resolved"])
         .status()
-        .await?;
-    ensure!(status.success(), "enabling systemd-networkd failed");
+        .await;
+
+    // Belt-and-suspenders: create symlinks manually in case chroot systemctl fails
+    let wants_dir = format!("{}/etc/systemd/system/multi-user.target.wants", mount_dir);
+    tokio::fs::create_dir_all(&wants_dir).await?;
+    for svc in ["systemd-networkd", "systemd-resolved"] {
+        let symlink = format!("{}/{}.service", wants_dir, svc);
+        let target = format!("/lib/systemd/system/{}.service", svc);
+        if !Path::new(&symlink).exists() {
+            let _ = tokio::fs::symlink(&target, &symlink).await;
+        }
+    }
 
     // Disable services that slow boot and aren't needed in ephemeral VMs
     let _ = Command::new("chroot")
