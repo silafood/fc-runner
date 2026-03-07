@@ -519,10 +519,25 @@ async fn ensure_nat_rules(network: &NetworkConfig) -> anyhow::Result<()> {
         "-j", "MASQUERADE",
     ]).await?;
 
+    // FORWARD — allow established return traffic to VM subnets.
+    // Insert at top of chain (-I FORWARD 1) so it runs BEFORE UFW/Docker rules
+    // which would otherwise DROP the return traffic.
+    add_iptables_rule_if_missing(&[
+        "-I", "FORWARD", "1",
+        "-d", VM_SUBNET,
+        "-m", "state", "--state", "RELATED,ESTABLISHED",
+        "-j", "ACCEPT",
+    ], &[
+        "-C", "FORWARD",
+        "-d", VM_SUBNET,
+        "-m", "state", "--state", "RELATED,ESTABLISHED",
+        "-j", "ACCEPT",
+    ]).await?;
+
     if network.resolved_networks.is_empty() {
         // No allowlist — allow all outbound traffic from VM subnets
         add_iptables_rule_if_missing(&[
-            "-A", "FORWARD",
+            "-I", "FORWARD", "2",
             "-s", VM_SUBNET,
             "-o", &default_iface,
             "-j", "ACCEPT",
@@ -567,9 +582,10 @@ async fn ensure_nat_rules(network: &NetworkConfig) -> anyhow::Result<()> {
             }
         }
 
-        // Single iptables rule matching the ipset
+        // Insert FORWARD rules at top of chain (after RELATED,ESTABLISHED)
+        // so they run BEFORE UFW/Docker chains
         add_iptables_rule_if_missing(&[
-            "-A", "FORWARD",
+            "-I", "FORWARD", "2",
             "-s", VM_SUBNET,
             "-o", &default_iface,
             "-m", "set", "--match-set", "fc-allowed", "dst",
@@ -584,7 +600,7 @@ async fn ensure_nat_rules(network: &NetworkConfig) -> anyhow::Result<()> {
 
         // Drop all other outbound traffic from VM subnets
         add_iptables_rule_if_missing(&[
-            "-A", "FORWARD",
+            "-I", "FORWARD", "3",
             "-s", VM_SUBNET,
             "-o", &default_iface,
             "-j", "DROP",
@@ -597,19 +613,6 @@ async fn ensure_nat_rules(network: &NetworkConfig) -> anyhow::Result<()> {
 
         tracing::info!("network allowlist applied via ipset — unmatched outbound traffic will be dropped");
     }
-
-    // FORWARD — allow established return traffic to VM subnets
-    add_iptables_rule_if_missing(&[
-        "-A", "FORWARD",
-        "-d", VM_SUBNET,
-        "-m", "state", "--state", "RELATED,ESTABLISHED",
-        "-j", "ACCEPT",
-    ], &[
-        "-C", "FORWARD",
-        "-d", VM_SUBNET,
-        "-m", "state", "--state", "RELATED,ESTABLISHED",
-        "-j", "ACCEPT",
-    ]).await?;
 
     tracing::info!("NAT rules configured");
     Ok(())
