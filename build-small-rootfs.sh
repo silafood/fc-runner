@@ -80,6 +80,8 @@ mount -t sysfs sys "$MNT/sys"
 echo "[4/8] Stripping cloud-init and unnecessary packages..."
 chroot "$MNT" bash -c "
     export DEBIAN_FRONTEND=noninteractive
+    # Mark packages we need so autoremove won't touch them
+    apt-mark manual iproute2 netplan.io libcap2-bin 2>/dev/null || true
     apt-get -y purge cloud-init cloud-guest-utils snapd lxd-installer \
         ubuntu-advantage-tools unattended-upgrades 2>/dev/null || true
     apt-get -y autoremove --purge 2>/dev/null || true
