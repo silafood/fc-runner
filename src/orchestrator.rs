@@ -155,10 +155,13 @@ impl Orchestrator {
             *active_jobs.lock().await += 1;
             tracing::info!(job_id, repo = %repo, slot, "job started (permit acquired, slot assigned)");
 
-            let result = run_jit_job(config.clone(), github, job_id, &repo, slot).await;
+            let result = run_jit_job(config.clone(), github.clone(), job_id, &repo, slot).await;
 
             slot_pool.lock().await.push(slot);
             *active_jobs.lock().await -= 1;
+
+            // Clean up offline runners left by this (and any previous) VMs
+            github.remove_offline_runners(&repo).await;
 
             match result {
                 Ok(()) => {
@@ -247,7 +250,10 @@ impl Orchestrator {
             *active_jobs.lock().await += 1;
             tracing::info!(slot, repo = %repo, "starting warm pool VM");
 
-            let result = run_warm_vm(config, github, slot, &repo).await;
+            let result = run_warm_vm(config, github.clone(), slot, &repo).await;
+
+            // Clean up offline runners left by this VM
+            github.remove_offline_runners(&repo).await;
 
             match &result {
                 Ok(()) => {
