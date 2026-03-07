@@ -16,6 +16,11 @@ anyhow = "1"
 thiserror = "2"
 tokio-util = "0.7"
 secrecy = { version = "0.10.3", features = ["serde"] }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
+http-body-util = "0.1"
+hyperlocal = "0.9"
+tower = "0.5"
 qcow2-rs = "0.1"
 bootsector = "0.2"
 tar = "0.4"

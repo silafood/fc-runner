@@ -33,6 +33,10 @@ mem_size_mib = 2048
 # jailer_chroot_base = "/srv/jailer"
 # Cloud image URL for golden rootfs build (default: Ubuntu 24.04 minimal)
 # cloud_img_url = "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img"
+# Secret injection method: "mmds" (default) or "mount" (legacy loop-mount)
+# MMDS uses Firecracker's built-in metadata service at 169.254.169.254.
+# Mount injects secrets directly into the rootfs via loop mount.
+# secret_injection = "mmds"
 
 [runner]
 work_dir = "/var/lib/fc-runner/vms"
