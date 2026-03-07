@@ -12,8 +12,8 @@ umount -l "$MNT" 2>/dev/null || true
 rm -rf "$MNT"
 rm -f "$ROOTFS"
 
-echo "[1/7] Creating 4GB image..."
-dd if=/dev/zero of="$ROOTFS" bs=1M count=4096 status=progress
+echo "[1/7] Creating 2GB sparse image..."
+truncate -s 2G "$ROOTFS"
 
 echo "[2/7] Formatting ext4..."
 mkfs.ext4 -F "$ROOTFS"
@@ -34,9 +34,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "[4/7] Running debootstrap (takes ~5 minutes)..."
-debootstrap --arch=amd64 \
-    --include=systemd,systemd-sysv,curl,git,jq,ca-certificates,sudo,openssh-client,unzip,libicu74 \
+echo "[4/7] Running debootstrap (minbase variant)..."
+debootstrap --arch=amd64 --variant=minbase \
+    --include=systemd,systemd-sysv,curl,git,jq,ca-certificates,sudo,openssh-client,unzip,libicu74,iproute2,iputils-ping \
     noble "$MNT" http://archive.ubuntu.com/ubuntu
 
 # Mount pseudo-filesystems needed by chroot commands
@@ -69,7 +69,11 @@ curl -fsSL -o "$MNT/home/runner/actions-runner.tar.gz" \
 tar xzf "$MNT/home/runner/actions-runner.tar.gz" -C "$MNT/home/runner/"
 rm "$MNT/home/runner/actions-runner.tar.gz"
 
-chroot "$MNT" /home/runner/bin/installdependencies.sh
+# Skip installdependencies.sh — it pulls in hundreds of MB of packages
+# (dotnet, docker, etc.) that aren't needed. libicu74 from debootstrap
+# is the only real runtime dependency for the runner binary.
+# Uncomment the next line if workflows need build tools:
+# chroot "$MNT" /home/runner/bin/installdependencies.sh
 chroot "$MNT" chown -R runner:runner /home/runner
 
 echo "[7/7] Writing entrypoint..."
@@ -144,6 +148,17 @@ umount "$MNT/sys"
 umount "$MNT"
 rmdir "$MNT"
 trap - EXIT
+
+echo "[8/8] Shrinking image to minimum size..."
+e2fsck -f -y "$ROOTFS" || true
+resize2fs -M "$ROOTFS"
+# Pad 512MB headroom for runtime writes (runner work dir, logs, etc.)
+MINBLOCKS=$(dumpe2fs -h "$ROOTFS" 2>/dev/null | grep "Block count" | awk '{print $3}')
+BLOCKSIZE=$(dumpe2fs -h "$ROOTFS" 2>/dev/null | grep "Block size" | awk '{print $3}')
+MINBYTES=$((MINBLOCKS * BLOCKSIZE))
+FINALBYTES=$((MINBYTES + 512 * 1024 * 1024))
+resize2fs "$ROOTFS" "$((FINALBYTES / BLOCKSIZE))s" 2>/dev/null || true
+truncate -s "$FINALBYTES" "$ROOTFS"
 
 echo ""
 echo "=== Golden rootfs ready at $ROOTFS ==="
