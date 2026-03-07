@@ -110,6 +110,10 @@ impl MicroVm {
         }
     }
 
+    fn use_mmds(&self) -> bool {
+        self.fc_config.secret_injection == "mmds"
+    }
+
     async fn copy_rootfs(&self) -> anyhow::Result<()> {
         tracing::info!(vm_id = %self.vm_id, "copying golden rootfs");
         let status = Command::new("cp")
@@ -158,7 +162,8 @@ impl MicroVm {
         let _ = netlink::delete_link(&self.tap_name).await;
     }
 
-    async fn inject_env(&self, env_content: &str) -> anyhow::Result<()> {
+    /// Inject environment variables into the rootfs via loop mount (legacy mode).
+    async fn inject_env_mount(&self, env_content: &str) -> anyhow::Result<()> {
         let rootfs = path_str(&self.rootfs_path)?;
         let mnt = path_str(&self.mount_point)?;
 
@@ -180,6 +185,37 @@ impl MicroVm {
         )?;
 
         // Write per-VM guest network config (unique IP/gateway per slot)
+        let network_dir = self.mount_point.join("etc/systemd/network");
+        tokio::fs::create_dir_all(&network_dir).await?;
+        let dns_entries: String = self
+            .network_dns
+            .iter()
+            .map(|d| format!("DNS={}", d))
+            .collect::<Vec<_>>()
+            .join("\n");
+        tokio::fs::write(
+            network_dir.join("20-eth.network"),
+            format!(
+                "[Match]\nName=eth0\n\n[Network]\nAddress={}/24\nGateway={}\n{}\n",
+                self.guest_ip, self.host_ip, dns_entries
+            ),
+        )
+        .await?;
+
+        self.umount_with_retry().await?;
+        let _ = tokio::fs::remove_dir(&self.mount_point).await;
+        Ok(())
+    }
+
+    /// Inject network config only (no env vars) — used in MMDS mode where
+    /// secrets go via MMDS but network config still needs to be on disk.
+    async fn inject_network_config(&self) -> anyhow::Result<()> {
+        let rootfs = path_str(&self.rootfs_path)?;
+        let mnt = path_str(&self.mount_point)?;
+
+        tokio::fs::create_dir_all(&self.mount_point).await?;
+        mount_loop_ext4(rootfs, mnt).context("mounting rootfs")?;
+
         let network_dir = self.mount_point.join("etc/systemd/network");
         tokio::fs::create_dir_all(&network_dir).await?;
         let dns_entries: String = self
@@ -288,7 +324,7 @@ impl MicroVm {
         self.fc_config.vsock_cid_base + self.slot as u32
     }
 
-    async fn write_vm_config(&self) -> anyhow::Result<()> {
+    fn build_vm_config(&self) -> anyhow::Result<serde_json::Value> {
         let mut config = serde_json::json!({
             "boot-source": {
                 "kernel_image_path": self.fc_config.kernel_path,
@@ -315,6 +351,14 @@ impl MicroVm {
             }
         });
 
+        // Enable MMDS when using MMDS injection mode
+        if self.use_mmds() {
+            config["mmds-config"] = serde_json::json!({
+                "version": "V2",
+                "network_interfaces": ["eth0"]
+            });
+        }
+
         // Add VSOCK device when enabled
         if self.fc_config.vsock_enabled {
             let cid = self.vsock_cid();
@@ -331,16 +375,89 @@ impl MicroVm {
             );
         }
 
+        Ok(config)
+    }
+
+    async fn write_vm_config(&self) -> anyhow::Result<()> {
+        let config = self.build_vm_config()?;
         let rendered = serde_json::to_string_pretty(&config)
             .context("serializing VM config")?;
         tokio::fs::write(&self.config_path, rendered).await?;
         Ok(())
     }
 
-    async fn run(&self) -> anyhow::Result<std::process::ExitStatus> {
-        // Use inherit to send serial console to journald for debugging
-        tracing::info!(vm_id = %self.vm_id, "console output goes to journald (inherit mode)");
+    /// PUT MMDS metadata via the Firecracker API socket.
+    async fn put_mmds(&self, env_content: &str) -> anyhow::Result<()> {
+        use http_body_util::Full;
+        use hyper::body::Bytes;
+        use hyper::Request;
+        use hyper_util::rt::TokioIo;
 
+        // Parse env_content (KEY=VALUE lines) into a JSON object
+        let mut metadata = serde_json::Map::new();
+        for line in env_content.lines() {
+            if let Some((key, value)) = line.split_once('=') {
+                let key = key.trim().to_lowercase();
+                metadata.insert(key, serde_json::Value::String(value.trim().to_string()));
+            }
+        }
+        let body_json = serde_json::to_string(&serde_json::Value::Object(metadata))
+            .context("serializing MMDS metadata")?;
+
+        tracing::info!(vm_id = %self.vm_id, "putting MMDS metadata via API socket");
+
+        // Wait for the socket to appear (Firecracker creates it on startup)
+        let socket_path = &self.socket_path;
+        for attempt in 0..50 {
+            if tokio::fs::metadata(socket_path).await.is_ok() {
+                break;
+            }
+            if attempt == 49 {
+                anyhow::bail!("Firecracker API socket did not appear at {:?}", socket_path);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        let stream = tokio::net::UnixStream::connect(socket_path)
+            .await
+            .context("connecting to Firecracker API socket")?;
+
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+            .await
+            .context("HTTP handshake with Firecracker API")?;
+
+        // Spawn the connection driver
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                tracing::warn!(error = %e, "Firecracker API connection error");
+            }
+        });
+
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/mmds")
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .body(Full::new(Bytes::from(body_json)))
+            .context("building MMDS request")?;
+
+        let resp = sender.send_request(req).await.context("sending MMDS PUT")?;
+        let status = resp.status();
+
+        if !status.is_success() {
+            let body = http_body_util::BodyExt::collect(resp.into_body())
+                .await
+                .map(|b| String::from_utf8_lossy(&b.to_bytes()).to_string())
+                .unwrap_or_default();
+            anyhow::bail!("MMDS PUT failed (HTTP {}): {}", status, body);
+        }
+
+        tracing::info!(vm_id = %self.vm_id, "MMDS metadata injected successfully");
+        Ok(())
+    }
+
+    /// Start Firecracker in --no-api mode (legacy mount injection).
+    async fn run_no_api(&self) -> anyhow::Result<std::process::ExitStatus> {
         let fut = if let Some(jailer_path) = &self.fc_config.jailer_path {
             let uid = self.fc_config.jailer_uid.expect("validated in config");
             let gid = self.fc_config.jailer_gid.expect("validated in config");
@@ -348,28 +465,21 @@ impl MicroVm {
                 vm_id = %self.vm_id,
                 jailer = %jailer_path,
                 uid, gid,
-                "launching via jailer"
+                "launching via jailer (no-api mode)"
             );
             Command::new(jailer_path)
-                .arg("--id")
-                .arg(&self.vm_id)
-                .arg("--exec-file")
-                .arg(&self.fc_config.binary_path)
-                .arg("--uid")
-                .arg(uid.to_string())
-                .arg("--gid")
-                .arg(gid.to_string())
-                .arg("--chroot-base-dir")
-                .arg(&self.fc_config.jailer_chroot_base)
+                .arg("--id").arg(&self.vm_id)
+                .arg("--exec-file").arg(&self.fc_config.binary_path)
+                .arg("--uid").arg(uid.to_string())
+                .arg("--gid").arg(gid.to_string())
+                .arg("--chroot-base-dir").arg(&self.fc_config.jailer_chroot_base)
                 .arg("--")
-                .arg("--config-file")
-                .arg(&self.config_path)
+                .arg("--config-file").arg(&self.config_path)
                 .arg("--no-api")
                 .status()
         } else {
             Command::new(&self.fc_config.binary_path)
-                .arg("--config-file")
-                .arg(&self.config_path)
+                .arg("--config-file").arg(&self.config_path)
                 .arg("--no-api")
                 .status()
         };
@@ -378,6 +488,54 @@ impl MicroVm {
             .await
             .context("VM execution timed out")?
             .context("spawning firecracker")?;
+        Ok(status)
+    }
+
+    /// Start Firecracker with API socket (MMDS mode).
+    /// Returns a child process handle so we can inject MMDS data before it exits.
+    async fn run_with_api(&self, env_content: &str) -> anyhow::Result<std::process::ExitStatus> {
+        let socket = path_str(&self.socket_path)?;
+
+        let mut child = if let Some(jailer_path) = &self.fc_config.jailer_path {
+            let uid = self.fc_config.jailer_uid.expect("validated in config");
+            let gid = self.fc_config.jailer_gid.expect("validated in config");
+            tracing::info!(
+                vm_id = %self.vm_id,
+                jailer = %jailer_path,
+                uid, gid,
+                "launching via jailer (MMDS mode)"
+            );
+            Command::new(jailer_path)
+                .arg("--id").arg(&self.vm_id)
+                .arg("--exec-file").arg(&self.fc_config.binary_path)
+                .arg("--uid").arg(uid.to_string())
+                .arg("--gid").arg(gid.to_string())
+                .arg("--chroot-base-dir").arg(&self.fc_config.jailer_chroot_base)
+                .arg("--")
+                .arg("--config-file").arg(&self.config_path)
+                .arg("--api-sock").arg(socket)
+                .spawn()
+                .context("spawning firecracker via jailer")?
+        } else {
+            Command::new(&self.fc_config.binary_path)
+                .arg("--config-file").arg(&self.config_path)
+                .arg("--api-sock").arg(socket)
+                .spawn()
+                .context("spawning firecracker")?
+        };
+
+        // Inject MMDS metadata while the VM is booting
+        if let Err(e) = self.put_mmds(env_content).await {
+            tracing::error!(vm_id = %self.vm_id, error = %e, "MMDS injection failed, killing VM");
+            let _ = child.kill().await;
+            return Err(e);
+        }
+
+        // Wait for the VM to exit
+        let status = timeout(Duration::from_secs(self.vm_timeout_secs), child.wait())
+            .await
+            .context("VM execution timed out")?
+            .context("waiting for firecracker")?;
         Ok(status)
     }
 
@@ -423,9 +581,25 @@ impl MicroVm {
     }
 
     async fn prepare_and_run(&self, env_content: &str) -> anyhow::Result<()> {
-        tracing::info!(vm_id = %self.vm_id, job_id = self.job_id, slot = self.slot, "preparing VM");
+        let mmds = self.use_mmds();
+        tracing::info!(
+            vm_id = %self.vm_id,
+            job_id = self.job_id,
+            slot = self.slot,
+            secret_injection = if mmds { "mmds" } else { "mount" },
+            "preparing VM"
+        );
+
         self.copy_rootfs().await?;
-        self.inject_env(env_content).await?;
+
+        if mmds {
+            // MMDS mode: only inject network config to disk, secrets via MMDS
+            self.inject_network_config().await?;
+        } else {
+            // Legacy mount mode: inject everything via loop mount
+            self.inject_env_mount(env_content).await?;
+        }
+
         self.create_tap().await?;
         self.write_vm_config().await?;
 
@@ -443,7 +617,12 @@ impl MicroVm {
         };
 
         tracing::info!(vm_id = %self.vm_id, "launching firecracker");
-        let run_result = self.run().await;
+
+        let run_result = if mmds {
+            self.run_with_api(env_content).await
+        } else {
+            self.run_no_api().await
+        };
 
         // Abort VSOCK listener when VM exits
         if let Some(handle) = vsock_handle {

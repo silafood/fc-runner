@@ -8,6 +8,9 @@ use tokio_util::sync::CancellationToken;
 use crate::config::AppConfig;
 use crate::firecracker::MicroVm;
 use crate::github::GitHubClient;
+use crate::metrics;
+use crate::pool::PoolManager;
+use crate::server::ServerState;
 
 pub struct Orchestrator {
     config: Arc<AppConfig>,
@@ -18,10 +21,11 @@ pub struct Orchestrator {
     active_jobs: Arc<Mutex<usize>>,
     /// Pool of slot indices for per-VM TAP device allocation.
     slot_pool: Arc<Mutex<Vec<usize>>>,
+    server_state: Arc<ServerState>,
 }
 
 impl Orchestrator {
-    pub fn new(config: Arc<AppConfig>, cancel: CancellationToken) -> anyhow::Result<Self> {
+    pub fn new(config: Arc<AppConfig>, cancel: CancellationToken, server_state: Arc<ServerState>) -> anyhow::Result<Self> {
         let github = Arc::new(GitHubClient::new(config.github.clone())?);
         let max_jobs = config.runner.max_concurrent_jobs;
         let repos = github.repos();
@@ -41,20 +45,92 @@ impl Orchestrator {
             semaphore: Arc::new(Semaphore::new(max_jobs)),
             active_jobs: Arc::new(Mutex::new(0)),
             slot_pool: Arc::new(Mutex::new((0..max_jobs).collect())),
+            server_state,
         })
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
-        if self.config.runner.warm_pool_size > 0 {
+        if !self.config.pool.is_empty() {
+            self.run_pools().await
+        } else if self.config.runner.warm_pool_size > 0 {
             self.run_warm_pool().await
         } else {
             self.run_reactive().await
         }
     }
 
+    // ── Pool mode (named pools with per-pool config) ───────────────────
+
+    async fn run_pools(&self) -> anyhow::Result<()> {
+        let pools = &self.config.pool;
+        tracing::info!(
+            pool_count = pools.len(),
+            "orchestrator starting (pool mode)"
+        );
+
+        // Distribute slots across pools proportionally
+        let total_slots: usize = pools.iter().map(|p| p.max_ready).sum();
+        if total_slots > self.config.runner.max_concurrent_jobs {
+            tracing::warn!(
+                total_pool_slots = total_slots,
+                max_concurrent_jobs = self.config.runner.max_concurrent_jobs,
+                "total pool max_ready exceeds max_concurrent_jobs, some pools may not get all requested slots"
+            );
+        }
+
+        let mut all_slots: Vec<usize> = (0..self.config.runner.max_concurrent_jobs).collect();
+        let mut pool_managers = Vec::new();
+
+        for pool_config in pools {
+            let slots_for_pool: Vec<usize> = (0..pool_config.max_ready)
+                .filter_map(|_| all_slots.pop())
+                .collect();
+
+            if slots_for_pool.is_empty() {
+                tracing::warn!(pool = %pool_config.name, "no slots available for pool");
+                continue;
+            }
+
+            tracing::info!(
+                pool = %pool_config.name,
+                slots = slots_for_pool.len(),
+                repos = ?pool_config.repos,
+                "allocating slots to pool"
+            );
+
+            let manager = PoolManager::new(
+                pool_config.clone(),
+                self.config.clone(),
+                self.github.clone(),
+                self.cancel.clone(),
+                slots_for_pool,
+            );
+            pool_managers.push(manager);
+        }
+
+        // Run all pool managers concurrently
+        let mut handles = Vec::new();
+        for manager in pool_managers {
+            let handle = tokio::spawn(async move {
+                if let Err(e) = manager.run().await {
+                    tracing::error!(pool = %manager.pool_config.name, error = %e, "pool manager failed");
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all pool managers to finish
+        for handle in handles {
+            let _ = handle.await;
+        }
+
+        Ok(())
+    }
+
     // ── Reactive mode (JIT) ──────────────────────────────────────────
 
     async fn run_reactive(&self) -> anyhow::Result<()> {
+        self.server_state.set_mode("jit").await;
         let mut ticker = interval(Duration::from_secs(self.config.runner.poll_interval_secs));
         tracing::info!(
             poll_interval = self.config.runner.poll_interval_secs,
@@ -81,6 +157,7 @@ impl Orchestrator {
     async fn poll_once(&self) -> anyhow::Result<()> {
         for repo in self.github.repos() {
             if let Err(e) = self.poll_repo(&repo).await {
+                metrics::POLL_CYCLES.with_label_values(&["error"]).inc();
                 tracing::error!(
                     repo = %repo,
                     error = %e,
@@ -88,6 +165,7 @@ impl Orchestrator {
                 );
             }
         }
+        metrics::POLL_CYCLES.with_label_values(&["ok"]).inc();
         Ok(())
     }
 
@@ -116,6 +194,7 @@ impl Orchestrator {
                     repo = %repo,
                     "dispatching new job"
                 );
+                metrics::JOBS_DISPATCHED.with_label_values(&[repo]).inc();
                 self.dispatch_jit_job(job.id, repo.to_string());
             }
         }
@@ -137,6 +216,7 @@ impl Orchestrator {
         let semaphore = self.semaphore.clone();
         let active_jobs = self.active_jobs.clone();
         let slot_pool = self.slot_pool.clone();
+        let server_state = self.server_state.clone();
 
         tokio::spawn(async move {
             let _permit = match semaphore.acquire().await {
@@ -153,12 +233,32 @@ impl Orchestrator {
             };
 
             *active_jobs.lock().await += 1;
+            metrics::JOBS_ACTIVE.inc();
+            metrics::POOL_SLOTS_AVAILABLE.dec();
             tracing::info!(job_id, repo = %repo, slot, "job started (permit acquired, slot assigned)");
 
-            let result = run_jit_job(config.clone(), github.clone(), job_id, &repo, slot).await;
+            let vm_id = format!("fc-{}-slot{}", job_id, slot);
+            server_state.register_vm(crate::server::VmInfo {
+                vm_id: vm_id.clone(),
+                job_id,
+                repo: repo.clone(),
+                slot,
+                started_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .to_string(),
+            }).await;
 
+            let timer = metrics::VM_BOOT_DURATION.with_label_values(&[&repo]).start_timer();
+            let result = run_jit_job(config.clone(), github.clone(), job_id, &repo, slot).await;
+            timer.observe_duration();
+
+            server_state.unregister_vm(&vm_id).await;
             slot_pool.lock().await.push(slot);
             *active_jobs.lock().await -= 1;
+            metrics::JOBS_ACTIVE.dec();
+            metrics::POOL_SLOTS_AVAILABLE.inc();
 
             // Clean up offline runners left by this (and any previous) VMs
             github.remove_offline_runners(&repo).await;
@@ -166,9 +266,11 @@ impl Orchestrator {
             match result {
                 Ok(()) => {
                     seen_jobs.lock().await.remove(&job_id);
+                    metrics::JOBS_COMPLETED.with_label_values(&[&repo]).inc();
                     tracing::info!(job_id, repo = %repo, slot, "job completed successfully");
                 }
                 Err(e) => {
+                    metrics::JOBS_FAILED.with_label_values(&[&repo]).inc();
                     tracing::error!(job_id, repo = %repo, slot, error = %e, "job failed (will not retry)");
                 }
             }
@@ -178,6 +280,7 @@ impl Orchestrator {
     // ── Warm pool mode (registration tokens) ─────────────────────────
 
     async fn run_warm_pool(&self) -> anyhow::Result<()> {
+        self.server_state.set_mode("warm_pool").await;
         let pool_size = self.config.runner.warm_pool_size;
         let repos = self.github.repos();
         if repos.is_empty() {
@@ -248,23 +351,31 @@ impl Orchestrator {
 
         tokio::spawn(async move {
             *active_jobs.lock().await += 1;
+            metrics::JOBS_ACTIVE.inc();
+            metrics::POOL_SLOTS_AVAILABLE.dec();
             tracing::info!(slot, repo = %repo, "starting warm pool VM");
 
+            let timer = metrics::VM_BOOT_DURATION.with_label_values(&[&repo]).start_timer();
             let result = run_warm_vm(config, github.clone(), slot, &repo).await;
+            timer.observe_duration();
 
             // Clean up offline runners left by this VM
             github.remove_offline_runners(&repo).await;
 
             match &result {
                 Ok(()) => {
+                    metrics::JOBS_COMPLETED.with_label_values(&[&repo]).inc();
                     tracing::info!(slot, repo = %repo, "warm pool VM completed job successfully");
                 }
                 Err(e) => {
+                    metrics::JOBS_FAILED.with_label_values(&[&repo]).inc();
                     tracing::error!(slot, repo = %repo, error = %e, "warm pool VM failed");
                 }
             }
 
             *active_jobs.lock().await -= 1;
+            metrics::JOBS_ACTIVE.dec();
+            metrics::POOL_SLOTS_AVAILABLE.inc();
 
             // Signal that this slot is done and needs replacement
             let _ = done_tx.send((slot, repo)).await;

@@ -1,8 +1,11 @@
 mod config;
 mod firecracker;
 mod github;
+mod metrics;
 mod netlink;
 mod orchestrator;
+mod pool;
+mod server;
 mod setup;
 mod vsock;
 
@@ -44,7 +47,26 @@ async fn main() -> anyhow::Result<()> {
         cancel_clone.cancel();
     });
 
-    let orchestrator = orchestrator::Orchestrator::new(config, cancel)?;
+    // Start management HTTP server if enabled
+    let server_state = Arc::new(server::ServerState::new(&config.server));
+    if config.server.enabled {
+        let listen_addr: std::net::SocketAddr = config
+            .server
+            .listen_addr
+            .parse()
+            .context("invalid server.listen_addr")?;
+        let state = server_state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = server::start(listen_addr, state).await {
+                tracing::error!(error = %e, "management server failed");
+            }
+        });
+    }
+
+    // Initialize metrics with initial slot count
+    metrics::POOL_SLOTS_AVAILABLE.set(config.runner.max_concurrent_jobs as i64);
+
+    let orchestrator = orchestrator::Orchestrator::new(config, cancel, server_state)?;
     orchestrator.run().await?;
 
     tracing::info!("fc-runner exiting");
