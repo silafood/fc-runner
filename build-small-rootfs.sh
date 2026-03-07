@@ -91,7 +91,7 @@ chroot "$MNT" bash -c "
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -q
     apt-get install -y --no-install-recommends \
-        curl git jq ca-certificates sudo libicu74 iproute2
+        curl git jq ca-certificates sudo libicu74 iproute2 systemd-resolved
     apt-get clean
     rm -rf /var/lib/apt/lists/*
 "
