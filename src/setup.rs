@@ -219,17 +219,54 @@ async fn ensure_golden_rootfs(rootfs_path: &str, cloud_img_url: &str, network: &
         tracing::info!("using cached cloud image");
     }
 
-    // ── Step 2: Extract ext4 partition from qcow2 ───────────────────
-    tracing::info!("extracting ext4 partition from cloud image...");
+    // ── Step 2: Convert qcow2 to raw (pure Rust, no qemu-img) ──────
+    tracing::info!("converting qcow2 to raw image...");
     let raw_img = format!("{}/cloud-raw.img", parent_str);
-    let output = Command::new("qemu-img")
-        .args(["convert", "-f", "qcow2", "-O", "raw", &cloud_img, &raw_img])
-        .output()
+    {
+        let cloud_img_clone = cloud_img.clone();
+        let raw_img_clone = raw_img.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            use std::io::Write;
+            use positioned_io::ReadAt;
+
+            let file = std::fs::File::open(&cloud_img_clone)
+                .context("opening qcow2 image")?;
+            let qcow = qcow2::Qcow2::open(file)
+                .map_err(|e| anyhow::anyhow!("failed to parse qcow2: {:?}", e))?;
+            let virtual_size = qcow.guest_size();
+
+            tracing::info!(virtual_size_mb = virtual_size / (1024 * 1024), "qcow2 virtual disk size");
+
+            let reader = qcow.reader()
+                .map_err(|e| anyhow::anyhow!("failed to create qcow2 reader: {:?}", e))?;
+            let mut output = std::fs::File::create(&raw_img_clone)
+                .context("creating raw image")?;
+
+            let buf_size: usize = 4 * 1024 * 1024; // 4 MiB
+            let mut buf = vec![0u8; buf_size];
+            let mut offset: u64 = 0;
+
+            while offset < virtual_size {
+                let to_read = std::cmp::min(buf_size as u64, virtual_size - offset) as usize;
+                buf[..to_read].fill(0);
+                let n = reader.read_at(offset, &mut buf[..to_read])
+                    .map_err(|e| anyhow::anyhow!("qcow2 read at offset {}: {:?}", offset, e))?;
+                if n == 0 {
+                    // Unallocated region — write zeros
+                    output.write_all(&buf[..to_read])?;
+                    offset += to_read as u64;
+                } else {
+                    output.write_all(&buf[..n])?;
+                    offset += n as u64;
+                }
+            }
+
+            output.flush()?;
+            tracing::info!(bytes = offset, "qcow2 → raw conversion complete");
+            Ok(())
+        })
         .await
-        .context("converting qcow2 to raw")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("qemu-img convert failed: {}", stderr);
+        .context("qcow2 conversion task panicked")??;
     }
 
     // Attach with partition scanning and find the ext4 partition
