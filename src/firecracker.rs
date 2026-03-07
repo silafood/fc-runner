@@ -237,18 +237,24 @@ impl MicroVm {
             return;
         }
 
-        let mounted = Command::new("mount")
+        let mount_out = Command::new("mount")
             .args(["-o", "loop,ro", rootfs, &mnt])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false);
+            .output()
+            .await;
 
-        if !mounted {
-            tracing::warn!(vm_id = %self.vm_id, "could not mount rootfs to read guest log");
-            return;
+        match &mount_out {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                tracing::warn!(vm_id = %self.vm_id, stderr = %stderr, "mount failed for guest log dump");
+                let _ = tokio::fs::remove_dir(&self.mount_point).await;
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(vm_id = %self.vm_id, error = %e, "could not spawn mount for guest log dump");
+                let _ = tokio::fs::remove_dir(&self.mount_point).await;
+                return;
+            }
         }
 
         let log_path = self.mount_point.join("var/log/runner.log");
