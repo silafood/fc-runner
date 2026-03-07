@@ -90,31 +90,13 @@ async fn lazy_umount(target: &str) -> anyhow::Result<()> {
     }
 }
 
-/// Run a command inside a chroot using nix::unistd::chroot via pre_exec.
-/// On Linux, avoids spawning the external `chroot` binary.
+/// Run a command inside a chroot.
+/// Uses the external `chroot` binary — the chroot(2) syscall requires
+/// CAP_SYS_CHROOT which AppArmor denies for fc-runner.
 fn chroot_command(root: &str, program: &str, args: &[&str]) -> Command {
-    #[cfg(target_os = "linux")]
-    {
-        let root_owned = root.to_string();
-        let mut cmd = Command::new(program);
-        cmd.args(args);
-        unsafe {
-            cmd.pre_exec(move || {
-                nix::unistd::chroot(root_owned.as_str())
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-                nix::unistd::chdir("/")
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-                Ok(())
-            });
-        }
-        cmd
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let mut cmd = Command::new("chroot");
-        cmd.arg(root).arg(program).args(args);
-        cmd
-    }
+    let mut cmd = Command::new("chroot");
+    cmd.arg(root).arg(program).args(args);
+    cmd
 }
 
 fn set_executable(path: &str) -> anyhow::Result<()> {
