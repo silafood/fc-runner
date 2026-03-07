@@ -261,9 +261,27 @@ impl MicroVm {
         let log_path = self.mount_point.join("var/log/runner.log");
         match tokio::fs::read_to_string(&log_path).await {
             Ok(contents) => {
-                // Log each line for visibility
+                // Strip ANSI escape sequences and log each line
                 for line in contents.lines().take(50) {
-                    tracing::info!(vm_id = %self.vm_id, "[guest-log] {}", line);
+                    let clean: String = line
+                        .chars()
+                        .scan(false, |in_escape, c| {
+                            if *in_escape {
+                                if c.is_ascii_alphabetic() { *in_escape = false; }
+                                Some(None)
+                            } else if c == '\x1b' {
+                                *in_escape = true;
+                                Some(None)
+                            } else {
+                                Some(Some(c))
+                            }
+                        })
+                        .flatten()
+                        .collect();
+                    let clean = clean.trim();
+                    if !clean.is_empty() {
+                        tracing::info!(vm_id = %self.vm_id, "[guest-log] {}", clean);
+                    }
                 }
                 if contents.lines().count() > 50 {
                     tracing::info!(vm_id = %self.vm_id, "[guest-log] ... (truncated)");

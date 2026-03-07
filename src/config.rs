@@ -145,7 +145,7 @@ fn default_mem_size_mib() -> u32 {
 }
 
 fn default_boot_args() -> String {
-    "console=ttyS0 reboot=k panic=1 pci=off fsck.mode=skip".into()
+    "console=ttyS0 reboot=k panic=1 pci=off fsck.mode=skip quiet loglevel=3".into()
 }
 
 fn default_log_level() -> String {
