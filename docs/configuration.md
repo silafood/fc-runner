@@ -12,6 +12,7 @@ fc-runner /path/to/config.toml
 
 ```toml
 [github]
+# Authentication: Use either a PAT (token) or GitHub App ([github.app]).
 token = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 owner = "your-org"
 # Single repo
@@ -20,6 +21,12 @@ repo = "your-repo"
 # repos = ["repo-one", "repo-two", "repo-three"]
 runner_group_id = 1
 labels = ["self-hosted", "linux", "firecracker"]
+
+# GitHub App authentication (alternative to PAT)
+# [github.app]
+# app_id = 12345
+# installation_id = 67890
+# private_key_path = "/etc/fc-runner/app-key.pem"
 
 [firecracker]
 binary_path = "/usr/local/bin/firecracker"
@@ -34,6 +41,9 @@ mem_size_mib = 2048
 # jailer_uid = 1000
 # jailer_gid = 1000
 # jailer_chroot_base = "/srv/jailer"
+# secret_injection = "mmds"
+# vsock_enabled = true
+# vsock_cid_base = 3
 
 [runner]
 work_dir = "/var/lib/fc-runner/vms"
@@ -42,12 +52,26 @@ max_concurrent_jobs = 4
 vm_timeout_secs = 3600
 # warm_pool_size = 2
 
+# Named pools (alternative to warm_pool_size)
+# [[pool]]
+# name = "default"
+# repos = ["repo-a", "repo-b"]
+# min_ready = 2
+# max_ready = 4
+# vcpu_count = 4
+# mem_size_mib = 4096
+
 [network]
 host_ip = "172.16.0.1"
 guest_ip = "172.16.0.2"
 cidr = "24"
 dns = ["8.8.8.8", "1.1.1.1"]
 # allowed_networks = ["github"]
+
+[server]
+# enabled = true
+# listen_addr = "0.0.0.0:9090"
+# api_key = "your-secret-key"
 ```
 
 ## Sections
@@ -56,7 +80,7 @@ dns = ["8.8.8.8", "1.1.1.1"]
 
 | Key | Required | Default | Description |
 |-----|----------|---------|-------------|
-| `token` | Yes | — | GitHub PAT ([setup guide](setup.md#github-token-setup)) |
+| `token` | One of `token`/`app` | — | GitHub PAT ([setup guide](setup.md#github-token-setup)) |
 | `owner` | Yes | — | Repository owner (user or org) |
 | `repo` | One of `repo`/`repos` | — | Single repository name |
 | `repos` | One of `repo`/`repos` | `[]` | List of repos under the same owner |
@@ -66,6 +90,42 @@ dns = ["8.8.8.8", "1.1.1.1"]
 > **Multi-repo:** Set `repos` to poll multiple repositories with a single fc-runner instance.
 > Both `repo` and `repos` can be set — they are merged and deduplicated.
 > All repos must share the same `owner`, `token`, `labels`, and `runner_group_id`.
+
+### `[github.app]`
+
+GitHub App authentication as an alternative to PAT. Provides higher rate limits (5,000/hour per installation) and no token expiry management.
+
+| Key | Required | Default | Description |
+|-----|----------|---------|-------------|
+| `app_id` | Yes | — | GitHub App ID (from app settings page) |
+| `installation_id` | Yes | — | Installation ID for the org/user where the app is installed |
+| `private_key_path` | Yes | — | Path to the PEM private key file downloaded from GitHub |
+
+When `[github.app]` is configured, `token` is optional. If both are set, App auth takes precedence.
+
+**How it works:**
+1. fc-runner generates a JWT signed with the App's private key (RS256, 10-minute TTL)
+2. Exchanges the JWT for an installation access token via `POST /app/installations/{id}/access_tokens`
+3. Caches the installation token for 55 minutes (tokens are valid for 60 minutes)
+4. Automatically refreshes before expiry
+
+**Setup:**
+1. Create a GitHub App at `https://github.com/settings/apps/new`
+2. Grant **Repository permissions**: Actions (R/W), Administration (R/W), Metadata (Read)
+3. Install the App on the org/user that owns the repos
+4. Download the private key PEM file
+5. Note the App ID and Installation ID
+
+```toml
+[github]
+owner = "your-org"
+repos = ["repo-a", "repo-b"]
+
+[github.app]
+app_id = 12345
+installation_id = 67890
+private_key_path = "/etc/fc-runner/app-key.pem"
+```
 
 ### `[firecracker]`
 
@@ -83,6 +143,28 @@ dns = ["8.8.8.8", "1.1.1.1"]
 | `jailer_uid` | If jailer | — | UID the jailer drops to before starting the VMM |
 | `jailer_gid` | If jailer | — | GID the jailer drops to before starting the VMM |
 | `jailer_chroot_base` | No | `/srv/jailer` | Base directory for jailer chroot environments |
+| `secret_injection` | No | `mmds` | Secret injection method: `mmds` (Firecracker metadata service) or `mount` (legacy loop-mount) |
+| `vsock_enabled` | No | `false` | Enable virtio-vsock device for guest agent communication |
+| `vsock_cid_base` | No | `3` | Base CID for VSOCK devices. Each VM gets CID = `vsock_cid_base + slot`. CIDs 0-2 are reserved. |
+
+#### Secret Injection Methods
+
+**`mmds`** (default) — Uses Firecracker's built-in MicroVM Metadata Service:
+- Secrets are served at `169.254.169.254` inside the guest (like cloud instance metadata)
+- Uses MMDS V2 with session tokens for security
+- No loop-mount needed for secrets (only for network config)
+- Secrets never written to disk — injected via the Firecracker API socket
+- Guest uses `guest_configs/fetch-mmds-env.sh` to retrieve secrets at boot
+
+**`mount`** (legacy) — Loop-mounts the rootfs copy:
+- Secrets are written to `/etc/fc-runner-env` inside the rootfs
+- File is `chmod 0600` and deleted on VM teardown
+- Requires loop devices (can exhaust `/dev/loop*` under high concurrency)
+- VM runs with `--no-api` (no API socket)
+
+#### VSOCK
+
+When `vsock_enabled = true`, each VM gets a virtio-vsock device. The host spawns a VSOCK listener per VM that reads NDJSON messages from the guest agent on port 1024. This enables structured host-guest communication without network overhead.
 
 ### `[runner]`
 
@@ -93,6 +175,41 @@ dns = ["8.8.8.8", "1.1.1.1"]
 | `max_concurrent_jobs` | No | `4` | Maximum VMs running simultaneously (prevents resource exhaustion) |
 | `vm_timeout_secs` | No | `3600` | Maximum seconds a single VM is allowed to run before being killed |
 | `warm_pool_size` | No | `0` | Number of pre-registered idle runners. When > 0, uses registration tokens instead of JIT. |
+
+### `[[pool]]`
+
+Named VM pools provide fine-grained control over scaling and resource allocation. When `[[pool]]` sections are configured, they replace the flat `warm_pool_size` setting.
+
+Each pool maintains its own set of pre-registered runners with independent configuration.
+
+| Key | Required | Default | Description |
+|-----|----------|---------|-------------|
+| `name` | Yes | — | Pool name (used in logs) |
+| `repos` | Yes | — | List of repos this pool serves |
+| `min_ready` | No | `1` | Minimum number of idle VMs to keep ready |
+| `max_ready` | No | `4` | Maximum total VMs in this pool (idle + active) |
+| `vcpu_count` | No | `[firecracker].vcpu_count` | Override vCPU count for this pool |
+| `mem_size_mib` | No | `[firecracker].mem_size_mib` | Override memory for this pool |
+
+Slots are distributed across pools based on each pool's `max_ready`. If the total `max_ready` across all pools exceeds `max_concurrent_jobs`, a warning is logged and some pools may not receive all requested slots.
+
+```toml
+# Lightweight pool for CI jobs
+[[pool]]
+name = "ci"
+repos = ["app", "lib"]
+min_ready = 2
+max_ready = 4
+
+# Heavy pool for integration tests
+[[pool]]
+name = "integration"
+repos = ["app"]
+min_ready = 1
+max_ready = 2
+vcpu_count = 8
+mem_size_mib = 8192
+```
 
 ### `[network]`
 
@@ -132,6 +249,40 @@ Each VM gets its own TAP device and unique subnet derived from its slot number:
 | 2 | `tap-fc2` | `172.16.2.1` | `172.16.2.2` | `06:00:AC:10:02:02` |
 
 TAP devices are created and destroyed automatically per VM. No manual TAP configuration is needed.
+
+### `[server]`
+
+HTTP server for Prometheus metrics, health checks, and a management REST API.
+
+| Key | Required | Default | Description |
+|-----|----------|---------|-------------|
+| `enabled` | No | `true` | Set to `false` to disable the HTTP server entirely |
+| `listen_addr` | No | `0.0.0.0:9090` | Listen address for the HTTP server |
+| `api_key` | No | — | API key for authenticated management endpoints. When set, `X-Api-Key` header is required for `/api/v1/vms` and `DELETE /api/v1/vms/{id}`. |
+
+**Endpoints:**
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/metrics` | No | Prometheus metrics in text exposition format |
+| GET | `/healthz` | No | Health check (returns `ok`) |
+| GET | `/api/v1/status` | No | JSON: version, uptime, operating mode, active VM count |
+| GET | `/api/v1/vms` | API key | JSON array of active VMs (vm_id, job_id, repo, slot, started_at) |
+| DELETE | `/api/v1/vms/{id}` | API key | Request termination of a specific VM |
+
+**Prometheus metrics example:**
+```bash
+curl -s http://localhost:9090/metrics
+```
+
+**Management API example:**
+```bash
+# Without API key (open access)
+curl -s http://localhost:9090/api/v1/vms | jq .
+
+# With API key
+curl -s -H "X-Api-Key: your-secret-key" http://localhost:9090/api/v1/vms | jq .
+```
 
 ## Environment Variables
 

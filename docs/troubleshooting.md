@@ -243,6 +243,82 @@ sudo systemctl restart fc-runner
 
 ---
 
+### GitHub App authentication fails
+
+```
+Error: failed to generate installation token
+```
+
+**Cause:** Invalid App credentials, expired JWT, or the App isn't installed on the target org/repos.
+
+**Diagnose:**
+```bash
+# Check fc-runner logs for the specific error
+sudo journalctl -u fc-runner --since "5 minutes ago" | grep -i "app\|jwt\|installation"
+```
+
+**Fix:**
+- Verify `app_id` and `installation_id` in config match the GitHub App settings
+- Ensure the private key file exists and is readable: `ls -la /etc/fc-runner/app-key.pem`
+- Verify the App is installed on the correct org/user and has access to the configured repos
+- Check that the private key hasn't been rotated — re-download from GitHub if needed
+- Ensure the host clock is accurate (JWT validation is time-sensitive): `timedatectl status`
+
+---
+
+### MMDS metadata not available in guest
+
+**Cause:** Guest can't reach the MMDS endpoint at `169.254.169.254`, or the MMDS PUT failed.
+
+**Diagnose:**
+```bash
+# Check fc-runner logs for MMDS errors
+sudo journalctl -u fc-runner | grep -i mmds
+
+# Inside the guest (if accessible), check MMDS connectivity
+curl -s -H "X-metadata-token: $(curl -s -X PUT http://169.254.169.254/latest/api/token -H 'X-metadata-token-ttl-seconds: 21600')" http://169.254.169.254/latest/meta-data/
+```
+
+**Fix:**
+- Ensure `secret_injection = "mmds"` (or omit it — MMDS is the default)
+- Check that the Firecracker API socket is being created (MMDS mode uses `--api-sock`, not `--no-api`)
+- Fall back to mount mode temporarily: `secret_injection = "mount"`
+- The guest-side script `fetch-mmds-env.sh` retries 30 times with 1s intervals — check if it's present in the rootfs
+
+---
+
+### Metrics endpoint not responding
+
+```bash
+curl: (7) Failed to connect to localhost port 9090
+```
+
+**Cause:** HTTP server disabled or listen address misconfigured.
+
+**Fix:**
+- Check `[server]` config: ensure `enabled` is not set to `false`
+- Verify `listen_addr` — default is `0.0.0.0:9090`
+- Check if something else is using port 9090: `ss -tlnp | grep 9090`
+- Check logs: `sudo journalctl -u fc-runner | grep "management\|server"`
+
+---
+
+### Pool VMs not starting
+
+**Cause:** Pool configuration issue or no slots available.
+
+**Diagnose:**
+```bash
+sudo journalctl -u fc-runner | grep -i pool
+```
+
+**Fix:**
+- Ensure `[[pool]]` sections have valid `repos` that exist in `github.repos`
+- Check that `max_ready` across all pools doesn't exceed `max_concurrent_jobs`
+- Verify each pool has at least one slot allocated (check "allocating slots to pool" log messages)
+
+---
+
 ## Useful Commands
 
 ```bash
@@ -254,6 +330,20 @@ sudo journalctl -u fc-runner -f
 
 # Check for running VMs
 pgrep -a firecracker
+
+# Prometheus metrics
+curl -s http://localhost:9090/metrics
+
+# Management API — server status
+curl -s http://localhost:9090/api/v1/status | jq .
+
+# Management API — list active VMs
+curl -s http://localhost:9090/api/v1/vms | jq .
+# With API key:
+curl -s -H "X-Api-Key: your-key" http://localhost:9090/api/v1/vms | jq .
+
+# Health check
+curl -s http://localhost:9090/healthz
 
 # List registered runners via GitHub API
 curl -s \

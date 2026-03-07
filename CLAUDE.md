@@ -25,11 +25,13 @@ Pop!_OS / Ubuntu 24.04.
 ### What fc-runner does
 1. Polls the GitHub REST API for queued workflow jobs matching configured labels
    (default: `["self-hosted", "linux", "firecracker"]`).
-2. Requests a **JIT (Just-In-Time) runner token** for each new job.
-3. COW-copies a **golden ext4 rootfs** and injects the JIT token + repo URL into
-   `/etc/fc-runner-env` inside the image, along with per-VM network config.
-4. Launches one **Firecracker microVM** per job — fully isolated, ~125 ms boot.
-5. Blocks until the VM exits (job complete), then **deletes all VM artefacts**.
+2. Authenticates via **PAT** or **GitHub App** (JWT + installation token with auto-refresh).
+3. Requests a **JIT (Just-In-Time) runner token** for each new job.
+4. COW-copies a **golden ext4 rootfs** and injects secrets via **MMDS** (default)
+   or **loop-mount** (legacy), along with per-VM network config.
+5. Launches one **Firecracker microVM** per job — fully isolated, ~125 ms boot.
+6. Exposes **Prometheus metrics** and a **management REST API** on port 9090.
+7. Blocks until the VM exits (job complete), then **deletes all VM artefacts**.
 
 ### Stack
 | Layer | Technology |
@@ -47,15 +49,20 @@ fc-runner/
 ├── src/
 │   ├── main.rs           # CLI entry point, signal handling
 │   ├── config.rs         # Typed TOML config structs
-│   ├── github.rs         # GitHub API client (poll + JIT tokens)
-│   ├── firecracker.rs    # MicroVm struct: prepare → run → cleanup
+│   ├── github.rs         # GitHub API client (PAT + App auth, poll + JIT tokens)
+│   ├── firecracker.rs    # MicroVm struct: prepare → run → cleanup (MMDS + mount)
 │   ├── netlink.rs        # Pure-Rust TAP device management (rtnetlink + nix ioctl)
-│   ├── orchestrator.rs   # Poll/dispatch loop, dedup via HashSet<job_id>
-│   └── setup.rs          # KVM checks, kernel/rootfs provisioning, network, AppArmor
-├── guest_configs/        # Firecracker kernel configs (x86_64 + aarch64)
+│   ├── orchestrator.rs   # Poll/dispatch loop, dedup, JIT/warm-pool/named-pool modes
+│   ├── setup.rs          # KVM checks, kernel/rootfs provisioning, network, AppArmor
+│   ├── metrics.rs        # Prometheus metrics registry (counters, gauges, histograms)
+│   ├── server.rs         # HTTP server: /metrics, /healthz, management API
+│   ├── pool.rs           # Named VM pool manager with min/max ready
+│   └── vsock.rs          # Host-side VSOCK listener for guest agent
+├── guest_configs/
+│   ├── fetch-mmds-env.sh            # Guest-side MMDS metadata fetch script
+│   └── microvm-kernel-ci-*.config   # Firecracker kernel configs
 ├── .github/workflows/
 │   └── release.yml       # CI: build binary + kernel + rootfs, publish release
-├── Cargo.toml
 ├── apparmor/
 │   ├── usr.local.bin.firecracker   # AppArmor profile for Firecracker VMM
 │   └── usr.local.bin.fc-runner     # AppArmor profile for orchestrator
@@ -134,9 +141,13 @@ setup.rs (automatic at first startup)
 Per-job (firecracker.rs):
   cp --reflink=auto golden.ext4 → /var/lib/fc-runner/vms/<vm-id>.ext4
   create TAP device (ioctl TUNSETIFF via netlink.rs)
-  mount image → write /etc/fc-runner-env + per-VM network config → umount
-  generate VM config JSON (serde_json, no template file)
-  firecracker --config-file <path> --no-api
+  MMDS mode (default):
+    mount image → write per-VM network config → umount
+    firecracker --config-file <path> --api-sock <sock>
+    PUT secrets to MMDS via Unix socket HTTP (hyper + hyperlocal)
+  Mount mode (legacy):
+    mount image → write /etc/fc-runner-env + per-VM network config → umount
+    firecracker --config-file <path> --no-api
   wait for exit → dump guest log → delete TAP → rm *.ext4 *.json *.log
 ```
 
@@ -276,17 +287,28 @@ sudo systemctl restart fc-runner
 - **Per-VM TAP devices** — each VM gets its own `tap-fc<slot>` with a unique IP.
   Created via `ioctl(TUNSETIFF)` in `netlink.rs`, managed via `rtnetlink` crate.
 - **Pure Rust where possible** — qcow2 conversion (`qcow2-rs`), partition parsing
-  (`bootsector`), ext4 superblock reading, TAP/netlink management, TLS (`rustls`).
-  External commands only for: `mount` (loop), `e2fsck`/`resize2fs`, `iptables`,
-  `cp --reflink`, `firecracker`/`jailer`.
-- **`--no-api` flag** — disables the Firecracker management API socket after
-  boot. This reduces the attack surface and simplifies cleanup. Remove it only if
-  you need to pause/snapshot VMs mid-job.
+  (`bootsector`), ext4 superblock reading, TAP/netlink management, TLS (`rustls`),
+  JWT generation (`jsonwebtoken`). External commands only for: `mount` (loop),
+  `e2fsck`/`resize2fs`, `iptables`, `cp --reflink`, `firecracker`/`jailer`.
+- **MMDS for secret injection** (default) — uses Firecracker's built-in metadata
+  service at `169.254.169.254`. Secrets are PUTed via Unix socket HTTP (hyper +
+  hyperlocal) and never touch disk. Falls back to `--no-api` + loop-mount when
+  `secret_injection = "mount"` is configured.
 - **`tokio::spawn` per job** — each job runs in its own tokio task. Concurrency
   is bounded by a `tokio::sync::Semaphore` initialized from `max_concurrent_jobs`.
-- **Secret injection via mounted image** — credentials are written to ext4, not
-  passed via kernel cmdline (which would appear in `/proc/cmdline` inside the VM).
-  The file is deleted on VM teardown.
+- **GitHub App auth** — alternative to PAT. Generates JWT (RS256) via
+  `jsonwebtoken` crate, exchanges for installation token, caches with 55-min TTL
+  in `RwLock`. Higher rate limits (5,000/hr per installation) and no token expiry.
+- **Named pools** — `[[pool]]` config sections create independent `PoolManager`
+  instances, each maintaining its own warm VMs. Slots are distributed across pools
+  proportionally. Replaces flat `warm_pool_size` when configured.
+- **Prometheus metrics** — `prometheus` crate with custom `Registry`. Metrics are
+  gathered on every `/metrics` request via `TextEncoder`. No push gateway needed.
+- **Management API** — axum HTTP server shares `Arc<ServerState>` with the
+  orchestrator. VM registration/unregistration is done via `Mutex<Vec<VmInfo>>`.
+  Optional API key auth via `X-Api-Key` header for sensitive endpoints.
+- **VSOCK guest agent** — optional virtio-vsock channel for structured host-guest
+  communication. NDJSON protocol over port 1024. Linux-only via `tokio-vsock`.
 - **JIT tokens** — single-use, expire quickly, and are tied to a specific job.
   They are strictly superior to static `--token` registration for ephemeral runners.
 - **Loop mounts use `mount` command** — the kernel `mount(2)` syscall doesn't

@@ -12,35 +12,72 @@ GitHub API ──poll──▶ Orchestrator ──spawn──▶ MicroVM (Firecr
                    tokio::spawn              run job → exit → cleanup
 ```
 
+## Operating Modes
+
+fc-runner supports three operating modes, selected automatically based on configuration:
+
+| Mode | Config | Description |
+|------|--------|-------------|
+| **Reactive (JIT)** | Default | Polls GitHub for queued jobs, boots a VM per job on demand |
+| **Warm pool** | `warm_pool_size > 0` | Pre-registers N idle runners that wait for GitHub to assign jobs |
+| **Named pools** | `[[pool]]` sections | Multiple named pools with per-pool repos, replica counts, and resource overrides |
+
 ## Modules
 
 ### `main.rs`
-Entry point. Loads configuration, initializes structured logging via `tracing`, sets up signal handlers (SIGTERM/SIGINT) for graceful shutdown, and launches the orchestrator.
+Entry point. Loads configuration, initializes structured logging via `tracing`, sets up signal handlers (SIGTERM/SIGINT) for graceful shutdown, creates the shared `ServerState`, spawns the HTTP server, and launches the orchestrator.
 
 ### `config.rs`
 Parses `/etc/fc-runner/config.toml` into typed structs using `serde` + `toml`. Validates all paths exist at load time. Redacts the GitHub token in Debug output. Supports both single `repo` and multi-repo `repos` fields (merged and deduplicated via `all_repos()`).
 
+Key config structs:
+- `AppConfig` — top-level config with `github`, `firecracker`, `runner`, `network`, `server`, and `pool` sections
+- `GitHubConfig` — PAT token (optional) + `GitHubAppConfig` for App auth
+- `FirecrackerConfig` — VM resources, secret injection mode (`mmds`/`mount`), VSOCK settings
+- `ServerConfig` — HTTP server listen address, enabled flag, optional API key
+- `PoolConfig` — named pool with repos, min/max ready counts, resource overrides
+
 ### `github.rs`
-HTTP client wrapping `reqwest`. All API methods accept a `repo` parameter, allowing a single client to serve multiple repositories under the same owner. Communicates with three GitHub REST API endpoints:
+HTTP client wrapping `reqwest`. Supports two authentication methods:
+
+| Auth Method | Config | Description |
+|-------------|--------|-------------|
+| **PAT** | `github.token` | Personal access token, sent as `Authorization: Bearer <token>` |
+| **GitHub App** | `[github.app]` | JWT-based auth with installation token caching (55-min TTL, auto-refresh) |
+
+The `AuthProvider` enum manages both methods. App auth generates a JWT (RS256), exchanges it for an installation access token via `POST /app/installations/{id}/access_tokens`, and caches the result in a `RwLock` with automatic refresh before expiry.
+
+All API methods accept a `repo` parameter, allowing a single client to serve multiple repositories under the same owner.
 
 | Method | Endpoint | Purpose |
 |--------|----------|---------|
 | GET | `/repos/{owner}/{repo}/actions/runs?status=queued` | List queued workflow runs |
 | GET | `/repos/{owner}/{repo}/actions/runs/{id}/jobs?filter=queued` | List queued jobs for a run |
 | POST | `/repos/{owner}/{repo}/actions/runners/generate-jit-config` | Generate a single-use JIT runner token |
+| POST | `/repos/{owner}/{repo}/actions/runners/registration-token` | Generate a registration token (warm pool mode) |
+| DELETE | `/repos/{owner}/{repo}/actions/runners/{id}` | Remove offline runners after VM exit |
 
 All requests include `Authorization: Bearer <token>` and `X-GitHub-Api-Version: 2022-11-28`.
 
 ### `firecracker.rs`
-Manages the full VM lifecycle through the `MicroVm` struct:
+Manages the full VM lifecycle through the `MicroVm` struct. Supports two secret injection modes:
 
+**MMDS mode** (default, `secret_injection = "mmds"`):
 1. **copy_rootfs** — `cp --reflink=auto` of the golden ext4 image
 2. **create_tap** — creates a per-VM TAP device (`tap-fc<slot>`) via `netlink.rs`
-3. **inject_env** — loop-mount the copy, write `/etc/fc-runner-env` with JIT token and repo URL, write per-VM network config
-4. **write_vm_config** — generate Firecracker VM config JSON programmatically (via `serde_json`)
-5. **run** — spawn `firecracker --config-file <path> --no-api` (or via jailer) and wait for exit with timeout
-6. **dump_guest_log** — mount rootfs read-only and extract `/var/log/runner.log` for debugging
-7. **cleanup** — destroy TAP device, delete rootfs copy, config, socket, log, and jailer chroot files
+3. **inject_network_config** — loop-mount the copy, write per-VM network config (but not secrets)
+4. **write_vm_config** — generate VM config JSON with MMDS V2 enabled
+5. **run_with_api** — spawn `firecracker --config-file <path> --api-sock <sock>`, then PUT secrets to MMDS via Unix socket HTTP
+6. **dump_guest_log** / **cleanup**
+
+**Mount mode** (legacy, `secret_injection = "mount"`):
+1. **copy_rootfs** + **create_tap** (same as above)
+2. **inject_env_mount** — loop-mount, write `/etc/fc-runner-env` with JIT token + repo URL + network config
+3. **write_vm_config** — generate VM config JSON (no MMDS)
+4. **run_no_api** — spawn `firecracker --config-file <path> --no-api`
+5. **dump_guest_log** / **cleanup**
+
+When VSOCK is enabled (`vsock_enabled = true`), the VM config includes a `vsock` device with `guest_cid = vsock_cid_base + slot`.
 
 Cleanup runs unconditionally, even if earlier steps fail.
 
@@ -72,16 +109,83 @@ Auto-provisioning module that ensures all VM prerequisites are in place at start
 6. **ensure_apparmor** — loads and enforces AppArmor profiles for fc-runner and Firecracker
 
 ### `orchestrator.rs`
-Async poll loop using `tokio::time::interval`. Each cycle iterates over all configured repos:
+Async poll loop using `tokio::time::interval`. Supports three modes:
 
+**Reactive (JIT) mode** — default. Each cycle iterates over all configured repos:
 1. For each repo, fetches queued runs from GitHub
 2. For each run, fetches queued jobs
 3. Filters jobs by label match
 4. Deduplicates via `HashSet<u64>` of job IDs (shared across all repos)
 5. Acquires a semaphore permit (bounded by `max_concurrent_jobs`)
 6. Spawns a `tokio::spawn` task per new job with its repo context
+7. Registers the VM in `ServerState` for management API visibility
+8. Records Prometheus metrics (dispatch count, boot duration, active jobs)
+
+**Warm pool mode** — `warm_pool_size > 0`. Pre-registers idle runners:
+1. Spawns `warm_pool_size` VMs distributed across repos round-robin
+2. Each VM uses a registration token (not JIT) and waits for GitHub to assign a job
+3. When a VM finishes, a replacement is spawned automatically after a brief delay
+
+**Named pools mode** — `[[pool]]` sections configured. Delegates to `PoolManager`:
+1. Distributes slots across pools proportionally
+2. Each pool runs independently with its own `PoolManager` instance
 
 The job ID is removed from the seen set after the task completes, allowing retry if the VM failed before the runner registered. Active job count is tracked for graceful shutdown. If one repo fails to poll, the others continue unaffected.
+
+### `metrics.rs`
+Prometheus metrics registry using the `prometheus` crate with `Lazy` static initialization. All metrics are registered in a custom `Registry` and gathered via `TextEncoder`.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `fc_jobs_dispatched_total` | Counter | `repo` | Total jobs dispatched |
+| `fc_jobs_completed_total` | Counter | `repo` | Total jobs completed successfully |
+| `fc_jobs_failed_total` | Counter | `repo` | Total jobs that failed |
+| `fc_jobs_active` | Gauge | — | Currently running VMs |
+| `fc_vm_boot_duration_seconds` | Histogram | `repo` | VM boot + execution duration |
+| `fc_github_api_calls_total` | Counter | `endpoint` | GitHub API calls |
+| `fc_github_rate_limit_remaining` | Gauge | — | Remaining GitHub API rate limit |
+| `fc_pool_slots_available` | Gauge | — | Available concurrency slots |
+| `fc_poll_cycles_total` | Counter | `result` | Poll cycle outcomes (ok/error) |
+| `fc_uptime_seconds` | Gauge | `version` | Process uptime |
+
+### `server.rs`
+Axum HTTP server providing Prometheus metrics, health checks, and a management API. Shared state is managed via `Arc<ServerState>`.
+
+**Endpoints:**
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/metrics` | No | Prometheus metrics in text format |
+| GET | `/healthz` | No | Health check (returns "ok") |
+| GET | `/api/v1/status` | No | JSON status (version, uptime, mode, active VM count) |
+| GET | `/api/v1/vms` | API key | List active VMs with job ID, repo, slot, start time |
+| DELETE | `/api/v1/vms/{id}` | API key | Request VM termination |
+
+When `server.api_key` is configured, management endpoints require an `X-Api-Key` header. Health and metrics endpoints are always unauthenticated.
+
+### `pool.rs`
+Named VM pool manager. Each `PoolManager` maintains a set of warm VMs for its assigned repos:
+
+- Keeps `min_ready` idle VMs at all times
+- Limits total VMs (idle + active) to `max_ready`
+- Supports per-pool `vcpu_count` and `mem_size_mib` overrides
+- Automatically replaces VMs after they complete a job
+- Uses `mpsc` channels for slot return signaling
+
+### `vsock.rs`
+Host-side VSOCK listener for guest agent communication. When `vsock_enabled = true`, a listener is spawned per VM before launch and aborted on VM exit.
+
+**Protocol:** NDJSON over VSOCK port 1024.
+
+| Message type | Fields | Description |
+|-------------|--------|-------------|
+| `ready` | `timestamp` | Guest agent initialized |
+| `job_started` | `job_id` | Runner picked up a job |
+| `log` | `line` | Structured log line from guest |
+| `job_completed` | `exit_code` | Job finished |
+| `heartbeat` | — | Periodic liveness signal |
+
+Linux-only (`tokio-vsock` crate); stub implementation on other platforms.
 
 ## Auto-Provisioning
 
@@ -113,6 +217,8 @@ sudo systemctl restart fc-runner
 
 Each job runs in its own tokio task. Concurrency is bounded by a `tokio::sync::Semaphore` initialized from `runner.max_concurrent_jobs` (default: 4). This prevents resource exhaustion on the host when many jobs queue simultaneously.
 
+In named pool mode, slots are distributed across pools proportionally based on each pool's `max_ready` setting.
+
 ## Per-VM Networking
 
 Each VM gets its own TAP device and unique subnet:
@@ -127,6 +233,26 @@ Host (172.16.<slot>.1/24) ←→ tap-fc<slot> ←→ Guest eth0 (172.16.<slot>.2
 - IP addresses are assigned via `rtnetlink` (pure Rust netlink API)
 - Each VM gets a unique MAC address: `06:00:AC:10:<slot_hex>:02`
 - Guest network config is written via systemd-networkd unit files injected into the rootfs
+
+## Secret Injection
+
+fc-runner supports two methods for injecting secrets (JIT token, repo URL) into VMs:
+
+### MMDS (default)
+Uses Firecracker's built-in Metadata Data Store at `169.254.169.254`:
+1. VM starts with `--api-sock` (API socket enabled)
+2. Host PUTs metadata as JSON to the MMDS via the Unix socket
+3. Guest fetches secrets from `http://169.254.169.254/latest/meta-data/` using a V2 session token
+4. No loop-mount needed for secret injection (only for network config)
+
+**Advantages:** No root required for secret injection, no loop device exhaustion risk, secrets never written to disk.
+
+### Mount (legacy)
+Injects secrets by loop-mounting the rootfs copy:
+1. Loop-mount the COW rootfs copy
+2. Write secrets to `/etc/fc-runner-env`
+3. Unmount
+4. VM starts with `--no-api`
 
 ## VM Timeout
 
@@ -146,8 +272,9 @@ Active job count is tracked via `Arc<Mutex<usize>>`.
 
 ### Secret Handling
 - GitHub PAT stored as `secrecy::SecretString` — zeroized on drop, redacted in Debug/logs
-- JIT tokens are written into the ext4 image (not kernel cmdline) and deleted on VM teardown
-- Token files inside the mounted rootfs are `chmod 0600`
+- GitHub App private keys read from disk at startup, never logged
+- JIT tokens injected via MMDS (in-memory, never on disk) or written to ext4 with `chmod 0600`
+- Token files inside the mounted rootfs are deleted on VM teardown
 - Config file permissions are checked at load time — rejects world-readable configs
 
 ### Path Safety
@@ -155,7 +282,8 @@ Active job count is tracked via `Arc<Mutex<usize>>`.
 - `path_str()` helper converts `PathBuf` to `&str` with descriptive errors instead of panicking
 
 ### VM Lifecycle
-- `--no-api` disables the Firecracker management socket
+- `--no-api` disables the Firecracker management socket (mount mode)
+- `--api-sock` enables it only for MMDS injection, then the socket is cleaned up
 - `umount_with_retry()`: 3 attempts with 200ms delay, then lazy umount fallback to prevent leaked mounts
 - Guest log dump after every VM exit (mount read-only, extract `/var/log/runner.log`)
 - Cleanup runs unconditionally, even on failure
@@ -176,6 +304,7 @@ Active job count is tracked via `Arc<Mutex<usize>>`.
 ### Rate Limiting
 - GitHub API rate-limit headers (`x-ratelimit-remaining`) are parsed after every response
 - Warning at < 100 remaining requests, 60-second backoff at < 10
+- GitHub App auth provides higher rate limits (5,000/hour per installation vs per PAT)
 
 ### Host Hardening
 - systemd service runs with `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=true`, `MemoryDenyWriteExecute`, and restricted capabilities
