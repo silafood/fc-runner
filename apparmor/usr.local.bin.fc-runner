@@ -25,6 +25,8 @@
 
   # Mount operations for rootfs injection (loop devices needed)
   capability sys_admin,
+  capability sys_chroot,
+  capability sys_nice,
   capability mknod,
   mount,
   umount,
@@ -88,9 +90,11 @@
 
   # Process info
   /proc/cpuinfo r,
+  /proc/swaps r,
   /proc/sys/** r,
   /proc/*/cgroup r,
   /proc/*/cgroup/** r,
+  /sys/fs/cgroup/** r,
 
   # Temp files for rootfs building
   /tmp/** rw,
