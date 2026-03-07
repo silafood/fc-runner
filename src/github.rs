@@ -8,6 +8,7 @@ use serde::Deserialize;
 use tokio::time::Duration;
 
 use crate::config::GitHubConfig;
+use crate::metrics;
 
 #[derive(Debug, Deserialize)]
 pub struct WorkflowRunsResponse {
@@ -103,6 +104,7 @@ impl GitHubClient {
             .and_then(|s| s.parse::<u32>().ok())
         {
             self.rate_limit_remaining.store(remaining, Ordering::Relaxed);
+            metrics::GITHUB_RATE_LIMIT_REMAINING.set(remaining as i64);
             if remaining < 100 {
                 tracing::warn!(remaining, "GitHub API rate limit running low");
             }
@@ -114,6 +116,7 @@ impl GitHubClient {
     }
 
     pub async fn list_queued_runs(&self, repo: &str) -> anyhow::Result<Vec<WorkflowRun>> {
+        metrics::GITHUB_API_CALLS.with_label_values(&["list_queued_runs"]).inc();
         let url = format!("{}/actions/runs?status=queued", self.repo_url(repo));
         let resp = self
             .request(reqwest::Method::GET, &url)
@@ -129,6 +132,7 @@ impl GitHubClient {
     }
 
     pub async fn list_queued_jobs(&self, repo: &str, run_id: u64) -> anyhow::Result<Vec<Job>> {
+        metrics::GITHUB_API_CALLS.with_label_values(&["list_queued_jobs"]).inc();
         let url = format!(
             "{}/actions/runs/{}/jobs?filter=queued",
             self.repo_url(repo),
@@ -149,6 +153,7 @@ impl GitHubClient {
 
     /// Generate a registration token for pre-registering runners (warm pool mode).
     pub async fn generate_registration_token(&self, repo: &str) -> anyhow::Result<String> {
+        metrics::GITHUB_API_CALLS.with_label_values(&["generate_registration_token"]).inc();
         let url = format!("{}/actions/runners/registration-token", self.repo_url(repo));
         let resp = self
             .request(reqwest::Method::POST, &url)
@@ -173,6 +178,7 @@ impl GitHubClient {
 
     /// List all self-hosted runners for a repo.
     pub async fn list_runners(&self, repo: &str) -> anyhow::Result<Vec<Runner>> {
+        metrics::GITHUB_API_CALLS.with_label_values(&["list_runners"]).inc();
         let url = format!("{}/actions/runners", self.repo_url(repo));
         let resp = self
             .request(reqwest::Method::GET, &url)
@@ -189,6 +195,7 @@ impl GitHubClient {
 
     /// Delete a runner by ID.
     pub async fn delete_runner(&self, repo: &str, runner_id: u64) -> anyhow::Result<()> {
+        metrics::GITHUB_API_CALLS.with_label_values(&["delete_runner"]).inc();
         let url = format!("{}/actions/runners/{}", self.repo_url(repo), runner_id);
         let resp = self
             .request(reqwest::Method::DELETE, &url)
@@ -235,6 +242,7 @@ impl GitHubClient {
     }
 
     pub async fn generate_jit_config(&self, repo: &str, job_id: u64) -> anyhow::Result<String> {
+        metrics::GITHUB_API_CALLS.with_label_values(&["generate_jit_config"]).inc();
         let url = format!("{}/actions/runners/generate-jitconfig", self.repo_url(repo));
         let body = serde_json::json!({
             "name": format!("fc-{}-{}", job_id, &uuid::Uuid::new_v4().to_string()[..8]),
