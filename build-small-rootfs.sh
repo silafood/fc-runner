@@ -1,30 +1,42 @@
 #!/usr/bin/env bash
-# Fast, minimal rootfs for testing. ~1 minute vs ~5 for the full build.
-# Skips installdependencies.sh and uses sparse image + minbase variant.
+# Fast rootfs using Ubuntu minimal cloud image instead of debootstrap.
+# ~1 minute build time. Boots faster and has better systemd integration.
 set -euo pipefail
 
 ROOTFS="/opt/fc-runner/runner-rootfs-golden.ext4"
 MNT="/opt/fc-runner/rootfs-build"
 RUNNER_VERSION="2.332.0"
+CLOUD_IMG_URL="https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img"
+CLOUD_IMG="/opt/fc-runner/cloud-base.img"
 
-echo "=== Building SMALL golden rootfs (for testing) ==="
+echo "=== Building golden rootfs (cloud image base) ==="
 
 # Clean up any previous failed build
 umount -l "$MNT" 2>/dev/null || true
 rm -rf "$MNT"
 rm -f "$ROOTFS"
 
-echo "[1/7] Creating 2GB sparse image..."
+# ── Step 1: Download cloud image (cached) ──────────────────────────
+if [ -f "$CLOUD_IMG" ]; then
+    echo "[1/8] Using cached cloud image"
+else
+    echo "[1/8] Downloading Ubuntu minimal cloud image..."
+    curl -fSL -o "$CLOUD_IMG" "$CLOUD_IMG_URL"
+fi
+
+# ── Step 2: Convert qcow2 → raw ext4 ───────────────────────────────
+echo "[2/8] Converting qcow2 → raw ext4 (2GB)..."
+qemu-img convert -f qcow2 -O raw "$CLOUD_IMG" "$ROOTFS"
+# Expand to 2GB so there's room for the runner + workspace
 truncate -s 2G "$ROOTFS"
+e2fsck -f -y "$ROOTFS" || true
+resize2fs "$ROOTFS"
 
-echo "[2/7] Formatting ext4..."
-mkfs.ext4 -F "$ROOTFS"
-
-echo "[3/7] Mounting..."
+# ── Step 3: Mount ───────────────────────────────────────────────────
+echo "[3/8] Mounting..."
 mkdir -p "$MNT"
 mount -o loop "$ROOTFS" "$MNT"
 
-# Ensure cleanup on exit (unmount pseudo-fs first, then rootfs)
 cleanup() {
     echo "Cleaning up mounts..."
     umount "$MNT/dev/pts" 2>/dev/null || true
@@ -36,18 +48,36 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "[4/7] Running debootstrap (minbase variant)..."
-debootstrap --arch=amd64 --variant=minbase \
-    --include=systemd,systemd-sysv,systemd-resolved,curl,git,jq,ca-certificates,sudo,openssh-client,unzip,libicu74,iproute2,iputils-ping \
-    noble "$MNT" http://archive.ubuntu.com/ubuntu
-
-# Mount pseudo-filesystems needed by chroot commands
+# Mount pseudo-filesystems
 mount --bind /dev "$MNT/dev"
 mount --bind /dev/pts "$MNT/dev/pts"
 mount -t proc proc "$MNT/proc"
 mount -t sysfs sys "$MNT/sys"
 
-echo "[5/7] Configuring network..."
+# ── Step 4: Strip cloud-init and unnecessary services ───────────────
+echo "[4/8] Stripping cloud-init and unnecessary packages..."
+chroot "$MNT" bash -c "
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get -y purge cloud-init cloud-guest-utils snapd lxd-installer \
+        ubuntu-advantage-tools unattended-upgrades 2>/dev/null || true
+    apt-get -y autoremove --purge 2>/dev/null || true
+    rm -rf /var/lib/cloud /etc/cloud /var/cache/apt/archives/*.deb
+    apt-get clean
+"
+
+# ── Step 5: Install only what we need ───────────────────────────────
+echo "[5/8] Installing runner dependencies..."
+chroot "$MNT" bash -c "
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -q
+    apt-get install -y --no-install-recommends \
+        curl git jq ca-certificates sudo libicu74 iproute2
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+"
+
+# ── Step 6: Configure network + runner user ─────────────────────────
+echo "[6/8] Configuring network and runner user..."
 mkdir -p "$MNT/etc/systemd/network"
 cat > "$MNT/etc/systemd/network/20-eth.network" << 'EOF'
 [Match]
@@ -62,21 +92,26 @@ EOF
 
 chroot "$MNT" systemctl enable systemd-networkd systemd-resolved
 
-echo "[6/7] Creating runner user and installing GitHub Actions runner..."
-chroot "$MNT" useradd -m -s /bin/bash runner || true
+# Disable services that slow boot and aren't needed
+chroot "$MNT" bash -c "
+    systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+    systemctl disable motd-news.timer 2>/dev/null || true
+    systemctl mask systemd-timesyncd.service 2>/dev/null || true
+" 2>/dev/null || true
+
+chroot "$MNT" useradd -m -s /bin/bash runner 2>/dev/null || true
 echo "runner ALL=(ALL) NOPASSWD:ALL" > "$MNT/etc/sudoers.d/runner"
 
+# ── Step 7: Install GitHub Actions runner ───────────────────────────
+echo "[7/8] Installing GitHub Actions runner v${RUNNER_VERSION}..."
 curl -fsSL -o "$MNT/home/runner/actions-runner.tar.gz" \
     "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
 tar xzf "$MNT/home/runner/actions-runner.tar.gz" -C "$MNT/home/runner/"
 rm "$MNT/home/runner/actions-runner.tar.gz"
-
-# Skip installdependencies.sh — it pulls in hundreds of MB of packages
-# (dotnet, docker, etc.) that aren't needed for basic testing.
-# libicu74 from debootstrap is the only runtime dependency for the runner.
 chroot "$MNT" chown -R runner:runner /home/runner
 
-echo "[7/7] Writing entrypoint..."
+# ── Step 8: Write entrypoint ────────────────────────────────────────
+echo "[8/8] Writing entrypoint..."
 cat > "$MNT/entrypoint.sh" << 'ENTRYEOF'
 #!/bin/bash
 set -euo pipefail
@@ -130,7 +165,6 @@ reboot -f
 ENTRYEOF
 chmod +x "$MNT/entrypoint.sh"
 
-# Enable rc-local.service explicitly
 chroot "$MNT" systemctl enable rc-local.service 2>/dev/null || true
 
 cat > "$MNT/etc/rc.local" << 'RCEOF'
@@ -140,7 +174,7 @@ exit 0
 RCEOF
 chmod +x "$MNT/etc/rc.local"
 
-# Unmount pseudo-filesystems, then rootfs
+# ── Finalize ────────────────────────────────────────────────────────
 umount "$MNT/dev/pts"
 umount "$MNT/dev"
 umount "$MNT/proc"
@@ -150,7 +184,7 @@ rmdir "$MNT"
 trap - EXIT
 
 # Shrink image to actual usage + 512MB headroom
-echo "[8] Shrinking image..."
+echo "Shrinking image..."
 e2fsck -f -y "$ROOTFS" || true
 resize2fs -M "$ROOTFS"
 MINBLOCKS=$(dumpe2fs -h "$ROOTFS" 2>/dev/null | grep "Block count" | awk '{print $3}')
