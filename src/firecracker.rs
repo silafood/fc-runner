@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::process::Stdio;
 
 use anyhow::{ensure, Context};
 use tokio::process::Command;
@@ -7,6 +6,7 @@ use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
 use crate::config::{FirecrackerConfig, NetworkConfig};
+use crate::netlink;
 
 /// Mount an ext4 image via loop (read-write).
 fn mount_loop_ext4(image: &str, target: &str) -> anyhow::Result<()> {
@@ -145,34 +145,18 @@ impl MicroVm {
         );
 
         // Delete if exists from a previous crashed VM
-        let _ = Command::new("ip")
-            .args(["link", "delete", &self.tap_name])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
+        let _ = netlink::delete_link(&self.tap_name).await;
 
-        let status = Command::new("ip")
-            .args(["tuntap", "add", &self.tap_name, "mode", "tap"])
-            .status()
-            .await
+        netlink::create_tap(&self.tap_name).await
             .context("creating TAP device")?;
-        ensure!(status.success(), "ip tuntap add {} failed", self.tap_name);
 
-        let addr = format!("{}/24", self.host_ip);
-        let status = Command::new("ip")
-            .args(["addr", "add", &addr, "dev", &self.tap_name])
-            .status()
-            .await
+        let ip: std::net::Ipv4Addr = self.host_ip.parse()
+            .context("parsing host IP")?;
+        netlink::add_address_v4(&self.tap_name, ip, 24).await
             .context("assigning IP to TAP")?;
-        ensure!(status.success(), "ip addr add failed for {}", self.tap_name);
 
-        let status = Command::new("ip")
-            .args(["link", "set", &self.tap_name, "up"])
-            .status()
-            .await
+        netlink::set_link_up(&self.tap_name).await
             .context("bringing TAP up")?;
-        ensure!(status.success(), "ip link set up failed for {}", self.tap_name);
 
         Ok(())
     }
@@ -180,12 +164,7 @@ impl MicroVm {
     /// Destroy the per-VM TAP device.
     async fn destroy_tap(&self) {
         tracing::info!(vm_id = %self.vm_id, tap = %self.tap_name, "destroying TAP device");
-        let _ = Command::new("ip")
-            .args(["link", "delete", &self.tap_name])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
+        let _ = netlink::delete_link(&self.tap_name).await;
     }
 
     async fn inject_env(&self, env_content: &str) -> anyhow::Result<()> {

@@ -794,20 +794,9 @@ async fn ensure_network(network: &NetworkConfig) -> anyhow::Result<()> {
 async fn cleanup_stale_taps() {
     for i in 0..16 {
         let tap_name = format!("tap-fc{}", i);
-        let status = Command::new("ip")
-            .args(["link", "show", &tap_name])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .await;
-        if status.map(|s| s.success()).unwrap_or(false) {
+        if crate::netlink::link_exists(&tap_name).await {
             tracing::info!(tap = %tap_name, "cleaning up stale TAP device from previous run");
-            let _ = Command::new("ip")
-                .args(["link", "delete", &tap_name])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .await;
+            let _ = crate::netlink::delete_link(&tap_name).await;
         }
     }
 }
