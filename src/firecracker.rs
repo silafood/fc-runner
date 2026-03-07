@@ -237,8 +237,9 @@ impl MicroVm {
             return;
         }
 
+        // noload skips journal replay so we can mount a dirty ext4 after VM kill
         let mount_out = Command::new("mount")
-            .args(["-o", "loop,ro", rootfs, &mnt])
+            .args(["-o", "loop,ro,noload", rootfs, &mnt])
             .output()
             .await;
 
