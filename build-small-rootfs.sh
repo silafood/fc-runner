@@ -194,7 +194,26 @@ poweroff -f
 ENTRYEOF
 chmod +x "$MNT/entrypoint.sh"
 
+# Create rc-local.service unit (not shipped in Ubuntu 24.04 cloud images)
+cat > "$MNT/etc/systemd/system/rc-local.service" << 'SVCEOF'
+[Unit]
+Description=/etc/rc.local Compatibility
+ConditionFileIsExecutable=/etc/rc.local
+
+[Service]
+Type=forking
+ExecStart=/etc/rc.local
+TimeoutSec=0
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+
 chroot "$MNT" systemctl enable rc-local.service 2>/dev/null || true
+# Manual symlink fallback
+mkdir -p "$MNT/etc/systemd/system/multi-user.target.wants"
+ln -sf /etc/systemd/system/rc-local.service "$MNT/etc/systemd/system/multi-user.target.wants/rc-local.service"
 
 cat > "$MNT/etc/rc.local" << 'RCEOF'
 #!/bin/bash
