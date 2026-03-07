@@ -100,6 +100,8 @@ mod inner {
 
     /// Bring a named interface up.
     pub async fn set_link_up(name: &str) -> anyhow::Result<()> {
+        use rtnetlink::LinkUnspec;
+
         let (conn, handle, _) = rtnetlink::new_connection()?;
         tokio::spawn(conn);
 
@@ -112,10 +114,10 @@ mod inner {
             .await?
             .with_context(|| format!("interface {} not found", name))?;
 
+        let msg = LinkUnspec::new_with_index(link.header.index).up().build();
         handle
             .link()
-            .set(link.header.index)
-            .up()
+            .change(msg)
             .execute()
             .await
             .with_context(|| format!("bringing {} up", name))?;

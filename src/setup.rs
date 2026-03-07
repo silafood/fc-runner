@@ -106,7 +106,6 @@ async fn lazy_umount(target: &str) -> anyhow::Result<()> {
 fn chroot_command(root: &str, program: &str, args: &[&str]) -> Command {
     #[cfg(target_os = "linux")]
     {
-        use std::os::unix::process::CommandExt;
         let root_owned = root.to_string();
         let mut cmd = Command::new(program);
         cmd.args(args);
