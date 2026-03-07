@@ -69,7 +69,7 @@ jobs:
       - name: Apply Firecracker kernel config
         working-directory: linux-${{ env.KERNEL_VERSION }}
         run: |
-          wget -q https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/resources/guest_configs/microvm-kernel-x86_64-6.1.config \
+          wget -q https://raw.githubusercontent.com/firecracker-microvm/firecracker/refs/heads/main/resources/guest_configs/microvm-kernel-ci-x86_64-6.1.config \
             -O .config
           make olddefconfig
 
