@@ -403,58 +403,35 @@ sudo -u runner ./run.sh
     Ok(())
 }
 
-/// Ensures TAP device exists, IP forwarding is enabled, and iptables NAT rules are in place.
+/// Ensures IP forwarding is enabled and iptables NAT rules are in place.
+/// TAP devices are now created per-VM in firecracker.rs, not at startup.
 async fn ensure_network(network: &NetworkConfig) -> anyhow::Result<()> {
-    ensure_tap_device(network).await?;
+    cleanup_stale_taps().await;
     ensure_ip_forwarding().await?;
     ensure_nat_rules(network).await?;
     Ok(())
 }
 
-async fn ensure_tap_device(network: &NetworkConfig) -> anyhow::Result<()> {
-    // Check if TAP device already exists
-    let status = Command::new("ip")
-        .args(["link", "show", &network.tap_device])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await?;
-
-    if status.success() {
-        tracing::info!(tap = %network.tap_device, "TAP device already exists");
-        return Ok(());
+/// Clean up any TAP devices left over from a previous crash.
+async fn cleanup_stale_taps() {
+    for i in 0..16 {
+        let tap_name = format!("tap-fc{}", i);
+        let status = Command::new("ip")
+            .args(["link", "show", &tap_name])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+        if status.map(|s| s.success()).unwrap_or(false) {
+            tracing::info!(tap = %tap_name, "cleaning up stale TAP device from previous run");
+            let _ = Command::new("ip")
+                .args(["link", "delete", &tap_name])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await;
+        }
     }
-
-    tracing::info!(tap = %network.tap_device, "creating TAP device");
-
-    let status = Command::new("ip")
-        .args(["tuntap", "add", &network.tap_device, "mode", "tap"])
-        .status()
-        .await
-        .context("creating TAP device")?;
-    ensure!(status.success(), "ip tuntap add failed");
-
-    let addr = format!("{}/{}", network.host_ip, network.cidr);
-    let status = Command::new("ip")
-        .args(["addr", "add", &addr, "dev", &network.tap_device])
-        .status()
-        .await
-        .context("assigning IP to TAP")?;
-    ensure!(status.success(), "ip addr add failed");
-
-    let status = Command::new("ip")
-        .args(["link", "set", &network.tap_device, "up"])
-        .status()
-        .await
-        .context("bringing TAP up")?;
-    ensure!(status.success(), "ip link set up failed");
-
-    tracing::info!(
-        tap = %network.tap_device,
-        addr = %addr,
-        "TAP device created and configured"
-    );
-    Ok(())
 }
 
 async fn ensure_ip_forwarding() -> anyhow::Result<()> {
@@ -475,6 +452,9 @@ async fn ensure_ip_forwarding() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// VM subnet covering all per-VM TAP devices (172.16.0.0/16).
+const VM_SUBNET: &str = "172.16.0.0/16";
+
 async fn ensure_nat_rules(network: &NetworkConfig) -> anyhow::Result<()> {
     // Find default route interface
     let output = Command::new("ip")
@@ -490,29 +470,31 @@ async fn ensure_nat_rules(network: &NetworkConfig) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("no default route found"))?
         .to_string();
 
-    tracing::info!(iface = %default_iface, "configuring NAT rules");
+    tracing::info!(iface = %default_iface, subnet = VM_SUBNET, "configuring subnet-based NAT rules");
 
-    // MASQUERADE — outbound NAT
+    // MASQUERADE — outbound NAT for all VM subnets
     add_iptables_rule_if_missing(&[
         "-t", "nat", "-A", "POSTROUTING",
+        "-s", VM_SUBNET,
         "-o", &default_iface,
         "-j", "MASQUERADE",
     ], &[
         "-t", "nat", "-C", "POSTROUTING",
+        "-s", VM_SUBNET,
         "-o", &default_iface,
         "-j", "MASQUERADE",
     ]).await?;
 
     if network.resolved_networks.is_empty() {
-        // No allowlist — allow all outbound traffic from TAP
+        // No allowlist — allow all outbound traffic from VM subnets
         add_iptables_rule_if_missing(&[
             "-A", "FORWARD",
-            "-i", &network.tap_device,
+            "-s", VM_SUBNET,
             "-o", &default_iface,
             "-j", "ACCEPT",
         ], &[
             "-C", "FORWARD",
-            "-i", &network.tap_device,
+            "-s", VM_SUBNET,
             "-o", &default_iface,
             "-j", "ACCEPT",
         ]).await?;
@@ -554,27 +536,27 @@ async fn ensure_nat_rules(network: &NetworkConfig) -> anyhow::Result<()> {
         // Single iptables rule matching the ipset
         add_iptables_rule_if_missing(&[
             "-A", "FORWARD",
-            "-i", &network.tap_device,
+            "-s", VM_SUBNET,
             "-o", &default_iface,
             "-m", "set", "--match-set", "fc-allowed", "dst",
             "-j", "ACCEPT",
         ], &[
             "-C", "FORWARD",
-            "-i", &network.tap_device,
+            "-s", VM_SUBNET,
             "-o", &default_iface,
             "-m", "set", "--match-set", "fc-allowed", "dst",
             "-j", "ACCEPT",
         ]).await?;
 
-        // Drop all other outbound traffic from TAP
+        // Drop all other outbound traffic from VM subnets
         add_iptables_rule_if_missing(&[
             "-A", "FORWARD",
-            "-i", &network.tap_device,
+            "-s", VM_SUBNET,
             "-o", &default_iface,
             "-j", "DROP",
         ], &[
             "-C", "FORWARD",
-            "-i", &network.tap_device,
+            "-s", VM_SUBNET,
             "-o", &default_iface,
             "-j", "DROP",
         ]).await?;
@@ -582,17 +564,15 @@ async fn ensure_nat_rules(network: &NetworkConfig) -> anyhow::Result<()> {
         tracing::info!("network allowlist applied via ipset — unmatched outbound traffic will be dropped");
     }
 
-    // FORWARD — allow established return traffic
+    // FORWARD — allow established return traffic to VM subnets
     add_iptables_rule_if_missing(&[
         "-A", "FORWARD",
-        "-i", &default_iface,
-        "-o", &network.tap_device,
+        "-d", VM_SUBNET,
         "-m", "state", "--state", "RELATED,ESTABLISHED",
         "-j", "ACCEPT",
     ], &[
         "-C", "FORWARD",
-        "-i", &default_iface,
-        "-o", &network.tap_device,
+        "-d", VM_SUBNET,
         "-m", "state", "--state", "RELATED,ESTABLISHED",
         "-j", "ACCEPT",
     ]).await?;

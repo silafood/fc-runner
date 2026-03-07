@@ -65,8 +65,6 @@ pub struct FirecrackerConfig {
     pub vcpu_count: u32,
     #[serde(default = "default_mem_size_mib")]
     pub mem_size_mib: u32,
-    #[serde(default = "default_tap_interface")]
-    pub tap_interface: String,
     pub vm_config_template: String,
     /// Path to the jailer binary. When set, VMs run inside a jailer chroot
     /// with seccomp-BPF and dropped privileges.
@@ -94,8 +92,6 @@ pub struct RunnerConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct NetworkConfig {
-    #[serde(default = "default_tap_device")]
-    pub tap_device: String,
     #[serde(default = "default_host_ip")]
     pub host_ip: String,
     #[serde(default = "default_guest_ip")]
@@ -140,10 +136,6 @@ fn default_mem_size_mib() -> u32 {
     2048
 }
 
-fn default_tap_interface() -> String {
-    "tap-fc0".into()
-}
-
 fn default_jailer_chroot_base() -> String {
     "/srv/jailer".into()
 }
@@ -162,10 +154,6 @@ fn default_max_concurrent_jobs() -> usize {
 
 fn default_vm_timeout_secs() -> u64 {
     3600
-}
-
-fn default_tap_device() -> String {
-    "tap-fc0".into()
 }
 
 fn default_host_ip() -> String {
@@ -187,7 +175,6 @@ fn default_dns() -> Vec<String> {
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
-            tap_device: default_tap_device(),
             host_ip: default_host_ip(),
             guest_ip: default_guest_ip(),
             cidr: default_cidr(),

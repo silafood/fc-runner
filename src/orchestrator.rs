@@ -16,6 +16,9 @@ pub struct Orchestrator {
     cancel: CancellationToken,
     semaphore: Arc<Semaphore>,
     active_jobs: Arc<Mutex<usize>>,
+    /// Pool of slot indices for per-VM TAP device allocation.
+    /// Each slot maps to a unique subnet (172.16.{slot}.0/24).
+    slot_pool: Arc<Mutex<Vec<usize>>>,
 }
 
 impl Orchestrator {
@@ -37,6 +40,7 @@ impl Orchestrator {
             cancel,
             semaphore: Arc::new(Semaphore::new(max_jobs)),
             active_jobs: Arc::new(Mutex::new(0)),
+            slot_pool: Arc::new(Mutex::new((0..max_jobs).collect())),
         })
     }
 
@@ -140,6 +144,7 @@ impl Orchestrator {
         let seen_jobs = self.seen_jobs.clone();
         let semaphore = self.semaphore.clone();
         let active_jobs = self.active_jobs.clone();
+        let slot_pool = self.slot_pool.clone();
 
         tokio::spawn(async move {
             // Acquire concurrency permit — blocks if at max capacity
@@ -151,22 +156,31 @@ impl Orchestrator {
                 }
             };
 
-            *active_jobs.lock().await += 1;
-            tracing::info!(job_id, repo = %repo, "job started (permit acquired)");
+            // Acquire a slot for per-VM TAP device
+            let slot = {
+                let mut pool = slot_pool.lock().await;
+                pool.pop().expect("semaphore guarantees a slot is available")
+            };
 
-            let result = run_job(config.clone(), github, job_id, &repo).await;
+            *active_jobs.lock().await += 1;
+            tracing::info!(job_id, repo = %repo, slot, "job started (permit acquired, slot assigned)");
+
+            let result = run_job(config.clone(), github, job_id, &repo, slot).await;
+
+            // Return slot to pool
+            slot_pool.lock().await.push(slot);
 
             *active_jobs.lock().await -= 1;
             match result {
                 Ok(()) => {
                     // Job succeeded — remove from seen set so it won't block future runs
                     seen_jobs.lock().await.remove(&job_id);
-                    tracing::info!(job_id, repo = %repo, "job completed successfully (permit released)");
+                    tracing::info!(job_id, repo = %repo, slot, "job completed successfully (permit released)");
                 }
                 Err(e) => {
                     // Job failed — keep in seen set to prevent infinite retry loop.
                     // The job will stay "seen" until the orchestrator restarts.
-                    tracing::error!(job_id, repo = %repo, error = %e, "job failed (will not retry)");
+                    tracing::error!(job_id, repo = %repo, slot, error = %e, "job failed (will not retry)");
                 }
             }
         });
@@ -178,8 +192,9 @@ async fn run_job(
     github: Arc<GitHubClient>,
     job_id: u64,
     repo: &str,
+    slot: usize,
 ) -> anyhow::Result<()> {
-    tracing::info!(job_id, repo = %repo, "requesting JIT token");
+    tracing::info!(job_id, repo = %repo, slot, "requesting JIT token");
     let jit_token = github.generate_jit_config(repo, job_id).await?;
     tracing::info!(job_id, repo = %repo, "JIT token acquired");
 
@@ -187,6 +202,13 @@ async fn run_job(
         "https://github.com/{}/{}",
         config.github.owner, repo
     );
-    let vm = MicroVm::new(job_id, &config.firecracker, &config.runner.work_dir, config.runner.vm_timeout_secs);
+    let vm = MicroVm::new(
+        job_id,
+        &config.firecracker,
+        &config.network,
+        &config.runner.work_dir,
+        config.runner.vm_timeout_secs,
+        slot,
+    );
     vm.execute(&jit_token, &repo_url).await
 }

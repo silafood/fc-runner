@@ -1,15 +1,17 @@
 use std::path::PathBuf;
+use std::process::Stdio;
 
 use anyhow::{ensure, Context};
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
-use crate::config::FirecrackerConfig;
+use crate::config::{FirecrackerConfig, NetworkConfig};
 
 pub struct MicroVm {
     pub vm_id: String,
     pub job_id: u64,
+    pub slot: usize,
     rootfs_path: PathBuf,
     config_path: PathBuf,
     socket_path: PathBuf,
@@ -17,6 +19,12 @@ pub struct MicroVm {
     mount_point: PathBuf,
     fc_config: FirecrackerConfig,
     vm_timeout_secs: u64,
+    // Per-VM networking
+    tap_name: String,
+    host_ip: String,
+    guest_ip: String,
+    guest_mac: String,
+    network_dns: Vec<String>,
 }
 
 /// Convert a PathBuf to &str with a descriptive error instead of panicking.
@@ -26,7 +34,14 @@ fn path_str(path: &PathBuf) -> anyhow::Result<&str> {
 }
 
 impl MicroVm {
-    pub fn new(job_id: u64, fc_config: &FirecrackerConfig, work_dir: &str, vm_timeout_secs: u64) -> Self {
+    pub fn new(
+        job_id: u64,
+        fc_config: &FirecrackerConfig,
+        network: &NetworkConfig,
+        work_dir: &str,
+        vm_timeout_secs: u64,
+        slot: usize,
+    ) -> Self {
         let vm_id = format!("fc-{}-{}", job_id, Uuid::new_v4().simple());
         let base = PathBuf::from(work_dir);
         Self {
@@ -39,6 +54,12 @@ impl MicroVm {
             vm_id,
             fc_config: fc_config.clone(),
             vm_timeout_secs,
+            slot,
+            tap_name: format!("tap-fc{}", slot),
+            host_ip: format!("172.16.{}.1", slot),
+            guest_ip: format!("172.16.{}.2", slot),
+            guest_mac: format!("06:00:AC:10:{:02X}:02", slot),
+            network_dns: network.dns.clone(),
         }
     }
 
@@ -55,6 +76,60 @@ impl MicroVm {
             .context("spawning cp")?;
         ensure!(status.success(), "cp --reflink=auto failed");
         Ok(())
+    }
+
+    /// Create a per-VM TAP device with a unique subnet.
+    async fn create_tap(&self) -> anyhow::Result<()> {
+        tracing::info!(
+            vm_id = %self.vm_id,
+            tap = %self.tap_name,
+            host_ip = %self.host_ip,
+            guest_ip = %self.guest_ip,
+            "creating per-VM TAP device"
+        );
+
+        // Delete if exists from a previous crashed VM
+        let _ = Command::new("ip")
+            .args(["link", "delete", &self.tap_name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+
+        let status = Command::new("ip")
+            .args(["tuntap", "add", &self.tap_name, "mode", "tap"])
+            .status()
+            .await
+            .context("creating TAP device")?;
+        ensure!(status.success(), "ip tuntap add {} failed", self.tap_name);
+
+        let addr = format!("{}/24", self.host_ip);
+        let status = Command::new("ip")
+            .args(["addr", "add", &addr, "dev", &self.tap_name])
+            .status()
+            .await
+            .context("assigning IP to TAP")?;
+        ensure!(status.success(), "ip addr add failed for {}", self.tap_name);
+
+        let status = Command::new("ip")
+            .args(["link", "set", &self.tap_name, "up"])
+            .status()
+            .await
+            .context("bringing TAP up")?;
+        ensure!(status.success(), "ip link set up failed for {}", self.tap_name);
+
+        Ok(())
+    }
+
+    /// Destroy the per-VM TAP device.
+    async fn destroy_tap(&self) {
+        tracing::info!(vm_id = %self.vm_id, tap = %self.tap_name, "destroying TAP device");
+        let _ = Command::new("ip")
+            .args(["link", "delete", &self.tap_name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
     }
 
     async fn inject_env(&self, jit_token: &str, repo_url: &str) -> anyhow::Result<()> {
@@ -81,6 +156,7 @@ impl MicroVm {
             anyhow::bail!("mount point verification failed for {}", mnt);
         }
 
+        // Write environment file
         let env_dir = self.mount_point.join("etc");
         tokio::fs::create_dir_all(&env_dir).await?;
 
@@ -96,6 +172,24 @@ impl MicroVm {
             .args(["0600", path_str(&env_path)?])
             .status()
             .await?;
+
+        // Write per-VM guest network config (unique IP/gateway per slot)
+        let network_dir = self.mount_point.join("etc/systemd/network");
+        tokio::fs::create_dir_all(&network_dir).await?;
+        let dns_entries: String = self
+            .network_dns
+            .iter()
+            .map(|d| format!("DNS={}", d))
+            .collect::<Vec<_>>()
+            .join("\n");
+        tokio::fs::write(
+            network_dir.join("20-eth.network"),
+            format!(
+                "[Match]\nName=eth0\n\n[Network]\nAddress={}/24\nGateway={}\n{}\n",
+                self.guest_ip, self.host_ip, dns_entries
+            ),
+        )
+        .await?;
 
         self.umount_with_retry().await?;
         let _ = tokio::fs::remove_dir(&self.mount_point).await;
@@ -141,7 +235,8 @@ impl MicroVm {
             .replace("__ROOTFS_PATH__", path_str(&self.rootfs_path)?)
             .replace("__VCPU_COUNT__", &self.fc_config.vcpu_count.to_string())
             .replace("__MEM_MIB__", &self.fc_config.mem_size_mib.to_string())
-            .replace("__TAP_IFACE__", &self.fc_config.tap_interface)
+            .replace("__TAP_IFACE__", &self.tap_name)
+            .replace("__GUEST_MAC__", &self.guest_mac)
             .replace("__LOG_PATH__", path_str(&self.log_path)?)
             .replace("__VM_ID__", &self.vm_id);
         tokio::fs::write(&self.config_path, rendered).await?;
@@ -173,12 +268,16 @@ impl MicroVm {
                 .arg("--config-file")
                 .arg(&self.config_path)
                 .arg("--no-api")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status()
         } else {
             Command::new(&self.fc_config.binary_path)
                 .arg("--config-file")
                 .arg(&self.config_path)
                 .arg("--no-api")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status()
         };
 
@@ -191,6 +290,10 @@ impl MicroVm {
 
     async fn cleanup(&self) {
         tracing::info!(vm_id = %self.vm_id, "cleaning up VM artifacts");
+
+        // Destroy per-VM TAP device
+        self.destroy_tap().await;
+
         for path in [
             &self.rootfs_path,
             &self.config_path,
@@ -225,9 +328,10 @@ impl MicroVm {
     }
 
     async fn prepare_and_run(&self, jit_token: &str, repo_url: &str) -> anyhow::Result<()> {
-        tracing::info!(vm_id = %self.vm_id, job_id = self.job_id, "preparing VM");
+        tracing::info!(vm_id = %self.vm_id, job_id = self.job_id, slot = self.slot, "preparing VM");
         self.copy_rootfs().await?;
         self.inject_env(jit_token, repo_url).await?;
+        self.create_tap().await?;
         self.write_vm_config().await?;
 
         // Pre-create log file so Firecracker can open it
