@@ -316,13 +316,8 @@ impl MicroVm {
     }
 
     async fn run(&self) -> anyhow::Result<std::process::ExitStatus> {
-        // Stream serial console output to a file for debugging
-        let console_path = self.rootfs_path.with_extension("console");
-        let console_file = std::fs::File::create(&console_path)
-            .context("creating console log file")?;
-        let console_file2 = console_file.try_clone()
-            .context("cloning console file handle")?;
-        tracing::info!(vm_id = %self.vm_id, console = %console_path.display(), "console output → tail -f this file");
+        // Use inherit to send serial console to journald for debugging
+        tracing::info!(vm_id = %self.vm_id, "console output goes to journald (inherit mode)");
 
         let fut = if let Some(jailer_path) = &self.fc_config.jailer_path {
             let uid = self.fc_config.jailer_uid.expect("validated in config");
@@ -348,17 +343,12 @@ impl MicroVm {
                 .arg("--config-file")
                 .arg(&self.config_path)
                 .arg("--no-api")
-                .stdout(Stdio::from(console_file))
-                .stderr(Stdio::from(console_file2))
                 .status()
         } else {
             Command::new(&self.fc_config.binary_path)
                 .arg("--config-file")
                 .arg(&self.config_path)
-                .arg("--api-sock")
-                .arg(&self.socket_path)
-                .stdout(Stdio::from(console_file))
-                .stderr(Stdio::from(console_file2))
+                .arg("--no-api")
                 .status()
         };
 
