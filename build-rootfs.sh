@@ -39,6 +39,10 @@ debootstrap --arch=amd64 \
     --include=systemd,systemd-sysv,curl,git,jq,ca-certificates,sudo,openssh-client,unzip,libicu74 \
     noble "$MNT" http://archive.ubuntu.com/ubuntu
 
+# Fix fstab: debootstrap writes build-time loop device UUID,
+# but inside Firecracker the root device is always /dev/vda.
+echo -e "/dev/vda\t/\text4\tdefaults,noatime\t0\t1" > "$MNT/etc/fstab"
+
 # Mount pseudo-filesystems needed by chroot commands
 mount --bind /dev "$MNT/dev"
 mount --bind /dev/pts "$MNT/dev/pts"

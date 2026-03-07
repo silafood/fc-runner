@@ -76,6 +76,9 @@ mount --bind /dev/pts "$MNT/dev/pts"
 mount -t proc proc "$MNT/proc"
 mount -t sysfs sys "$MNT/sys"
 
+# Fix fstab: cloud image may have wrong UUID for Firecracker's /dev/vda
+echo -e "/dev/vda\t/\text4\tdefaults,noatime\t0\t1" > "$MNT/etc/fstab"
+
 # ── Step 4: Fix DNS in chroot ───────────────────────────────────────
 echo "[4/8] Configuring DNS for chroot..."
 # Cloud image has resolv.conf as a symlink to systemd-resolved stub — remove it

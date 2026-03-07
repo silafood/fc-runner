@@ -281,6 +281,14 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
         .context("debootstrap")?;
     ensure!(status.success(), "debootstrap failed");
 
+    // Overwrite fstab: debootstrap writes the build-time loop device UUID,
+    // but inside Firecracker the root device is always /dev/vda.
+    tokio::fs::write(
+        format!("{}/etc/fstab", mount_dir),
+        "/dev/vda\t/\text4\tdefaults,noatime\t0\t1\n",
+    )
+    .await?;
+
     // Network configuration
     let network_dir = format!("{}/etc/systemd/network", mount_dir);
     tokio::fs::create_dir_all(&network_dir).await?;
@@ -433,6 +441,28 @@ poweroff -f
         .status()
         .await?;
     ensure!(status.success(), "chmod rc.local failed");
+
+    // Enable rc-local.service so the entrypoint runs on boot
+    let _ = Command::new("chroot")
+        .args([mount_dir, "systemctl", "enable", "rc-local.service"])
+        .status()
+        .await;
+
+    // Belt-and-suspenders: create the symlink manually in case systemctl
+    // behaves oddly inside a plain chroot
+    let wants_dir = format!(
+        "{}/etc/systemd/system/multi-user.target.wants",
+        mount_dir
+    );
+    tokio::fs::create_dir_all(&wants_dir).await?;
+    let symlink_path = format!("{}/rc-local.service", wants_dir);
+    if !Path::new(&symlink_path).exists() {
+        let _ = tokio::fs::symlink(
+            "/lib/systemd/system/rc-local.service",
+            &symlink_path,
+        )
+        .await;
+    }
 
     Ok(())
 }
