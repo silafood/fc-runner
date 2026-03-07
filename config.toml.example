@@ -20,7 +20,10 @@ kernel_path = "/opt/fc-runner/vmlinux.bin"
 rootfs_golden = "/opt/fc-runner/runner-rootfs-golden.ext4"
 vcpu_count = 2
 mem_size_mib = 2048
-vm_config_template = "/etc/fc-runner/vm-config.json.template"
+# Kernel boot arguments (default shown below)
+# boot_args = "console=ttyS0 reboot=k panic=1 pci=off"
+# Firecracker log level: Error, Warning, Info, Debug (default: Warning)
+# log_level = "Info"
 # Jailer: chroot + seccomp-BPF + UID/GID drop (recommended for production)
 # Uncomment the lines below to enable jailer. jailer_uid and jailer_gid are
 # required when jailer_path is set.

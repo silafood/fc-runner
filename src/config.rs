@@ -65,7 +65,10 @@ pub struct FirecrackerConfig {
     pub vcpu_count: u32,
     #[serde(default = "default_mem_size_mib")]
     pub mem_size_mib: u32,
-    pub vm_config_template: String,
+    #[serde(default = "default_boot_args")]
+    pub boot_args: String,
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
     /// Path to the jailer binary. When set, VMs run inside a jailer chroot
     /// with seccomp-BPF and dropped privileges.
     pub jailer_path: Option<String>,
@@ -139,6 +142,14 @@ fn default_vcpu_count() -> u32 {
 
 fn default_mem_size_mib() -> u32 {
     2048
+}
+
+fn default_boot_args() -> String {
+    "console=ttyS0 reboot=k panic=1 pci=off".into()
+}
+
+fn default_log_level() -> String {
+    "Warning".into()
 }
 
 fn default_jailer_chroot_base() -> String {
@@ -252,10 +263,6 @@ impl AppConfig {
         // kernel_path and rootfs_golden are auto-provisioned by setup::ensure_vm_assets
         let required_paths = [
             ("firecracker.binary_path", &self.firecracker.binary_path),
-            (
-                "firecracker.vm_config_template",
-                &self.firecracker.vm_config_template,
-            ),
         ];
         for (name, path) in required_paths {
             let p = Path::new(path);

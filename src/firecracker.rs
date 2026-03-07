@@ -284,18 +284,33 @@ impl MicroVm {
     }
 
     async fn write_vm_config(&self) -> anyhow::Result<()> {
-        let template = tokio::fs::read_to_string(&self.fc_config.vm_config_template)
-            .await
-            .context("reading vm-config template")?;
-        let rendered = template
-            .replace("__KERNEL_PATH__", &self.fc_config.kernel_path)
-            .replace("__ROOTFS_PATH__", path_str(&self.rootfs_path)?)
-            .replace("__VCPU_COUNT__", &self.fc_config.vcpu_count.to_string())
-            .replace("__MEM_MIB__", &self.fc_config.mem_size_mib.to_string())
-            .replace("__TAP_IFACE__", &self.tap_name)
-            .replace("__GUEST_MAC__", &self.guest_mac)
-            .replace("__LOG_PATH__", path_str(&self.log_path)?)
-            .replace("__VM_ID__", &self.vm_id);
+        let config = serde_json::json!({
+            "boot-source": {
+                "kernel_image_path": self.fc_config.kernel_path,
+                "boot_args": self.fc_config.boot_args
+            },
+            "drives": [{
+                "drive_id": "rootfs",
+                "path_on_host": path_str(&self.rootfs_path)?,
+                "is_root_device": true,
+                "is_read_only": false
+            }],
+            "machine-config": {
+                "vcpu_count": self.fc_config.vcpu_count,
+                "mem_size_mib": self.fc_config.mem_size_mib
+            },
+            "network-interfaces": [{
+                "iface_id": "eth0",
+                "guest_mac": self.guest_mac,
+                "host_dev_name": self.tap_name
+            }],
+            "logger": {
+                "log_path": path_str(&self.log_path)?,
+                "level": self.fc_config.log_level
+            }
+        });
+        let rendered = serde_json::to_string_pretty(&config)
+            .context("serializing VM config")?;
         tokio::fs::write(&self.config_path, rendered).await?;
         Ok(())
     }
