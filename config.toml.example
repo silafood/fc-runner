@@ -2,6 +2,7 @@
 # Copy to /etc/fc-runner/config.toml and fill in your values.
 
 [github]
+# Authentication: Use either a PAT (token) or GitHub App (app section below).
 # Personal access token (see docs/setup.md for generation guide)
 token = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 owner = "your-org"
@@ -13,6 +14,12 @@ repo = "your-repo"
 runner_group_id = 1
 # Labels the runner advertises — must match workflow's runs-on
 labels = ["self-hosted", "linux", "firecracker"]
+# GitHub App authentication (alternative to PAT, provides higher rate limits).
+# Uncomment to use instead of token above.
+# [github.app]
+# app_id = 12345
+# installation_id = 67890
+# private_key_path = "/etc/fc-runner/app-key.pem"
 
 [firecracker]
 binary_path = "/usr/local/bin/firecracker"
@@ -33,6 +40,10 @@ mem_size_mib = 2048
 # jailer_chroot_base = "/srv/jailer"
 # Cloud image URL for golden rootfs build (default: Ubuntu 24.04 minimal)
 # cloud_img_url = "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img"
+# Secret injection method: "mmds" (default) or "mount" (legacy loop-mount)
+# MMDS uses Firecracker's built-in metadata service at 169.254.169.254.
+# Mount injects secrets directly into the rootfs via loop mount.
+# secret_injection = "mmds"
 
 [runner]
 work_dir = "/var/lib/fc-runner/vms"
@@ -84,3 +95,10 @@ dns = ["8.8.8.8", "1.1.1.1"]
 # DNS servers are always allowed automatically.
 # allowed_networks = ["github"]
 # allowed_networks = ["github", "10.0.0.0/8", "192.168.1.0/24"]
+
+# Metrics and health HTTP server
+[server]
+# Set to false to disable the HTTP server entirely
+# enabled = true
+# Listen address for /metrics (Prometheus) and /healthz endpoints
+# listen_addr = "0.0.0.0:9090"

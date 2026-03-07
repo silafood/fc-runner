@@ -1,9 +1,11 @@
 mod config;
 mod firecracker;
 mod github;
+mod metrics;
 mod netlink;
 mod orchestrator;
 mod pool;
+mod server;
 mod setup;
 
 use std::sync::Arc;
@@ -43,6 +45,23 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("received shutdown signal");
         cancel_clone.cancel();
     });
+
+    // Start metrics/health HTTP server if enabled
+    if config.server.enabled {
+        let listen_addr: std::net::SocketAddr = config
+            .server
+            .listen_addr
+            .parse()
+            .context("invalid server.listen_addr")?;
+        tokio::spawn(async move {
+            if let Err(e) = server::start(listen_addr).await {
+                tracing::error!(error = %e, "metrics server failed");
+            }
+        });
+    }
+
+    // Initialize metrics with initial slot count
+    metrics::POOL_SLOTS_AVAILABLE.set(config.runner.max_concurrent_jobs as i64);
 
     let orchestrator = orchestrator::Orchestrator::new(config, cancel)?;
     orchestrator.run().await?;
