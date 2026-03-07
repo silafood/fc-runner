@@ -222,12 +222,15 @@ async fn ensure_golden_rootfs(rootfs_path: &str, cloud_img_url: &str, network: &
     // ── Step 2: Extract ext4 partition from qcow2 ───────────────────
     tracing::info!("extracting ext4 partition from cloud image...");
     let raw_img = format!("{}/cloud-raw.img", parent_str);
-    let status = Command::new("qemu-img")
+    let output = Command::new("qemu-img")
         .args(["convert", "-f", "qcow2", "-O", "raw", &cloud_img, &raw_img])
-        .status()
+        .output()
         .await
         .context("converting qcow2 to raw")?;
-    ensure!(status.success(), "qemu-img convert failed");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("qemu-img convert failed: {}", stderr);
+    }
 
     // Attach with partition scanning and find the ext4 partition
     let output = Command::new("losetup")
