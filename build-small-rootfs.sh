@@ -78,8 +78,8 @@ mount -t sysfs sys "$MNT/sys"
 
 # ── Step 4: Fix DNS in chroot ───────────────────────────────────────
 echo "[4/8] Configuring DNS for chroot..."
-# Back up and inject host DNS so apt can resolve
-cp "$MNT/etc/resolv.conf" "$MNT/etc/resolv.conf.bak" 2>/dev/null || true
+# Cloud image has resolv.conf as a symlink to systemd-resolved stub — remove it
+rm -f "$MNT/etc/resolv.conf"
 echo -e "nameserver 8.8.8.8\nnameserver 1.1.1.1" > "$MNT/etc/resolv.conf"
 
 # ── Step 5: Install only what's missing ─────────────────────────────
@@ -93,8 +93,9 @@ chroot "$MNT" bash -c "
     rm -rf /var/lib/apt/lists/*
 "
 
-# Restore original resolv.conf
-mv "$MNT/etc/resolv.conf.bak" "$MNT/etc/resolv.conf" 2>/dev/null || true
+# Restore systemd-resolved symlink
+rm -f "$MNT/etc/resolv.conf"
+ln -s /run/systemd/resolve/stub-resolv.conf "$MNT/etc/resolv.conf"
 
 # ── Step 6: Configure network + runner user ─────────────────────────
 echo "[6/8] Configuring network and runner user..."
