@@ -3,6 +3,7 @@ mod firecracker;
 mod github;
 mod netlink;
 mod orchestrator;
+mod server;
 mod setup;
 
 use std::sync::Arc;
@@ -43,7 +44,23 @@ async fn main() -> anyhow::Result<()> {
         cancel_clone.cancel();
     });
 
-    let orchestrator = orchestrator::Orchestrator::new(config, cancel)?;
+    // Start management HTTP server if enabled
+    let server_state = Arc::new(server::ServerState::new(&config.server));
+    if config.server.enabled {
+        let listen_addr: std::net::SocketAddr = config
+            .server
+            .listen_addr
+            .parse()
+            .context("invalid server.listen_addr")?;
+        let state = server_state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = server::start(listen_addr, state).await {
+                tracing::error!(error = %e, "management server failed");
+            }
+        });
+    }
+
+    let orchestrator = orchestrator::Orchestrator::new(config, cancel, server_state)?;
     orchestrator.run().await?;
 
     tracing::info!("fc-runner exiting");

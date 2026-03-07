@@ -62,3 +62,12 @@ dns = ["8.8.8.8", "1.1.1.1"]
 # DNS servers are always allowed automatically.
 # allowed_networks = ["github"]
 # allowed_networks = ["github", "10.0.0.0/8", "192.168.1.0/24"]
+
+# Management HTTP server for health checks and API
+[server]
+# Set to false to disable the HTTP server
+# enabled = true
+# Listen address for /healthz, /api/v1/status, /api/v1/vms
+# listen_addr = "0.0.0.0:9090"
+# Optional API key for authenticated endpoints (X-Api-Key header)
+# api_key = "your-secret-key"

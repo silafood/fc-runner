@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::AppConfig;
 use crate::firecracker::MicroVm;
 use crate::github::GitHubClient;
+use crate::server::ServerState;
 
 pub struct Orchestrator {
     config: Arc<AppConfig>,
@@ -18,10 +19,11 @@ pub struct Orchestrator {
     active_jobs: Arc<Mutex<usize>>,
     /// Pool of slot indices for per-VM TAP device allocation.
     slot_pool: Arc<Mutex<Vec<usize>>>,
+    server_state: Arc<ServerState>,
 }
 
 impl Orchestrator {
-    pub fn new(config: Arc<AppConfig>, cancel: CancellationToken) -> anyhow::Result<Self> {
+    pub fn new(config: Arc<AppConfig>, cancel: CancellationToken, server_state: Arc<ServerState>) -> anyhow::Result<Self> {
         let github = Arc::new(GitHubClient::new(config.github.clone())?);
         let max_jobs = config.runner.max_concurrent_jobs;
         let repos = github.repos();
@@ -41,6 +43,7 @@ impl Orchestrator {
             semaphore: Arc::new(Semaphore::new(max_jobs)),
             active_jobs: Arc::new(Mutex::new(0)),
             slot_pool: Arc::new(Mutex::new((0..max_jobs).collect())),
+            server_state,
         })
     }
 
@@ -55,6 +58,7 @@ impl Orchestrator {
     // ── Reactive mode (JIT) ──────────────────────────────────────────
 
     async fn run_reactive(&self) -> anyhow::Result<()> {
+        self.server_state.set_mode("jit").await;
         let mut ticker = interval(Duration::from_secs(self.config.runner.poll_interval_secs));
         tracing::info!(
             poll_interval = self.config.runner.poll_interval_secs,
@@ -137,6 +141,7 @@ impl Orchestrator {
         let semaphore = self.semaphore.clone();
         let active_jobs = self.active_jobs.clone();
         let slot_pool = self.slot_pool.clone();
+        let server_state = self.server_state.clone();
 
         tokio::spawn(async move {
             let _permit = match semaphore.acquire().await {
@@ -155,8 +160,22 @@ impl Orchestrator {
             *active_jobs.lock().await += 1;
             tracing::info!(job_id, repo = %repo, slot, "job started (permit acquired, slot assigned)");
 
+            let vm_id = format!("fc-{}-slot{}", job_id, slot);
+            server_state.register_vm(crate::server::VmInfo {
+                vm_id: vm_id.clone(),
+                job_id,
+                repo: repo.clone(),
+                slot,
+                started_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .to_string(),
+            }).await;
+
             let result = run_jit_job(config.clone(), github.clone(), job_id, &repo, slot).await;
 
+            server_state.unregister_vm(&vm_id).await;
             slot_pool.lock().await.push(slot);
             *active_jobs.lock().await -= 1;
 
@@ -178,6 +197,7 @@ impl Orchestrator {
     // ── Warm pool mode (registration tokens) ─────────────────────────
 
     async fn run_warm_pool(&self) -> anyhow::Result<()> {
+        self.server_state.set_mode("warm_pool").await;
         let pool_size = self.config.runner.warm_pool_size;
         let repos = self.github.repos();
         if repos.is_empty() {

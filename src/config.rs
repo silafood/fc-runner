@@ -11,6 +11,36 @@ pub struct AppConfig {
     pub runner: RunnerConfig,
     #[serde(default)]
     pub network: NetworkConfig,
+    #[serde(default)]
+    pub server: ServerConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServerConfig {
+    #[serde(default = "default_listen_addr")]
+    pub listen_addr: String,
+    #[serde(default = "default_server_enabled")]
+    pub enabled: bool,
+    /// Optional API key for management endpoints (if unset, no auth required)
+    pub api_key: Option<String>,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            listen_addr: default_listen_addr(),
+            enabled: default_server_enabled(),
+            api_key: None,
+        }
+    }
+}
+
+fn default_listen_addr() -> String {
+    "0.0.0.0:9090".into()
+}
+
+fn default_server_enabled() -> bool {
+    true
 }
 
 #[derive(Clone, Deserialize)]
