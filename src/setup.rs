@@ -1,9 +1,36 @@
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use anyhow::{ensure, Context};
 use tokio::process::Command;
 
 use crate::config::{AppConfig, NetworkConfig};
+
+/// Download a file via reqwest (replaces curl).
+async fn download_file(url: &str, dest: &str) -> anyhow::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let response = reqwest::get(url)
+        .await
+        .context("HTTP request failed")?
+        .error_for_status()
+        .context("HTTP error response")?;
+
+    let bytes = response.bytes().await.context("reading response body")?;
+    let mut file = tokio::fs::File::create(dest).await.context("creating output file")?;
+    file.write_all(&bytes).await?;
+    file.flush().await?;
+    Ok(())
+}
+
+/// Set a file as executable (replaces chmod +x).
+fn set_executable(path: &str) -> anyhow::Result<()> {
+    let meta = std::fs::metadata(path)?;
+    let mut perms = meta.permissions();
+    perms.set_mode(perms.mode() | 0o111);
+    std::fs::set_permissions(path, perms)?;
+    Ok(())
+}
 
 const KERNEL_URL: &str =
     "https://github.com/silafood/fc-runner/releases/download/v0.1.0/vmlinux-6.1.102";
@@ -180,12 +207,7 @@ async fn ensure_kernel(kernel_path: &str) -> anyhow::Result<()> {
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    let status = Command::new("curl")
-        .args(["-fsSL", "--proto", "=https", "--tlsv1.2", "-o", kernel_path, KERNEL_URL])
-        .status()
-        .await
-        .context("spawning curl for kernel download")?;
-    ensure!(status.success(), "failed to download kernel");
+    download_file(KERNEL_URL, kernel_path).await?;
 
     tracing::info!(path = kernel_path, "kernel downloaded");
     Ok(())
@@ -209,12 +231,7 @@ async fn ensure_golden_rootfs(rootfs_path: &str, cloud_img_url: &str, network: &
     let cloud_img = format!("{}/cloud-base.img", parent_str);
     if !Path::new(&cloud_img).exists() {
         tracing::info!("downloading Ubuntu minimal cloud image...");
-        let status = Command::new("curl")
-            .args(["-fSL", "--proto", "=https", "--tlsv1.2", "-o", &cloud_img, cloud_img_url])
-            .status()
-            .await
-            .context("downloading cloud image")?;
-        ensure!(status.success(), "failed to download cloud image");
+        download_file(cloud_img_url, &cloud_img).await?;
     } else {
         tracing::info!("using cached cloud image");
     }
@@ -427,10 +444,8 @@ async fn ensure_golden_rootfs(rootfs_path: &str, cloud_img_url: &str, network: &
             .args([rootfs_path, &final_blocks.to_string()])
             .status()
             .await;
-        let _ = Command::new("truncate")
-            .args(["-s", &final_bytes.to_string(), rootfs_path])
-            .status()
-            .await;
+        let f = std::fs::OpenOptions::new().write(true).open(rootfs_path)?;
+        f.set_len(final_bytes)?;
     }
 
     tracing::info!(path = rootfs_path, "golden rootfs built");
@@ -471,7 +486,7 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
     // Ensure /var/tmp exists (systemd-resolved needs it for PrivateTmp namespace)
     let var_tmp = format!("{}/var/tmp", mount_dir);
     tokio::fs::create_dir_all(&var_tmp).await?;
-    let _ = Command::new("chmod").args(["1777", &var_tmp]).status().await;
+    std::fs::set_permissions(&var_tmp, std::os::unix::fs::PermissionsExt::from_mode(0o1777))?;
 
     // Restore systemd-resolved symlink
     let _ = tokio::fs::remove_file(&resolv_path).await;
@@ -544,20 +559,24 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
         RUNNER_VERSION, RUNNER_VERSION
     );
     let runner_tarball = format!("{}/actions-runner.tar.gz", runner_dir);
-    let status = Command::new("curl")
-        .args(["-fsSL", "--proto", "=https", "--tlsv1.2", "-o", &runner_tarball, &runner_url])
-        .status()
-        .await
-        .context("downloading actions-runner")?;
-    ensure!(status.success(), "failed to download actions-runner");
+    download_file(&runner_url, &runner_tarball).await?;
 
-    let status = Command::new("tar")
-        .args(["xzf", &runner_tarball, "-C", &runner_dir])
-        .status()
+    // Extract tar.gz in pure Rust
+    {
+        let tarball_path = runner_tarball.clone();
+        let extract_dir = runner_dir.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let file = std::fs::File::open(&tarball_path)
+                .context("opening runner tarball")?;
+            let gz = flate2::read::GzDecoder::new(file);
+            let mut archive = tar::Archive::new(gz);
+            archive.unpack(&extract_dir)
+                .context("extracting runner tarball")?;
+            Ok(())
+        })
         .await
-        .context("extracting actions-runner")?;
-    ensure!(status.success(), "failed to extract actions-runner");
-
+        .context("tar extraction task panicked")??;
+    }
     let _ = tokio::fs::remove_file(&runner_tarball).await;
 
     // Fix ownership
@@ -623,11 +642,7 @@ poweroff -f
     )
     .await?;
 
-    let status = Command::new("chmod")
-        .args(["+x", &format!("{}/entrypoint.sh", mount_dir)])
-        .status()
-        .await?;
-    ensure!(status.success(), "chmod entrypoint failed");
+    set_executable(&format!("{}/entrypoint.sh", mount_dir))?;
 
     // rc.local to run entrypoint on boot
     tokio::fs::write(
@@ -636,11 +651,7 @@ poweroff -f
     )
     .await?;
 
-    let status = Command::new("chmod")
-        .args(["+x", &format!("{}/etc/rc.local", mount_dir)])
-        .status()
-        .await?;
-    ensure!(status.success(), "chmod rc.local failed");
+    set_executable(&format!("{}/etc/rc.local", mount_dir))?;
 
     // Create rc-local.service unit (not shipped by default in Ubuntu 24.04 cloud images)
     let rc_local_unit = format!("{}/etc/systemd/system/rc-local.service", mount_dir);
@@ -727,13 +738,9 @@ async fn ensure_ip_forwarding() -> anyhow::Result<()> {
     }
 
     tracing::info!("enabling IP forwarding");
-    let status = Command::new("sysctl")
-        .args(["-w", "net.ipv4.ip_forward=1"])
-        .stdout(std::process::Stdio::null())
-        .status()
+    tokio::fs::write("/proc/sys/net/ipv4/ip_forward", "1")
         .await
-        .context("enabling ip_forward")?;
-    ensure!(status.success(), "sysctl ip_forward failed");
+        .context("writing to /proc/sys/net/ipv4/ip_forward")?;
     Ok(())
 }
 
@@ -741,17 +748,19 @@ async fn ensure_ip_forwarding() -> anyhow::Result<()> {
 const VM_SUBNET: &str = "172.16.0.0/16";
 
 async fn ensure_nat_rules(network: &NetworkConfig) -> anyhow::Result<()> {
-    // Find default route interface
-    let output = Command::new("ip")
-        .args(["route"])
-        .output()
+    // Find default route interface from /proc/net/route
+    let route_table = tokio::fs::read_to_string("/proc/net/route")
         .await
-        .context("reading default route")?;
-    let routes = String::from_utf8_lossy(&output.stdout);
-    let default_iface = routes
+        .context("reading /proc/net/route")?;
+    let default_iface = route_table
         .lines()
-        .find(|l| l.starts_with("default"))
-        .and_then(|l| l.split_whitespace().nth(4))
+        .skip(1) // skip header
+        .find(|l| {
+            let mut cols = l.split_whitespace();
+            // Destination (col 1) == "00000000" means default route
+            cols.nth(1).map(|d| d == "00000000").unwrap_or(false)
+        })
+        .and_then(|l| l.split_whitespace().next())
         .ok_or_else(|| anyhow::anyhow!("no default route found"))?
         .to_string();
 
