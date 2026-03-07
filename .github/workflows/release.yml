@@ -66,11 +66,12 @@ jobs:
           wget -q https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VERSION}.tar.xz
           tar -xf linux-${KERNEL_VERSION}.tar.xz
 
+      - uses: actions/checkout@v4
+
       - name: Apply Firecracker kernel config
         working-directory: linux-${{ env.KERNEL_VERSION }}
         run: |
-          wget -q https://raw.githubusercontent.com/firecracker-microvm/firecracker/refs/heads/main/resources/guest_configs/microvm-kernel-ci-x86_64-6.1.config \
-            -O .config
+          cp $GITHUB_WORKSPACE/guest_configs/microvm-kernel-ci-x86_64-6.1.config .config
           make olddefconfig
 
       - name: Build vmlinux
