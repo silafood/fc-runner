@@ -101,6 +101,34 @@ async fn lazy_umount(target: &str) -> anyhow::Result<()> {
     }
 }
 
+/// Run a command inside a chroot using nix::unistd::chroot via pre_exec.
+/// On Linux, avoids spawning the external `chroot` binary.
+fn chroot_command(root: &str, program: &str, args: &[&str]) -> Command {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        let root_owned = root.to_string();
+        let mut cmd = Command::new(program);
+        cmd.args(args);
+        unsafe {
+            cmd.pre_exec(move || {
+                nix::unistd::chroot(root_owned.as_str())
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                nix::unistd::chdir("/")
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                Ok(())
+            });
+        }
+        cmd
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut cmd = Command::new("chroot");
+        cmd.arg(root).arg(program).args(args);
+        cmd
+    }
+}
+
 fn set_executable(path: &str) -> anyhow::Result<()> {
     let meta = std::fs::metadata(path)?;
     let mut perms = meta.permissions();
@@ -532,16 +560,13 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
 
     // ── Install missing packages ────────────────────────────────────
     tracing::info!("installing runner dependencies...");
-    let status = Command::new("chroot")
-        .args([
-            mount_dir, "bash", "-c",
+    let status = chroot_command(mount_dir, "bash", &["-c",
             "export DEBIAN_FRONTEND=noninteractive && \
              apt-get update -q && \
              apt-get install -y --no-install-recommends \
                  curl git jq ca-certificates sudo libicu74 iproute2 systemd-resolved && \
              apt-get clean && \
-             rm -rf /var/lib/apt/lists/*",
-        ])
+             rm -rf /var/lib/apt/lists/*"])
         .status()
         .await
         .context("installing packages in chroot")?;
@@ -574,8 +599,7 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
     )
     .await?;
 
-    let _ = Command::new("chroot")
-        .args([mount_dir, "systemctl", "enable", "systemd-networkd", "systemd-resolved"])
+    let _ = chroot_command(mount_dir, "systemctl", &["enable", "systemd-networkd", "systemd-resolved"])
         .status()
         .await;
 
@@ -591,19 +615,15 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
     }
 
     // Disable services that slow boot and aren't needed in ephemeral VMs
-    let _ = Command::new("chroot")
-        .args([
-            mount_dir, "bash", "-c",
+    let _ = chroot_command(mount_dir, "bash", &["-c",
             "systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true; \
              systemctl disable motd-news.timer 2>/dev/null || true; \
-             systemctl mask systemd-timesyncd.service 2>/dev/null || true",
-        ])
+             systemctl mask systemd-timesyncd.service 2>/dev/null || true"])
         .status()
         .await;
 
     // ── Create runner user ──────────────────────────────────────────
-    let _ = Command::new("chroot")
-        .args([mount_dir, "useradd", "-m", "-s", "/bin/bash", "runner"])
+    let _ = chroot_command(mount_dir, "useradd", &["-m", "-s", "/bin/bash", "runner"])
         .status()
         .await;
 
@@ -644,8 +664,7 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
     let _ = tokio::fs::remove_file(&runner_tarball).await;
 
     // Fix ownership
-    let status = Command::new("chroot")
-        .args([mount_dir, "chown", "-R", "runner:runner", "/home/runner"])
+    let status = chroot_command(mount_dir, "chown", &["-R", "runner:runner", "/home/runner"])
         .status()
         .await?;
     ensure!(status.success(), "chown failed");
@@ -739,8 +758,7 @@ poweroff -f
     }
 
     // Enable rc-local.service so the entrypoint runs on boot
-    let _ = Command::new("chroot")
-        .args([mount_dir, "systemctl", "enable", "rc-local.service"])
+    let _ = chroot_command(mount_dir, "systemctl", &["enable", "rc-local.service"])
         .status()
         .await;
 

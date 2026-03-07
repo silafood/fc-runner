@@ -20,4 +20,4 @@ qcow2-rs = "0.1"
 bootsector = "0.2"
 tar = "0.4"
 flate2 = "1"
-nix = { version = "0.31", features = ["mount", "fs"] }
+nix = { version = "0.31", features = ["mount", "fs", "user"] }
