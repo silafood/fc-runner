@@ -146,8 +146,12 @@ fc-runner/
 │   ├── config.rs         # Typed TOML config with validation
 │   ├── github.rs         # GitHub API client (poll + JIT tokens)
 │   ├── firecracker.rs    # MicroVm lifecycle: prepare → run → cleanup
+│   ├── netlink.rs        # Pure-Rust TAP device management (rtnetlink + nix ioctl)
 │   ├── orchestrator.rs   # Poll/dispatch loop with dedup
 │   └── setup.rs          # KVM checks, kernel/rootfs provisioning, network, AppArmor
+├── guest_configs/        # Firecracker kernel configs (x86_64 + aarch64)
+├── .github/workflows/
+│   └── release.yml       # CI: build binary + kernel + rootfs, publish release
 ├── apparmor/
 │   ├── usr.local.bin.firecracker   # Restrictive profile for Firecracker VMM
 │   └── usr.local.bin.fc-runner     # Restrictive profile for orchestrator
@@ -160,7 +164,8 @@ fc-runner/
 ├── config.toml.example
 ├── vm-config.json.template
 ├── fc-runner.service      # systemd unit
-└── install.sh             # Host setup script
+├── install.sh             # Host setup script
+└── build-v611-linux.sh    # Manual golden rootfs + kernel provisioning
 ```
 
 ## Security

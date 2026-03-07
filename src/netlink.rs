@@ -44,9 +44,17 @@ mod inner {
             anyhow::bail!("ioctl TUNSETIFF failed for {}: {}", name, std::io::Error::last_os_error());
         }
 
-        // Leak fd so the TAP persists — Firecracker takes over the device.
-        // Cleaned up by delete_link() on VM teardown.
-        std::mem::forget(fd);
+        // We must also set IFF_PERSIST so the TAP survives closing the fd.
+        // Without this, closing fd destroys the device.
+        const TUNSETPERSIST: libc::c_ulong = 0x400454cb;
+        let ret = unsafe { libc::ioctl(fd.as_raw_fd(), TUNSETPERSIST as _, 1 as libc::c_int) };
+        if ret < 0 {
+            anyhow::bail!("ioctl TUNSETPERSIST failed for {}: {}", name, std::io::Error::last_os_error());
+        }
+
+        // Close fd — the TAP persists due to TUNSETPERSIST.
+        // Firecracker will re-open it by name. Cleaned up by delete_link() on VM teardown.
+        drop(fd);
         Ok(())
     }
 
