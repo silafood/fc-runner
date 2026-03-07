@@ -301,6 +301,14 @@ impl MicroVm {
     }
 
     async fn run(&self) -> anyhow::Result<std::process::ExitStatus> {
+        // Stream serial console output to a file for debugging
+        let console_path = self.rootfs_path.with_extension("console");
+        let console_file = std::fs::File::create(&console_path)
+            .context("creating console log file")?;
+        let console_file2 = console_file.try_clone()
+            .context("cloning console file handle")?;
+        tracing::info!(vm_id = %self.vm_id, console = %console_path.display(), "console output → tail -f this file");
+
         let fut = if let Some(jailer_path) = &self.fc_config.jailer_path {
             let uid = self.fc_config.jailer_uid.expect("validated in config");
             let gid = self.fc_config.jailer_gid.expect("validated in config");
@@ -325,16 +333,16 @@ impl MicroVm {
                 .arg("--config-file")
                 .arg(&self.config_path)
                 .arg("--no-api")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stdout(Stdio::from(console_file))
+                .stderr(Stdio::from(console_file2))
                 .status()
         } else {
             Command::new(&self.fc_config.binary_path)
                 .arg("--config-file")
                 .arg(&self.config_path)
                 .arg("--no-api")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stdout(Stdio::from(console_file))
+                .stderr(Stdio::from(console_file2))
                 .status()
         };
 
@@ -351,11 +359,13 @@ impl MicroVm {
         // Destroy per-VM TAP device
         self.destroy_tap().await;
 
+        let console_path = self.rootfs_path.with_extension("console");
         for path in [
             &self.rootfs_path,
             &self.config_path,
             &self.socket_path,
             &self.log_path,
+            &console_path,
         ] {
             if let Err(e) = tokio::fs::remove_file(path).await {
                 if e.kind() != std::io::ErrorKind::NotFound {
