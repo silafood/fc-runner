@@ -219,54 +219,41 @@ async fn ensure_golden_rootfs(rootfs_path: &str, cloud_img_url: &str, network: &
         tracing::info!("using cached cloud image");
     }
 
-    // ── Step 2: Convert qcow2 to raw (pure Rust, no qemu-img) ──────
+    // ── Step 2: Convert qcow2 to raw (pure Rust via qcow2-rs) ──────
     tracing::info!("converting qcow2 to raw image...");
     let raw_img = format!("{}/cloud-raw.img", parent_str);
     {
-        let cloud_img_clone = cloud_img.clone();
-        let raw_img_clone = raw_img.clone();
-        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            use std::io::Write;
-            use positioned_io::ReadAt;
+        use qcow2_rs::dev::Qcow2DevParams;
+        use qcow2_rs::utils::qcow2_setup_dev_tokio;
 
-            let file = std::fs::File::open(&cloud_img_clone)
-                .context("opening qcow2 image")?;
-            let qcow = qcow2::Qcow2::open(file)
-                .map_err(|e| anyhow::anyhow!("failed to parse qcow2: {:?}", e))?;
-            let virtual_size = qcow.guest_size();
+        let path = std::path::PathBuf::from(&cloud_img);
+        let params = Qcow2DevParams::new(9, None, None, true, false);
+        let dev = qcow2_setup_dev_tokio(&path, &params)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to open qcow2: {:?}", e))?;
 
-            tracing::info!(virtual_size_mb = virtual_size / (1024 * 1024), "qcow2 virtual disk size");
+        let virtual_size = dev.info.virtual_size();
+        tracing::info!(virtual_size_mb = virtual_size / (1024 * 1024), "qcow2 virtual disk size");
 
-            let reader = qcow.reader()
-                .map_err(|e| anyhow::anyhow!("failed to create qcow2 reader: {:?}", e))?;
-            let mut output = std::fs::File::create(&raw_img_clone)
-                .context("creating raw image")?;
+        let mut output = tokio::fs::File::create(&raw_img).await
+            .context("creating raw image")?;
 
-            let buf_size: usize = 4 * 1024 * 1024; // 4 MiB
-            let mut buf = vec![0u8; buf_size];
-            let mut offset: u64 = 0;
+        let buf_size: usize = 1024 * 1024; // 1 MiB (must be cluster-aligned)
+        let mut buf = vec![0u8; buf_size];
+        let mut offset: u64 = 0;
 
-            while offset < virtual_size {
-                let to_read = std::cmp::min(buf_size as u64, virtual_size - offset) as usize;
-                buf[..to_read].fill(0);
-                let n = reader.read_at(offset, &mut buf[..to_read])
-                    .map_err(|e| anyhow::anyhow!("qcow2 read at offset {}: {:?}", offset, e))?;
-                if n == 0 {
-                    // Unallocated region — write zeros
-                    output.write_all(&buf[..to_read])?;
-                    offset += to_read as u64;
-                } else {
-                    output.write_all(&buf[..n])?;
-                    offset += n as u64;
-                }
-            }
+        while offset < virtual_size {
+            let to_read = std::cmp::min(buf_size as u64, virtual_size - offset) as usize;
+            buf[..to_read].fill(0);
+            let _ = dev.read_at(&mut buf[..to_read], offset)
+                .await
+                .map_err(|e| anyhow::anyhow!("qcow2 read at offset {}: {:?}", offset, e))?;
+            tokio::io::AsyncWriteExt::write_all(&mut output, &buf[..to_read]).await?;
+            offset += to_read as u64;
+        }
 
-            output.flush()?;
-            tracing::info!(bytes = offset, "qcow2 → raw conversion complete");
-            Ok(())
-        })
-        .await
-        .context("qcow2 conversion task panicked")??;
+        tokio::io::AsyncWriteExt::flush(&mut output).await?;
+        tracing::info!(bytes = offset, "qcow2 → raw conversion complete");
     }
 
     // Attach with partition scanning and find the ext4 partition

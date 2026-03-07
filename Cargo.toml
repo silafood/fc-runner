@@ -16,5 +16,4 @@ anyhow = "1"
 thiserror = "2"
 tokio-util = "0.7"
 secrecy = { version = "0.10.3", features = ["serde"] }
-qcow2 = { git = "https://github.com/vasi/qcow2-rs" }
-positioned-io = "0.2"
+qcow2-rs = "0.1"
