@@ -7,7 +7,7 @@ use crate::config::{AppConfig, NetworkConfig};
 
 const KERNEL_URL: &str =
     "https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin";
-const RUNNER_VERSION: &str = "2.323.0";
+const RUNNER_VERSION: &str = "2.332.0";
 const ROOTFS_SIZE_MIB: u32 = 4096;
 
 /// Ensures all VM prerequisites are in place: KVM, kernel, rootfs, network, and AppArmor.

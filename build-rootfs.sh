@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOTFS="/opt/fc-runner/runner-rootfs-golden.ext4"
 MNT="/opt/fc-runner/rootfs-build"
-RUNNER_VERSION="2.323.0"
+RUNNER_VERSION="2.332.0"
 
 echo "=== Building golden rootfs ==="
 
