@@ -38,7 +38,7 @@ trap cleanup EXIT
 
 echo "[4/7] Running debootstrap (minbase variant)..."
 debootstrap --arch=amd64 --variant=minbase \
-    --include=systemd,systemd-sysv,curl,git,jq,ca-certificates,sudo,openssh-client,unzip,libicu74,iproute2,iputils-ping \
+    --include=systemd,systemd-sysv,systemd-resolved,curl,git,jq,ca-certificates,sudo,openssh-client,unzip,libicu74,iproute2,iputils-ping \
     noble "$MNT" http://archive.ubuntu.com/ubuntu
 
 # Mount pseudo-filesystems needed by chroot commands
