@@ -442,6 +442,27 @@ poweroff -f
         .await?;
     ensure!(status.success(), "chmod rc.local failed");
 
+    // Create rc-local.service unit (not shipped by default in Ubuntu 24.04 cloud images)
+    let rc_local_unit = format!("{}/etc/systemd/system/rc-local.service", mount_dir);
+    if !Path::new(&rc_local_unit).exists() {
+        tokio::fs::write(
+            &rc_local_unit,
+            "[Unit]\n\
+             Description=/etc/rc.local Compatibility\n\
+             ConditionFileIsExecutable=/etc/rc.local\n\
+             \n\
+             [Service]\n\
+             Type=forking\n\
+             ExecStart=/etc/rc.local\n\
+             TimeoutSec=0\n\
+             RemainAfterExit=yes\n\
+             \n\
+             [Install]\n\
+             WantedBy=multi-user.target\n",
+        )
+        .await?;
+    }
+
     // Enable rc-local.service so the entrypoint runs on boot
     let _ = Command::new("chroot")
         .args([mount_dir, "systemctl", "enable", "rc-local.service"])
@@ -458,7 +479,7 @@ poweroff -f
     let symlink_path = format!("{}/rc-local.service", wants_dir);
     if !Path::new(&symlink_path).exists() {
         let _ = tokio::fs::symlink(
-            "/lib/systemd/system/rc-local.service",
+            "/etc/systemd/system/rc-local.service",
             &symlink_path,
         )
         .await;
