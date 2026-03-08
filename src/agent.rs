@@ -34,7 +34,7 @@ struct Metadata {
 /// Messages sent from agent to host via VSOCK.
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[allow(dead_code)]
 enum AgentMessage {
     Ready { timestamp: String },
     JobStarted { job_id: Option<u64> },

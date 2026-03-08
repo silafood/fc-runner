@@ -306,6 +306,28 @@ fc-runner pools list --endpoint http://localhost:9090
 df -Th /var/lib/fc-runner/vms
 ```
 
+## Quick Commands
+
+```bash
+# Check service status
+sudo systemctl status fc-runner
+
+# Watch logs in real-time
+sudo journalctl -u fc-runner -f
+
+# List running VMs via management API
+fc-runner ps --endpoint http://localhost:9090
+
+# List pools
+fc-runner pools list --endpoint http://localhost:9090
+
+# Validate config without starting
+fc-runner validate --config /etc/fc-runner/config.toml
+
+# Restart after config or binary changes
+sudo systemctl restart fc-runner
+```
+
 ## Rebuilding the Golden Rootfs
 
 The golden rootfs is built automatically on first startup. To force a rebuild (e.g., to update packages or the runner version):
