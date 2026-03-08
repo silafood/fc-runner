@@ -225,6 +225,19 @@ impl GitHubClient {
         )
     }
 
+    /// Returns the base API URL for the organization (if configured).
+    fn org_url(&self) -> Option<String> {
+        self.config
+            .organization
+            .as_ref()
+            .map(|org| format!("https://api.github.com/orgs/{}", org))
+    }
+
+    /// Whether this client operates in org-level runner mode.
+    pub fn is_org_mode(&self) -> bool {
+        self.config.organization.is_some()
+    }
+
     /// Returns the list of repos to poll.
     pub fn repos(&self) -> Vec<String> {
         self.config.all_repos()
@@ -400,7 +413,17 @@ impl GitHubClient {
         }
     }
 
+    /// Generate JIT config — dispatches to org or repo level based on config.
     pub async fn generate_jit_config(&self, repo: &str, job_id: u64) -> anyhow::Result<String> {
+        if self.is_org_mode() {
+            self.generate_org_jit_config(job_id).await
+        } else {
+            self.generate_repo_jit_config(repo, job_id).await
+        }
+    }
+
+    /// Generate a repo-level JIT config.
+    async fn generate_repo_jit_config(&self, repo: &str, job_id: u64) -> anyhow::Result<String> {
         metrics::GITHUB_API_CALLS.with_label_values(&["generate_jit_config"]).inc();
         let url = format!("{}/actions/runners/generate-jitconfig", self.repo_url(repo));
         let body = serde_json::json!({
@@ -426,5 +449,113 @@ impl GitHubClient {
         }
         let data = resp.json::<JitConfigResponse>().await?;
         Ok(data.encoded_jit_config)
+    }
+
+    /// Generate an org-level JIT config.
+    async fn generate_org_jit_config(&self, job_id: u64) -> anyhow::Result<String> {
+        metrics::GITHUB_API_CALLS.with_label_values(&["generate_org_jit_config"]).inc();
+        let org_url = self.org_url().expect("org mode checked by caller");
+        let url = format!("{}/actions/runners/generate-jitconfig", org_url);
+        let body = serde_json::json!({
+            "name": format!("fc-{}-{}", job_id, &uuid::Uuid::new_v4().to_string()[..8]),
+            "runner_group_id": self.config.runner_group_id,
+            "labels": self.config.labels,
+            "work_folder": "_work"
+        });
+        let resp = self
+            .request(reqwest::Method::POST, &url)
+            .await?
+            .json(&body)
+            .send()
+            .await?;
+        self.check_rate_limit(&resp).await;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            let org = self.config.organization.as_deref().unwrap_or("unknown");
+            anyhow::bail!(
+                "org JIT config for {} job {} failed (HTTP {}): {}",
+                org, job_id, status, body
+            );
+        }
+        let data = resp.json::<JitConfigResponse>().await?;
+        Ok(data.encoded_jit_config)
+    }
+
+    /// Generate an org-level registration token.
+    pub async fn generate_org_registration_token(&self) -> anyhow::Result<String> {
+        metrics::GITHUB_API_CALLS.with_label_values(&["generate_org_registration_token"]).inc();
+        let org_url = self.org_url().expect("org mode checked by caller");
+        let url = format!("{}/actions/runners/registration-token", org_url);
+        let resp = self
+            .request(reqwest::Method::POST, &url)
+            .await?
+            .send()
+            .await?;
+        self.check_rate_limit(&resp).await;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            let org = self.config.organization.as_deref().unwrap_or("unknown");
+            anyhow::bail!(
+                "org registration token for {} failed (HTTP {}): {}",
+                org, status, body
+            );
+        }
+        #[derive(Deserialize)]
+        struct RegToken {
+            token: String,
+        }
+        let data = resp.json::<RegToken>().await?;
+        Ok(data.token)
+    }
+
+    /// Remove offline runners at the org level.
+    pub async fn remove_org_offline_runners(&self) {
+        let org_url = match self.org_url() {
+            Some(url) => url,
+            None => return,
+        };
+        let url = format!("{}/actions/runners", org_url);
+        metrics::GITHUB_API_CALLS.with_label_values(&["list_org_runners"]).inc();
+        let resp = match self.request(reqwest::Method::GET, &url).await {
+            Ok(req) => match req.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to list org runners for cleanup");
+                    return;
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to build org runners request");
+                return;
+            }
+        };
+        self.check_rate_limit(&resp).await;
+        let data = match resp.json::<RunnersResponse>().await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to parse org runners response");
+                return;
+            }
+        };
+        for runner in data.runners {
+            if runner.name.starts_with("fc-") && runner.status == "offline" {
+                let org = self.config.organization.as_deref().unwrap_or("unknown");
+                tracing::info!(
+                    runner_id = runner.id,
+                    runner_name = %runner.name,
+                    org = %org,
+                    "removing offline org runner"
+                );
+                let del_url = format!("{}/actions/runners/{}", org_url, runner.id);
+                metrics::GITHUB_API_CALLS.with_label_values(&["delete_org_runner"]).inc();
+                if let Ok(req) = self.request(reqwest::Method::DELETE, &del_url).await {
+                    if let Err(e) = req.send().await {
+                        tracing::warn!(runner_id = runner.id, error = %e, "failed to delete org runner");
+                    }
+                }
+            }
+        }
     }
 }

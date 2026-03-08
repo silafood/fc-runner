@@ -78,6 +78,11 @@ pub struct GitHubConfig {
     #[serde(default)]
     pub token: Option<SecretString>,
     pub owner: String,
+    /// Organization name for org-level runners (optional).
+    /// When set, runners register at the org level and can pick up jobs
+    /// from any repo in the organization.
+    #[serde(default)]
+    pub organization: Option<String>,
     /// Single repo (backward-compatible). Use `repos` for multiple.
     #[serde(default)]
     pub repo: Option<String>,
@@ -358,8 +363,8 @@ impl AppConfig {
         if self.github.owner.is_empty() {
             bail!("github.owner must not be empty");
         }
-        if self.github.all_repos().is_empty() {
-            bail!("at least one repo must be configured (set github.repo or github.repos)");
+        if self.github.all_repos().is_empty() && self.github.organization.is_none() {
+            bail!("at least one repo must be configured (set github.repo or github.repos), or set github.organization for org-level runners");
         }
         if self.firecracker.vcpu_count == 0 {
             bail!("firecracker.vcpu_count must be > 0");
