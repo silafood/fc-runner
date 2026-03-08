@@ -421,6 +421,7 @@ dependencies = [
  "axum",
  "bootsector",
  "chrono",
+ "clap",
  "flate2",
  "futures",
  "http-body-util",
