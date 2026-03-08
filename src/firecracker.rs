@@ -80,6 +80,14 @@ fn path_str(path: &std::path::Path) -> anyhow::Result<&str> {
         .ok_or_else(|| anyhow::anyhow!("path contains invalid UTF-8: {}", path.display()))
 }
 
+/// Extract the filename from a path as a &str, with a descriptive error.
+fn filename_str(path: &std::path::Path) -> anyhow::Result<&str> {
+    path.file_name()
+        .ok_or_else(|| anyhow::anyhow!("path has no filename: {}", path.display()))?
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("filename contains invalid UTF-8: {}", path.display()))
+}
+
 impl MicroVm {
     pub fn new(
         job_id: u64,
@@ -262,7 +270,10 @@ impl MicroVm {
     async fn dump_guest_log(&self) {
         // When jailer is used, the rootfs lives in the chroot directory
         let rootfs_location = if self.fc_config.jailer_path.is_some() {
-            let name = self.rootfs_path.file_name().unwrap().to_str().unwrap();
+            let name = match filename_str(&self.rootfs_path) {
+                Ok(n) => n,
+                Err(_) => return,
+            };
             self.jailer_root_dir().join(name)
         } else {
             self.rootfs_path.clone()
@@ -346,9 +357,9 @@ impl MicroVm {
         // and socket inside that root dir and reference them by filename only.
         let (kernel_path, rootfs_path, log_path) = if use_jailer {
             (
-                self.rootfs_path.file_name().unwrap().to_str().unwrap().replace(".ext4", "-kernel"),
-                self.rootfs_path.file_name().unwrap().to_str().unwrap().to_string(),
-                self.log_path.file_name().unwrap().to_str().unwrap().to_string(),
+                filename_str(&self.rootfs_path)?.replace(".ext4", "-kernel"),
+                filename_str(&self.rootfs_path)?.to_string(),
+                filename_str(&self.log_path)?.to_string(),
             )
         } else {
             (
@@ -396,7 +407,7 @@ impl MicroVm {
         if self.fc_config.vsock_enabled {
             let cid = self.vsock_cid();
             let uds_path = if use_jailer {
-                self.socket_path.file_name().unwrap().to_str().unwrap().to_string()
+                filename_str(&self.socket_path)?.to_string()
             } else {
                 path_str(&self.socket_path)?.to_string()
             };
@@ -420,38 +431,70 @@ impl MicroVm {
     /// the exec-file. We need to place kernel, rootfs, config, and log inside it.
     async fn setup_jailer_chroot(&self) -> anyhow::Result<PathBuf> {
         let root_dir = self.jailer_root_dir();
+        tracing::info!(
+            vm_id = %self.vm_id,
+            chroot = %root_dir.display(),
+            "setting up jailer chroot"
+        );
         tokio::fs::create_dir_all(&root_dir).await
-            .context("creating jailer chroot directory")?;
+            .with_context(|| format!(
+                "creating jailer chroot directory: {}",
+                root_dir.display()
+            ))?;
 
         // Hard-link (or copy) kernel into chroot
-        let kernel_name = self.rootfs_path.file_name().unwrap().to_str().unwrap().replace(".ext4", "-kernel");
+        let kernel_name = filename_str(&self.rootfs_path)?.replace(".ext4", "-kernel");
         let chroot_kernel = root_dir.join(&kernel_name);
+        tracing::debug!(
+            vm_id = %self.vm_id,
+            src = %self.fc_config.kernel_path,
+            dst = %chroot_kernel.display(),
+            "linking kernel into chroot"
+        );
         if tokio::fs::hard_link(&self.fc_config.kernel_path, &chroot_kernel).await.is_err() {
             tokio::fs::copy(&self.fc_config.kernel_path, &chroot_kernel).await
-                .context("copying kernel into jailer chroot")?;
+                .with_context(|| format!(
+                    "copying kernel {} -> {}",
+                    self.fc_config.kernel_path, chroot_kernel.display()
+                ))?;
         }
 
         // Hard-link (or copy) rootfs into chroot
-        let rootfs_name = self.rootfs_path.file_name().unwrap().to_str().unwrap();
+        let rootfs_name = filename_str(&self.rootfs_path)?;
         let chroot_rootfs = root_dir.join(rootfs_name);
+        tracing::debug!(
+            vm_id = %self.vm_id,
+            src = %self.rootfs_path.display(),
+            dst = %chroot_rootfs.display(),
+            "linking rootfs into chroot"
+        );
         if tokio::fs::hard_link(&self.rootfs_path, &chroot_rootfs).await.is_err() {
             tokio::fs::copy(&self.rootfs_path, &chroot_rootfs).await
-                .context("copying rootfs into jailer chroot")?;
+                .with_context(|| format!(
+                    "copying rootfs {} -> {}",
+                    self.rootfs_path.display(), chroot_rootfs.display()
+                ))?;
         }
 
         // Create log file in chroot
-        let log_name = self.log_path.file_name().unwrap().to_str().unwrap();
+        let log_name = filename_str(&self.log_path)?;
         tokio::fs::write(root_dir.join(log_name), "").await
             .context("creating log file in jailer chroot")?;
 
         // Write VM config with chroot-relative paths
         let config = self.build_vm_config(true)?;
-        let config_name = self.config_path.file_name().unwrap().to_str().unwrap();
+        let config_name = filename_str(&self.config_path)?;
         let chroot_config = root_dir.join(config_name);
         let rendered = serde_json::to_string_pretty(&config)
             .context("serializing VM config for jailer")?;
-        tokio::fs::write(&chroot_config, rendered).await?;
+        tokio::fs::write(&chroot_config, &rendered).await
+            .with_context(|| format!("writing VM config to {}", chroot_config.display()))?;
 
+        tracing::info!(
+            vm_id = %self.vm_id,
+            chroot = %root_dir.display(),
+            "jailer chroot ready"
+        );
         Ok(root_dir)
     }
 
@@ -559,11 +602,14 @@ impl MicroVm {
             let uid = self.fc_config.jailer_uid.expect("validated in config");
             let gid = self.fc_config.jailer_gid.expect("validated in config");
             // Inside the jailer chroot, config is at just the filename
-            let config_name = self.config_path.file_name().unwrap().to_str().unwrap();
+            let config_name = filename_str(&self.config_path)
+                .expect("config_path must have a valid filename");
             tracing::info!(
                 vm_id = %self.vm_id,
                 jailer = %jailer_path,
                 uid, gid,
+                config = %config_name,
+                chroot_base = %self.fc_config.jailer_chroot_base,
                 "launching via jailer (no-api mode)"
             );
             Command::new(jailer_path)
@@ -600,7 +646,8 @@ impl MicroVm {
         // We pass the filename to firecracker (it runs inside chroot) and use the
         // host-absolute path to connect from the host for MMDS injection.
         let (fc_socket_arg, host_socket_path) = if use_jailer {
-            let sock_name = self.socket_path.file_name().unwrap().to_str().unwrap();
+            let sock_name = filename_str(&self.socket_path)
+                .expect("socket_path must have a valid filename");
             let host_path = self.jailer_root_dir().join(sock_name);
             (sock_name.to_string(), host_path)
         } else {
@@ -610,11 +657,15 @@ impl MicroVm {
         let mut child = if let Some(jailer_path) = &self.fc_config.jailer_path {
             let uid = self.fc_config.jailer_uid.expect("validated in config");
             let gid = self.fc_config.jailer_gid.expect("validated in config");
-            let config_name = self.config_path.file_name().unwrap().to_str().unwrap();
+            let config_name = filename_str(&self.config_path)
+                .expect("config_path must have a valid filename");
             tracing::info!(
                 vm_id = %self.vm_id,
                 jailer = %jailer_path,
                 uid, gid,
+                config = %config_name,
+                socket = %fc_socket_arg,
+                chroot_base = %self.fc_config.jailer_chroot_base,
                 "launching via jailer (MMDS mode)"
             );
             Command::new(jailer_path)
