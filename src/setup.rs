@@ -675,7 +675,18 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
         .await?;
     ensure!(status.success(), "chown failed");
 
-    // Write entrypoint (supports JIT and registration modes)
+    // ── Install fc-runner binary into the rootfs ────────────────────
+    // The agent reads MMDS directly, manages the runner with explicit env,
+    // and reports to the host via VSOCK. No shell entrypoint needed.
+    let self_exe = std::env::current_exe().context("getting current executable path")?;
+    let guest_bin = format!("{}/usr/local/bin/fc-runner", mount_dir);
+    tokio::fs::create_dir_all(format!("{}/usr/local/bin", mount_dir)).await?;
+    tokio::fs::copy(&self_exe, &guest_bin).await
+        .context("copying fc-runner binary into rootfs")?;
+    set_executable(&guest_bin)?;
+    tracing::info!("installed fc-runner agent binary into rootfs");
+
+    // Write entrypoint that prefers fc-runner agent, with shell fallback.
     // Uses reboot -f (not poweroff -f) because Firecracker has no ACPI —
     // poweroff halts the CPU in a loop without triggering KVM_EXIT_SHUTDOWN.
     // reboot -f with reboot=k boot arg triggers keyboard controller reset
@@ -687,6 +698,15 @@ set -euo pipefail
 exec > /var/log/runner.log 2>&1
 
 echo "=== fc-runner entrypoint $(date) ==="
+
+# Prefer the Rust agent (reads MMDS directly, explicit env, VSOCK reporting)
+if [ -x /usr/local/bin/fc-runner ]; then
+    echo "Using fc-runner agent"
+    exec /usr/local/bin/fc-runner agent --log-level info
+fi
+
+# Fallback: shell-based entrypoint (legacy)
+echo "fc-runner binary not found, using shell fallback"
 
 if [ ! -f /etc/fc-runner-env ]; then
     echo "ERROR: /etc/fc-runner-env not found"

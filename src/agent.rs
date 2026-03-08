@@ -2,6 +2,10 @@
 //!
 //! Reads MMDS metadata, sets hostname, starts the GitHub Actions runner,
 //! and reports state to the host via VSOCK (NDJSON on port 1024).
+//!
+//! The runner process gets an explicit, stripped environment (like fireactions):
+//! only PATH, HOME, USER, LOGNAME are set. This ensures tools like cargo
+//! are available if installed to standard PATH directories.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -19,13 +23,25 @@ const HOST_CID: u32 = 2;
 /// VSOCK port for agent communication.
 #[cfg(target_os = "linux")]
 const AGENT_PORT: u32 = 1024;
-/// Path to the actions runner directory.
-const RUNNER_DIR: &str = "/home/runner/actions-runner";
+/// Path to the actions runner directory inside the VM.
+const RUNNER_DIR: &str = "/home/runner";
+/// Runner user name.
+const RUNNER_USER: &str = "runner";
+/// Explicit PATH for the runner process — includes cargo and standard dirs.
+const RUNNER_PATH: &str = "/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// Metadata expected from MMDS.
 #[derive(Debug, Deserialize)]
 struct Metadata {
-    runner_jit_config: String,
+    runner_jit_config: Option<String>,
+    #[serde(default)]
+    runner_token: Option<String>,
+    #[serde(default)]
+    runner_mode: Option<String>,
+    #[serde(default)]
+    repo_url: Option<String>,
+    #[serde(default)]
+    runner_name: Option<String>,
     hostname: String,
     #[serde(default)]
     shutdown_on_exit: bool,
@@ -59,13 +75,15 @@ pub async fn run(log_level: &str) -> anyhow::Result<()> {
 
     set_hostname(&metadata.hostname).await;
 
-    // On Linux, connect VSOCK and report state; on other platforms, just run the runner
     let exit_code = run_with_reporting(&metadata).await;
 
     if metadata.shutdown_on_exit {
         tracing::info!("shutting down VM");
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let _ = tokio::process::Command::new("poweroff")
+        // Use reboot -f (not poweroff -f): Firecracker has no ACPI, so poweroff
+        // halts the CPU in a loop. reboot -f with reboot=k boot arg triggers
+        // keyboard controller reset → KVM_EXIT_SHUTDOWN → clean VMM exit.
+        let _ = tokio::process::Command::new("reboot")
             .arg("-f")
             .status()
             .await;
@@ -100,12 +118,11 @@ async fn run_with_reporting(metadata: &Metadata) -> i32 {
     tracing::info!("starting GitHub Actions runner");
     vsock_send(&mut stream, &AgentMessage::JobStarted { job_id: None }).await;
 
-    let exit_code = run_runner(&metadata.runner_jit_config).await;
+    let exit_code = run_runner(metadata).await;
 
     tracing::info!(exit_code, "runner exited");
     vsock_send(&mut stream, &AgentMessage::JobCompleted { exit_code }).await;
 
-    // Flush before closing
     if let Some(s) = &mut stream {
         let _ = s.flush().await;
     }
@@ -117,7 +134,7 @@ async fn run_with_reporting(metadata: &Metadata) -> i32 {
 async fn run_with_reporting(metadata: &Metadata) -> i32 {
     tracing::warn!("VSOCK not available on this platform, running without host reporting");
     tracing::info!("starting GitHub Actions runner");
-    let exit_code = run_runner(&metadata.runner_jit_config).await;
+    let exit_code = run_runner(metadata).await;
     tracing::info!(exit_code, "runner exited");
     exit_code
 }
@@ -195,14 +212,50 @@ async fn set_hostname(hostname: &str) {
     }
 }
 
+/// Build the explicit environment for the runner process.
+/// Starts empty (like fireactions) and only sets known-good variables.
+fn runner_env() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("PATH", RUNNER_PATH),
+        ("HOME", "/home/runner"),
+        ("USER", RUNNER_USER),
+        ("LOGNAME", RUNNER_USER),
+    ]
+}
+
 /// Run the GitHub Actions runner and return its exit code.
-async fn run_runner(jit_config: &str) -> i32 {
+///
+/// Supports both JIT mode (runner_jit_config) and registration mode (runner_token).
+/// The runner process gets an explicit, stripped environment with cargo in PATH.
+async fn run_runner(metadata: &Metadata) -> i32 {
+    let mode = metadata.runner_mode.as_deref().unwrap_or("jit");
+
+    if mode == "register" || mode == "registration" {
+        run_runner_registered(metadata).await
+    } else {
+        run_runner_jit(metadata).await
+    }
+}
+
+/// Run the runner in JIT mode (--jitconfig).
+async fn run_runner_jit(metadata: &Metadata) -> i32 {
+    let jit_config = match &metadata.runner_jit_config {
+        Some(c) => c,
+        None => {
+            tracing::error!("no runner_jit_config in MMDS metadata");
+            return 1;
+        }
+    };
+
     let run_sh = format!("{}/run.sh", RUNNER_DIR);
+    tracing::info!("starting runner (JIT mode)");
 
     let mut child = match tokio::process::Command::new(&run_sh)
         .arg("--jitconfig")
         .arg(jit_config)
         .current_dir(RUNNER_DIR)
+        .env_clear()
+        .envs(runner_env())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
@@ -223,17 +276,109 @@ async fn run_runner(jit_config: &str) -> i32 {
     }
 }
 
+/// Run the runner in registration mode (config.sh + run.sh).
+async fn run_runner_registered(metadata: &Metadata) -> i32 {
+    let token = match &metadata.runner_token {
+        Some(t) => t,
+        None => {
+            tracing::error!("no runner_token in MMDS metadata for registration mode");
+            return 1;
+        }
+    };
+    let repo_url = match &metadata.repo_url {
+        Some(u) => u,
+        None => {
+            tracing::error!("no repo_url in MMDS metadata for registration mode");
+            return 1;
+        }
+    };
+    let runner_name = metadata.runner_name.as_deref()
+        .unwrap_or(&metadata.hostname);
+    let labels = "firecracker,linux,x64";
+
+    let config_sh = format!("{}/config.sh", RUNNER_DIR);
+    tracing::info!(runner_name, repo_url = %repo_url, "registering runner");
+
+    let status = match tokio::process::Command::new(&config_sh)
+        .args([
+            "--url", repo_url,
+            "--token", token,
+            "--name", runner_name,
+            "--labels", labels,
+            "--ephemeral",
+            "--unattended",
+            "--disableupdate",
+            "--work", &format!("{}/_work", RUNNER_DIR),
+        ])
+        .current_dir(RUNNER_DIR)
+        .env_clear()
+        .envs(runner_env())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to start config.sh");
+            return 1;
+        }
+    };
+
+    if !status.success() {
+        tracing::error!(code = status.code(), "config.sh failed");
+        return status.code().unwrap_or(1);
+    }
+
+    let run_sh = format!("{}/run.sh", RUNNER_DIR);
+    tracing::info!("starting runner (registered mode)");
+
+    let mut child = match tokio::process::Command::new(&run_sh)
+        .current_dir(RUNNER_DIR)
+        .env_clear()
+        .envs(runner_env())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to start run.sh");
+            return 1;
+        }
+    };
+
+    match child.wait().await {
+        Ok(s) => s.code().unwrap_or(1),
+        Err(e) => {
+            tracing::error!(error = %e, "runner wait failed");
+            1
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn metadata_deserialization() {
+    fn metadata_deserialization_jit() {
         let json = r#"{"runner_jit_config":"abc123","hostname":"fc-42","shutdown_on_exit":true}"#;
         let meta: Metadata = serde_json::from_str(json).unwrap();
-        assert_eq!(meta.runner_jit_config, "abc123");
+        assert_eq!(meta.runner_jit_config.as_deref(), Some("abc123"));
         assert_eq!(meta.hostname, "fc-42");
         assert!(meta.shutdown_on_exit);
+    }
+
+    #[test]
+    fn metadata_deserialization_register() {
+        let json = r#"{"runner_token":"tok","hostname":"fc-warm-0","repo_url":"https://github.com/org/repo","runner_name":"fc-warm-0-abc","runner_mode":"register"}"#;
+        let meta: Metadata = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.runner_token.as_deref(), Some("tok"));
+        assert_eq!(meta.runner_mode.as_deref(), Some("register"));
+        assert_eq!(meta.repo_url.as_deref(), Some("https://github.com/org/repo"));
+        assert_eq!(meta.runner_name.as_deref(), Some("fc-warm-0-abc"));
+        assert!(!meta.shutdown_on_exit);
     }
 
     #[test]
@@ -244,10 +389,13 @@ mod tests {
     }
 
     #[test]
-    fn metadata_missing_required_fields_fails() {
+    fn metadata_minimal_fields() {
+        // Only hostname is truly required
         let json = r#"{"hostname":"fc-0"}"#;
-        let result = serde_json::from_str::<Metadata>(json);
-        assert!(result.is_err());
+        let meta: Metadata = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.hostname, "fc-0");
+        assert!(meta.runner_jit_config.is_none());
+        assert!(meta.runner_token.is_none());
     }
 
     #[test]
@@ -303,7 +451,6 @@ mod tests {
 
     #[test]
     fn agent_messages_are_ndjson_compatible() {
-        // Each message should be a single line of JSON
         let messages = vec![
             AgentMessage::Ready { timestamp: "t".to_string() },
             AgentMessage::JobStarted { job_id: Some(1) },
@@ -313,7 +460,6 @@ mod tests {
         for msg in messages {
             let json = serde_json::to_string(&msg).unwrap();
             assert!(!json.contains('\n'), "NDJSON messages must not contain newlines");
-            // Verify it's valid JSON
             let _: serde_json::Value = serde_json::from_str(&json).unwrap();
         }
     }
@@ -325,12 +471,26 @@ mod tests {
 
     #[test]
     fn runner_dir_path() {
-        assert_eq!(RUNNER_DIR, "/home/runner/actions-runner");
+        assert_eq!(RUNNER_DIR, "/home/runner");
+    }
+
+    #[test]
+    fn runner_path_includes_cargo() {
+        assert!(RUNNER_PATH.contains("/home/runner/.cargo/bin"));
+    }
+
+    #[test]
+    fn runner_env_has_required_vars() {
+        let env = runner_env();
+        let keys: Vec<&str> = env.iter().map(|(k, _)| *k).collect();
+        assert!(keys.contains(&"PATH"));
+        assert!(keys.contains(&"HOME"));
+        assert!(keys.contains(&"USER"));
+        assert!(keys.contains(&"LOGNAME"));
     }
 
     #[tokio::test]
     async fn mmds_read_failure_with_retry() {
-        // Attempting to read MMDS from a non-existent server should fail
         let result = read_mmds_with_retry(2, std::time::Duration::from_millis(10)).await;
         assert!(result.is_err());
         assert!(result
