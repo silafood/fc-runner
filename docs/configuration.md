@@ -2,10 +2,14 @@
 
 fc-runner is configured via a TOML file, default path `/etc/fc-runner/config.toml`.
 
-You can pass a custom path as the first CLI argument:
+Pass the config path via the `server` or `validate` subcommand:
 
 ```bash
-fc-runner /path/to/config.toml
+# Start the server
+fc-runner server --config /path/to/config.toml
+
+# Validate without starting
+fc-runner validate --config /path/to/config.toml
 ```
 
 ## Full Example
@@ -19,6 +23,8 @@ owner = "your-org"
 repo = "your-repo"
 # Or multiple repos under the same owner
 # repos = ["repo-one", "repo-two", "repo-three"]
+# Organization-level runners (register at org level for cross-repo job pickup)
+# organization = "your-org"
 runner_group_id = 1
 labels = ["self-hosted", "linux", "firecracker"]
 
@@ -82,14 +88,19 @@ dns = ["8.8.8.8", "1.1.1.1"]
 |-----|----------|---------|-------------|
 | `token` | One of `token`/`app` | — | GitHub PAT ([setup guide](setup.md#github-token-setup)) |
 | `owner` | Yes | — | Repository owner (user or org) |
-| `repo` | One of `repo`/`repos` | — | Single repository name |
-| `repos` | One of `repo`/`repos` | `[]` | List of repos under the same owner |
+| `repo` | One of `repo`/`repos`/`organization` | — | Single repository name |
+| `repos` | One of `repo`/`repos`/`organization` | `[]` | List of repos under the same owner |
+| `organization` | No | — | Organization name for org-level runners. When set, runners register at the org level and can pick up jobs from any repo. |
 | `runner_group_id` | No | `1` | Runner group ID (1 = default) |
 | `labels` | No | `["self-hosted", "linux", "firecracker"]` | Labels to match and advertise |
 
 > **Multi-repo:** Set `repos` to poll multiple repositories with a single fc-runner instance.
 > Both `repo` and `repos` can be set — they are merged and deduplicated.
 > All repos must share the same `owner`, `token`, `labels`, and `runner_group_id`.
+
+> **Org-level runners:** Set `organization` to register runners at the GitHub organization level.
+> Org-level runners can pick up jobs from any repo in the organization. The `repos` list is still
+> used for polling queued jobs. JIT tokens and registration tokens are requested at the org level.
 
 ### `[github.app]`
 
@@ -269,6 +280,11 @@ HTTP server for Prometheus metrics, health checks, and a management REST API.
 | GET | `/api/v1/status` | No | JSON: version, uptime, operating mode, active VM count |
 | GET | `/api/v1/vms` | API key | JSON array of active VMs (vm_id, job_id, repo, slot, started_at) |
 | DELETE | `/api/v1/vms/{id}` | API key | Request termination of a specific VM |
+| GET | `/api/v1/pools` | API key | List all pools with status (name, repos, min/max ready, active count, paused) |
+| GET | `/api/v1/pools/{name}` | API key | Get single pool detail |
+| POST | `/api/v1/pools/{name}/scale` | API key | Scale pool: body `{"min_ready": N, "max_ready": M}` |
+| POST | `/api/v1/pools/{name}/pause` | API key | Pause pool (stops spawning new VMs, active VMs continue) |
+| POST | `/api/v1/pools/{name}/resume` | API key | Resume a paused pool |
 
 **Prometheus metrics example:**
 ```bash
@@ -282,6 +298,31 @@ curl -s http://localhost:9090/api/v1/vms | jq .
 
 # With API key
 curl -s -H "X-Api-Key: your-secret-key" http://localhost:9090/api/v1/vms | jq .
+
+# Pool management
+curl -s -H "X-Api-Key: your-secret-key" http://localhost:9090/api/v1/pools | jq .
+curl -s -X POST -H "X-Api-Key: your-secret-key" -H "Content-Type: application/json" \
+  -d '{"min_ready": 3, "max_ready": 6}' http://localhost:9090/api/v1/pools/default/scale
+curl -s -X POST -H "X-Api-Key: your-secret-key" http://localhost:9090/api/v1/pools/default/pause
+curl -s -X POST -H "X-Api-Key: your-secret-key" http://localhost:9090/api/v1/pools/default/resume
+```
+
+### CLI Subcommands
+
+fc-runner provides CLI commands that call the management API:
+
+```bash
+# List running VMs
+fc-runner ps --endpoint http://localhost:9090
+
+# Pool management
+fc-runner pools list --endpoint http://localhost:9090
+fc-runner pools scale default --min-ready 3 --endpoint http://localhost:9090
+fc-runner pools pause default --endpoint http://localhost:9090
+fc-runner pools resume default --endpoint http://localhost:9090
+
+# Stream VM logs
+fc-runner logs --vm-id <id> --endpoint http://localhost:9090
 ```
 
 ## Environment Variables

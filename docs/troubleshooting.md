@@ -319,14 +319,63 @@ sudo journalctl -u fc-runner | grep -i pool
 
 ---
 
+### Org-level runner registration fails
+
+```
+Error: failed to generate org JIT config
+```
+
+**Cause:** The PAT or GitHub App doesn't have organization-level permissions, or the `organization` config value is incorrect.
+
+**Fix:**
+- Verify `github.organization` matches the actual GitHub org name
+- For PATs: ensure the token has `admin:org` scope (classic) or org-level `Actions` + `Administration` permissions (fine-grained)
+- For GitHub Apps: ensure the App is installed at the org level with appropriate permissions
+- Check that the org allows self-hosted runners: **Organization settings > Actions > Runners > Allow self-hosted runners**
+
+---
+
+### Pool pause/resume/scale not working
+
+**Cause:** Pool management requires the management API to be running and accessible.
+
+**Diagnose:**
+```bash
+# Check pool status via CLI
+fc-runner pools list --endpoint http://localhost:9090
+
+# Or via API
+curl -s http://localhost:9090/api/v1/pools | jq .
+```
+
+**Fix:**
+- Ensure `[server]` is enabled (default: `true`) and the correct `listen_addr` is set
+- If using `api_key`, ensure the CLI or curl request includes the correct key
+- Pool commands only work when the server is running in pool mode (`[[pool]]` sections configured)
+- Check logs: `sudo journalctl -u fc-runner | grep pool`
+
+---
+
 ## Useful Commands
 
 ```bash
+# Validate config
+fc-runner validate --config /etc/fc-runner/config.toml
+
 # Service status
 sudo systemctl status fc-runner
 
 # Live logs
 sudo journalctl -u fc-runner -f
+
+# List running VMs via CLI
+fc-runner ps --endpoint http://localhost:9090
+
+# Pool management via CLI
+fc-runner pools list --endpoint http://localhost:9090
+fc-runner pools scale default --min-ready 3 --endpoint http://localhost:9090
+fc-runner pools pause default --endpoint http://localhost:9090
+fc-runner pools resume default --endpoint http://localhost:9090
 
 # Check for running VMs
 pgrep -a firecracker
@@ -342,6 +391,9 @@ curl -s http://localhost:9090/api/v1/vms | jq .
 # With API key:
 curl -s -H "X-Api-Key: your-key" http://localhost:9090/api/v1/vms | jq .
 
+# Management API — list pools
+curl -s -H "X-Api-Key: your-key" http://localhost:9090/api/v1/pools | jq .
+
 # Health check
 curl -s http://localhost:9090/healthz
 
@@ -350,6 +402,13 @@ curl -s \
   -H "Authorization: Bearer $GITHUB_TOKEN" \
   -H "Accept: application/vnd.github+json" \
   https://api.github.com/repos/{owner}/{repo}/actions/runners \
+  | jq '.runners[] | {id, name, status}'
+
+# List org-level runners
+curl -s \
+  -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -H "Accept: application/vnd.github+json" \
+  https://api.github.com/orgs/{org}/actions/runners \
   | jq '.runners[] | {id, name, status}'
 
 # Rebuild and redeploy

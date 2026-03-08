@@ -220,6 +220,15 @@ installation_id = 67890
 private_key_path = "/etc/fc-runner/app-key.pem"
 ```
 
+**Org-level runners (cross-repo job pickup):**
+```toml
+[github]
+token = "ghp_..."
+owner = "your-org"
+organization = "your-org"
+repos = ["repo-one", "repo-two"]  # still needed for polling
+```
+
 Both `repo` and `repos` can be set — they are merged and deduplicated. All repos share the same token/app, labels, and runner group. When using fine-grained PATs, make sure the token has access to all listed repos.
 
 For production hardening, enable the jailer:
@@ -235,8 +244,16 @@ This runs each VM inside a chroot with seccomp-BPF filtering and dropped privile
 
 ```bash
 sudo install -m 0755 target/release/fc-runner /usr/local/bin/fc-runner
+
+# Option A: Run via systemd (production)
 sudo systemctl start fc-runner
 sudo journalctl -u fc-runner -f
+
+# Option B: Run directly (development)
+sudo fc-runner server --config /etc/fc-runner/config.toml
+
+# Validate config without starting
+fc-runner validate --config /etc/fc-runner/config.toml
 ```
 
 On first startup, fc-runner will:
@@ -264,6 +281,9 @@ fc-runner will pick up the job, boot a VM, and run it.
 ## Verify the Installation
 
 ```bash
+# Validate config file
+fc-runner validate --config /etc/fc-runner/config.toml
+
 # Check service status
 sudo systemctl status fc-runner
 
@@ -278,6 +298,12 @@ ls -lh /opt/fc-runner/runner-rootfs-golden.ext4
 
 # Check kernel exists (downloaded automatically on first start)
 ls -lh /opt/fc-runner/vmlinux.bin
+
+# List running VMs via CLI
+fc-runner ps --endpoint http://localhost:9090
+
+# List pools via CLI
+fc-runner pools list --endpoint http://localhost:9090
 
 # Check AppArmor profiles are enforced
 sudo aa-status | grep -E '(firecracker|fc-runner)'

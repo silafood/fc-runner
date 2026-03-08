@@ -32,7 +32,11 @@ GitHub Actions                fc-runner                    Firecracker
 - **Pool-based scaling** — named VM pools with per-pool repos, replica counts, and resource overrides
 - **Prometheus metrics** — `/metrics` endpoint with job counts, VM boot duration, API rate limits, and more
 - **Management API** — REST API (`/api/v1/status`, `/api/v1/vms`) for monitoring and VM management
-- **VSOCK guest agent** — optional host-guest communication channel via virtio-vsock
+- **Guest agent** — `fc-runner agent` runs inside VMs: reads MMDS, starts runner, reports state via VSOCK
+- **CLI subcommands** — `server`, `agent`, `validate`, `ps`, `pools` (list/scale/pause/resume), `logs`
+- **Org-level runners** — register runners at the GitHub organization level for cross-repo job pickup
+- **Runtime pool management** — pause, resume, and scale pools at runtime via REST API or CLI
+- **VSOCK guest agent** — host-guest communication via virtio-vsock with NDJSON protocol
 - **Secret protection** — GitHub PAT stored via `secrecy::SecretString`, zeroized on drop, redacted in all logs
 - **AppArmor** — ships restrictive profiles for both `firecracker` and `fc-runner` binaries
 - **Concurrency control** — bounded by `max_concurrent_jobs` via `tokio::sync::Semaphore` (default: 4)
@@ -109,6 +113,9 @@ repo = "your-repo"
 # Or serve multiple repos:
 # repos = ["repo-one", "repo-two"]
 
+# Or use org-level runners:
+# organization = "your-org"
+
 # Or use GitHub App authentication instead of a PAT:
 # [github.app]
 # app_id = 12345
@@ -120,8 +127,13 @@ repo = "your-repo"
 
 ```bash
 sudo install -m 0755 target/release/fc-runner /usr/local/bin/fc-runner
+
+# Option A: Run via systemd (production)
 sudo systemctl start fc-runner
 sudo journalctl -u fc-runner -f
+
+# Option B: Run directly (development)
+sudo fc-runner server --config /etc/fc-runner/config.toml
 ```
 
 ### 5. Use in your workflow
@@ -136,13 +148,43 @@ jobs:
       - run: echo "Running inside a Firecracker microVM!"
 ```
 
+## CLI Usage
+
+fc-runner uses clap-based subcommands:
+
+```bash
+# Start the server (orchestrator + management API)
+fc-runner server --config /etc/fc-runner/config.toml
+
+# Validate a config file without starting
+fc-runner validate --config /etc/fc-runner/config.toml
+
+# List running VMs (calls management API)
+fc-runner ps --endpoint http://localhost:9090
+
+# Pool management
+fc-runner pools list --endpoint http://localhost:9090
+fc-runner pools scale default --min-ready 3 --endpoint http://localhost:9090
+fc-runner pools pause default --endpoint http://localhost:9090
+fc-runner pools resume default --endpoint http://localhost:9090
+
+# Stream VM logs
+fc-runner logs --vm-id <id> --endpoint http://localhost:9090
+
+# Guest agent (runs inside a Firecracker VM, not invoked manually)
+fc-runner agent --log-level debug
+
+# Print version
+fc-runner --version
+```
+
 ## Configuration
 
 Full example at [`config.toml.example`](config.toml.example). Key sections:
 
 | Section | Key fields |
 |---------|-----------|
-| `[github]` | `token`, `owner`, `repo` or `repos`, `labels`; or `[github.app]` for App auth |
+| `[github]` | `token`, `owner`, `repo`/`repos`, `organization`, `labels`; or `[github.app]` for App auth |
 | `[firecracker]` | `kernel_path`, `rootfs_golden`, `vcpu_count`, `mem_size_mib`, `secret_injection`, `vsock_enabled` |
 | `[runner]` | `work_dir`, `poll_interval_secs`, `max_concurrent_jobs`, `vm_timeout_secs`, `warm_pool_size` |
 | `[[pool]]` | Named pools: `name`, `repos`, `min_ready`, `max_ready`, per-pool `vcpu_count`/`mem_size_mib` |
@@ -156,16 +198,19 @@ See [docs/configuration.md](docs/configuration.md) for the full reference.
 ```
 fc-runner/
 ├── src/
-│   ├── main.rs           # Entry point, signal handling, config loading
+│   ├── main.rs           # Entry point with clap CLI dispatch
+│   ├── cli.rs            # CLI subcommand definitions (server, agent, ps, pools, etc.)
+│   ├── api_client.rs     # HTTP client for CLI→server management API calls
+│   ├── agent.rs          # Guest agent: MMDS reader, runner launcher, VSOCK reporter
 │   ├── config.rs         # Typed TOML config with validation
-│   ├── github.rs         # GitHub API client (PAT + App auth, poll + JIT tokens)
+│   ├── github.rs         # GitHub API client (PAT + App auth, repo + org level)
 │   ├── firecracker.rs    # MicroVm lifecycle: prepare → run → cleanup (MMDS + mount modes)
 │   ├── netlink.rs        # Pure-Rust TAP device management (rtnetlink + nix ioctl)
 │   ├── orchestrator.rs   # Poll/dispatch loop with dedup (JIT, warm pool, named pools)
 │   ├── setup.rs          # KVM checks, kernel/rootfs provisioning, network, AppArmor
 │   ├── metrics.rs        # Prometheus metrics registry and counters
-│   ├── server.rs         # HTTP server: /metrics, /healthz, management API
-│   ├── pool.rs           # Named VM pool manager with min/max ready counts
+│   ├── server.rs         # HTTP server: /metrics, /healthz, management + pool API
+│   ├── pool.rs           # Named VM pool manager with runtime pause/resume/scale
 │   └── vsock.rs          # Host-side VSOCK listener for guest agent communication
 ├── guest_configs/
 │   ├── fetch-mmds-env.sh            # Guest-side MMDS metadata fetch script
@@ -241,6 +286,9 @@ See [docs/troubleshooting.md](docs/troubleshooting.md) for detailed diagnostics.
 ## Common Commands
 
 ```bash
+# Validate config without starting
+fc-runner validate --config /etc/fc-runner/config.toml
+
 # Check service status
 sudo systemctl status fc-runner
 
@@ -252,14 +300,26 @@ cargo build --release
 sudo install -m 0755 target/release/fc-runner /usr/local/bin/fc-runner
 sudo systemctl restart fc-runner
 
-# Check for running VMs
-pgrep -a firecracker
+# List running VMs via CLI
+fc-runner ps --endpoint http://localhost:9090
+
+# Pool management via CLI
+fc-runner pools list --endpoint http://localhost:9090
+fc-runner pools scale default --min-ready 3 --endpoint http://localhost:9090
+fc-runner pools pause default --endpoint http://localhost:9090
+fc-runner pools resume default --endpoint http://localhost:9090
 
 # Prometheus metrics (default port 9090)
 curl -s http://localhost:9090/metrics
 
+# Management API — server status
+curl -s http://localhost:9090/api/v1/status | jq .
+
 # Management API — list active VMs
 curl -s http://localhost:9090/api/v1/vms | jq .
+
+# Management API — list pools
+curl -s http://localhost:9090/api/v1/pools | jq .
 
 # Health check
 curl -s http://localhost:9090/healthz
