@@ -175,14 +175,33 @@ tar xzf "$MNT/home/runner/actions-runner.tar.gz" -C "$MNT/home/runner/"
 rm "$MNT/home/runner/actions-runner.tar.gz"
 chroot "$MNT" chown -R runner:runner /home/runner
 
-# ── Step 8: Write entrypoint ─────────────────────────────────────────
-echo "[8/8] Writing entrypoint..."
+# ── Step 8: Install fc-runner agent + write entrypoint ─────────────────
+echo "[8/9] Installing fc-runner agent binary..."
+FC_RUNNER_BIN="${FC_RUNNER_BIN:-/usr/local/bin/fc-runner}"
+if [ -f "$FC_RUNNER_BIN" ]; then
+    cp "$FC_RUNNER_BIN" "$MNT/usr/local/bin/fc-runner"
+    chmod +x "$MNT/usr/local/bin/fc-runner"
+    echo "  Installed fc-runner agent from $FC_RUNNER_BIN"
+else
+    echo "  WARNING: fc-runner binary not found at $FC_RUNNER_BIN — shell fallback only"
+fi
+
+echo "[9/9] Writing entrypoint..."
 cat > "$MNT/entrypoint.sh" << 'ENTRYEOF'
 #!/bin/bash
 set -euo pipefail
 exec > /var/log/runner.log 2>&1
 
 echo "=== fc-runner entrypoint $(date) ==="
+
+# Prefer the Rust agent (reads MMDS directly, explicit env, VSOCK reporting)
+if [ -x /usr/local/bin/fc-runner ]; then
+    echo "Using fc-runner agent"
+    exec /usr/local/bin/fc-runner agent --log-level info
+fi
+
+# Fallback: shell-based entrypoint (legacy)
+echo "fc-runner binary not found, using shell fallback"
 
 if [ ! -f /etc/fc-runner-env ]; then
     echo "ERROR: /etc/fc-runner-env not found"
