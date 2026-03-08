@@ -119,6 +119,22 @@ pub async fn ensure_vm_assets(config: &mut AppConfig) -> anyhow::Result<()> {
     let cloud_img_url = config.firecracker.cloud_img_url.as_deref().unwrap_or(DEFAULT_CLOUD_IMG_URL);
     ensure_golden_rootfs(&config.firecracker.rootfs_golden, cloud_img_url, &config.network).await?;
     ensure_network(&config.network).await?;
+    ensure_directories(config).await?;
+    Ok(())
+}
+
+/// Create runtime directories (work_dir, jailer chroot base) if they don't exist.
+async fn ensure_directories(config: &AppConfig) -> anyhow::Result<()> {
+    tokio::fs::create_dir_all(&config.runner.work_dir).await
+        .with_context(|| format!("creating work_dir: {}", config.runner.work_dir))?;
+
+    if config.firecracker.jailer_path.is_some() {
+        let base = &config.firecracker.jailer_chroot_base;
+        tokio::fs::create_dir_all(base).await
+            .with_context(|| format!("creating jailer_chroot_base: {}", base))?;
+        tracing::info!(path = %base, "jailer chroot base directory ready");
+    }
+
     Ok(())
 }
 

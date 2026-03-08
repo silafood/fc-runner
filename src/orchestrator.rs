@@ -121,7 +121,7 @@ impl Orchestrator {
             let manager = manager.clone();
             let handle = tokio::spawn(async move {
                 if let Err(e) = manager.run().await {
-                    tracing::error!(pool = %name, error = %e, "pool manager failed");
+                    tracing::error!(pool = %name, error = ?e, "pool manager failed");
                 }
             });
             handles.push(handle);
@@ -154,7 +154,7 @@ impl Orchestrator {
                 }
                 _ = ticker.tick() => {
                     if let Err(e) = self.poll_once().await {
-                        tracing::error!(error = %e, "poll cycle failed");
+                        tracing::error!(error = ?e, "poll cycle failed");
                     }
                 }
             }
@@ -168,7 +168,7 @@ impl Orchestrator {
                 metrics::POLL_CYCLES.with_label_values(&["error"]).inc();
                 tracing::error!(
                     repo = %repo,
-                    error = %e,
+                    error = ?e,
                     "failed to poll repo, skipping"
                 );
             }
@@ -283,7 +283,7 @@ impl Orchestrator {
                 }
                 Err(e) => {
                     metrics::JOBS_FAILED.with_label_values(&[&repo]).inc();
-                    tracing::error!(job_id, repo = %repo, slot, error = %e, "job failed (will not retry)");
+                    tracing::error!(job_id, repo = %repo, slot, error = ?e, "job failed (will not retry)");
                 }
             }
         });
@@ -385,7 +385,7 @@ impl Orchestrator {
                 }
                 Err(e) => {
                     metrics::JOBS_FAILED.with_label_values(&[&repo]).inc();
-                    tracing::error!(slot, repo = %repo, error = %e, "warm pool VM failed");
+                    tracing::error!(slot, repo = %repo, error = ?e, "warm pool VM failed");
                 }
             }
 
