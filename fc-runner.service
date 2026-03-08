@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/fc-runner /etc/fc-runner/config.toml
+ExecStart=/usr/local/bin/fc-runner server --config /etc/fc-runner/config.toml
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
@@ -13,8 +13,8 @@ TimeoutStopSec=300
 Environment=RUST_LOG=fc_runner=info
 
 # fc-runner needs root with broad access for:
-#   mount/umount (loop devices), losetup, chroot, qemu-img,
-#   iptables/ipset (NAT rules), ip (TAP devices)
+#   mount/umount (loop devices), chroot (rootfs provisioning),
+#   iptables/ipset (NAT rules), TAP devices (ioctl TUNSETIFF)
 # Minimal hardening that doesn't break these operations:
 ProtectHome=true
 ProtectKernelModules=true

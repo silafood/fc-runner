@@ -48,6 +48,9 @@ Pop!_OS / Ubuntu 24.04.
 fc-runner/
 ├── src/
 │   ├── main.rs           # CLI entry point, signal handling
+│   ├── cli.rs            # CLI subcommand definitions (clap derive)
+│   ├── api_client.rs     # HTTP client for CLI→server management API calls
+│   ├── agent.rs          # Guest agent: MMDS reader, runner launcher, VSOCK reporter
 │   ├── config.rs         # Typed TOML config structs
 │   ├── github.rs         # GitHub API client (PAT + App auth, poll + JIT tokens)
 │   ├── firecracker.rs    # MicroVm struct: prepare → run → cleanup (MMDS + mount)
@@ -55,12 +58,17 @@ fc-runner/
 │   ├── orchestrator.rs   # Poll/dispatch loop, dedup, JIT/warm-pool/named-pool modes
 │   ├── setup.rs          # KVM checks, kernel/rootfs provisioning, network
 │   ├── metrics.rs        # Prometheus metrics registry (counters, gauges, histograms)
-│   ├── server.rs         # HTTP server: /metrics, /healthz, management API
-│   ├── pool.rs           # Named VM pool manager with min/max ready
+│   ├── server.rs         # HTTP server: /metrics, /healthz, management + pool API
+│   ├── pool.rs           # Named VM pool manager with runtime pause/resume/scale
 │   └── vsock.rs          # Host-side VSOCK listener for guest agent
 ├── guest_configs/
 │   ├── fetch-mmds-env.sh            # Guest-side MMDS metadata fetch script
 │   └── microvm-kernel-ci-*.config   # Firecracker kernel configs
+├── docs/
+│   ├── architecture.md   # System design and module overview
+│   ├── setup.md          # Installation guide
+│   ├── configuration.md  # Config reference
+│   └── troubleshooting.md
 ├── .github/workflows/
 │   └── release.yml       # CI: build binary + kernel + rootfs, publish release
 ├── Cargo.toml
