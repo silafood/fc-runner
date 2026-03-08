@@ -81,7 +81,8 @@ pub async fn run(log_level: &str) -> anyhow::Result<()> {
 async fn run_with_reporting(metadata: &Metadata) -> i32 {
     use tokio::io::AsyncWriteExt;
 
-    let mut stream = match tokio_vsock::VsockStream::connect(HOST_CID, AGENT_PORT).await {
+    let addr = tokio_vsock::VsockAddr::new(HOST_CID, AGENT_PORT);
+    let mut stream = match tokio_vsock::VsockStream::connect(addr).await {
         Ok(s) => {
             tracing::info!("connected to host via VSOCK");
             Some(s)
@@ -105,7 +106,7 @@ async fn run_with_reporting(metadata: &Metadata) -> i32 {
     vsock_send(&mut stream, &AgentMessage::JobCompleted { exit_code }).await;
 
     // Flush before closing
-    if let Some(ref mut s) = stream {
+    if let Some(s) = &mut stream {
         let _ = s.flush().await;
     }
 
@@ -124,7 +125,7 @@ async fn run_with_reporting(metadata: &Metadata) -> i32 {
 #[cfg(target_os = "linux")]
 async fn vsock_send(stream: &mut Option<tokio_vsock::VsockStream>, msg: &AgentMessage) {
     use tokio::io::AsyncWriteExt;
-    if let Some(ref mut s) = stream {
+    if let Some(s) = stream.as_mut() {
         let mut line = serde_json::to_string(msg).unwrap_or_default();
         line.push('\n');
         if let Err(e) = s.write_all(line.as_bytes()).await {
