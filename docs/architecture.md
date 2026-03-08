@@ -126,7 +126,6 @@ Auto-provisioning module that ensures all VM prerequisites are in place at start
    - Creates runner user, entrypoint script, systemd service units
    - Shrinks to minimum size + headroom via `resize2fs`
 5. **ensure_network** — enables IP forwarding, configures iptables NAT/FORWARD rules
-6. **ensure_apparmor** — loads and enforces AppArmor profiles for fc-runner and Firecracker
 
 ### `orchestrator.rs`
 Async poll loop using `tokio::time::interval`. Supports three modes:
@@ -231,8 +230,7 @@ ensure_vm_assets()
   │   ├─ extract + expand ext4 image
   │   ├─ mount + chroot: install packages, runner, entrypoint
   │   └─ shrink to minimum size (e2fsck + resize2fs)
-  ├─ ensure_network()          → ip_forward + iptables NAT
-  └─ ensure_apparmor()         → load profiles if available
+  └─ ensure_network()          → ip_forward + iptables NAT
 ```
 
 To force a rebuild, delete the golden rootfs and restart:
@@ -338,31 +336,3 @@ Active job count is tracked via `Arc<Mutex<usize>>`.
 - systemd service runs with `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=true`, `MemoryDenyWriteExecute`, and restricted capabilities
 - Work directory created with `0700` permissions
 
-### AppArmor
-
-fc-runner ships with AppArmor profiles for both binaries:
-
-| Profile | Binary | Restrictions |
-|---------|--------|-------------|
-| `usr.local.bin.firecracker` | Firecracker VMM | Read-only kernel, r/w only per-VM rootfs copies in work dir, KVM and TAP device access, no network, no arbitrary filesystem access |
-| `usr.local.bin.fc-runner` | Orchestrator | Config read-only, VM work dir r/w with link, mount/umount for rootfs injection, chroot with full capabilities for rootfs provisioning, network admin for TAP/NAT, child exec only Firecracker/jailer |
-
-Profiles are installed by `install.sh` to `/etc/apparmor.d/` and enforced automatically at startup by `setup.rs`. If AppArmor or `apparmor-utils` is not available, fc-runner continues without enforcement and logs a warning.
-
-**Manual management:**
-```bash
-# Check enforcement status
-sudo aa-status | grep -E '(firecracker|fc-runner)'
-
-# Reload after profile update
-sudo apparmor_parser -r /etc/apparmor.d/usr.local.bin.fc-runner
-
-# Switch to complain mode (log violations without blocking)
-sudo aa-complain /etc/apparmor.d/usr.local.bin.firecracker
-
-# Re-enforce
-sudo aa-enforce /etc/apparmor.d/usr.local.bin.firecracker
-
-# Check for denied operations
-sudo dmesg | grep DENIED | tail -20
-```

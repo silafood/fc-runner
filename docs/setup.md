@@ -150,7 +150,6 @@ After KVM is set up, fc-runner handles everything else automatically at startup:
 - Downloads the guest kernel if missing
 - Builds the golden rootfs from an Ubuntu cloud image if missing
 - Creates per-VM TAP devices and configures NAT rules
-- Loads AppArmor profiles if available
 
 ## Quick Start
 
@@ -174,7 +173,6 @@ This will:
 - Install system dependencies (curl, jq, iptables, etc.)
 - Install Firecracker v1.14.2 and jailer to `/usr/local/bin/`
 - Create directories and copy config templates to `/etc/fc-runner/`
-- Install AppArmor profiles to `/etc/apparmor.d/`
 - Install and enable the `fc-runner.service` systemd unit
 
 Kernel download, rootfs building, and network setup are handled automatically by fc-runner at startup.
@@ -265,8 +263,7 @@ On first startup, fc-runner will:
    - Create runner user and entrypoint script
    - Shrink image to minimum size
 4. Configure TAP networking and iptables NAT rules
-5. Load AppArmor profiles
-6. Begin polling GitHub for queued jobs
+5. Begin polling GitHub for queued jobs
 
 ### 5. Trigger a workflow
 
@@ -305,9 +302,6 @@ fc-runner ps --endpoint http://localhost:9090
 # List pools via CLI
 fc-runner pools list --endpoint http://localhost:9090
 
-# Check AppArmor profiles are enforced
-sudo aa-status | grep -E '(firecracker|fc-runner)'
-
 # Check COW reflink support (btrfs/xfs only; ext4 falls back to full copy)
 df -Th /var/lib/fc-runner/vms
 ```
@@ -327,13 +321,3 @@ sudo systemctl restart fc-runner
 
 fc-runner will detect the missing rootfs and rebuild it automatically.
 
-## Updating AppArmor Profiles
-
-After updating the AppArmor profile files in the repo:
-
-```bash
-sudo cp apparmor/usr.local.bin.fc-runner /etc/apparmor.d/
-sudo cp apparmor/usr.local.bin.firecracker /etc/apparmor.d/
-sudo apparmor_parser -r /etc/apparmor.d/usr.local.bin.fc-runner
-sudo apparmor_parser -r /etc/apparmor.d/usr.local.bin.firecracker
-```

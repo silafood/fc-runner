@@ -23,22 +23,18 @@ Nested virtualization (running inside a VM) requires the host hypervisor to expo
 
 ### Golden rootfs build fails
 
-**Cause:** The auto-provisioning process failed during rootfs build. Common reasons include AppArmor denials, network issues during package download, or insufficient disk space.
+**Cause:** The auto-provisioning process failed during rootfs build. Common reasons include network issues during package download or insufficient disk space.
 
 **Diagnose:**
 ```bash
 # Check fc-runner logs for the specific error
 sudo journalctl -u fc-runner --since "10 minutes ago" | grep -i error
 
-# Check for AppArmor denials
-sudo dmesg | grep DENIED | tail -20
-
 # Check disk space
 df -h /opt/fc-runner/
 ```
 
 **Fix:**
-- If AppArmor denials: update and reload the profile (see [AppArmor issues](#apparmor-denials) below)
 - If network issues: verify DNS and internet connectivity from the host
 - If disk space: free up space in `/opt/fc-runner/`
 - To retry: delete partial build artifacts and restart:
@@ -189,40 +185,6 @@ ERROR: GitHub API rate limit nearly exhausted, backing off
 - Increase `runner.poll_interval_secs` to reduce API calls
 - With multi-repo configs, each repo adds ~2 API calls per poll cycle — reduce the number of repos or increase the interval
 - Check if multiple instances of fc-runner are sharing the same PAT
-
----
-
-### AppArmor denials
-
-```
-apparmor="DENIED" operation="..." profile="/usr/local/bin/fc-runner"
-```
-
-**Cause:** The AppArmor profile is missing permissions for an operation fc-runner needs to perform (common during rootfs provisioning which runs chroot'd package installation).
-
-**Diagnose:**
-```bash
-# Check recent denials
-sudo dmesg | grep DENIED | tail -20
-
-# Check profile enforcement status
-sudo aa-status | grep -E '(firecracker|fc-runner)'
-```
-
-**Fix:**
-1. Identify the denied operation from the `dmesg` output (look at `operation`, `name`, `requested_mask`, `capname`)
-2. Update the AppArmor profile in `apparmor/usr.local.bin.fc-runner`
-3. Reload the profile:
-   ```bash
-   sudo cp apparmor/usr.local.bin.fc-runner /etc/apparmor.d/
-   sudo apparmor_parser -r /etc/apparmor.d/usr.local.bin.fc-runner
-   ```
-4. Temporarily switch to complain mode to unblock while debugging:
-   ```bash
-   sudo aa-complain /etc/apparmor.d/usr.local.bin.fc-runner
-   # Re-enforce after fixing:
-   sudo aa-enforce /etc/apparmor.d/usr.local.bin.fc-runner
-   ```
 
 ---
 
@@ -420,12 +382,4 @@ sudo systemctl restart fc-runner
 sudo rm /opt/fc-runner/runner-rootfs-golden.ext4
 sudo systemctl restart fc-runner
 
-# Check AppArmor status
-sudo aa-status | grep -E '(firecracker|fc-runner)'
-
-# Check for AppArmor denials
-sudo dmesg | grep DENIED | tail -20
-
-# Reload AppArmor profile after update
-sudo apparmor_parser -r /etc/apparmor.d/usr.local.bin.fc-runner
 ```

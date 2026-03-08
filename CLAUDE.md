@@ -53,7 +53,7 @@ fc-runner/
 │   ├── firecracker.rs    # MicroVm struct: prepare → run → cleanup (MMDS + mount)
 │   ├── netlink.rs        # Pure-Rust TAP device management (rtnetlink + nix ioctl)
 │   ├── orchestrator.rs   # Poll/dispatch loop, dedup, JIT/warm-pool/named-pool modes
-│   ├── setup.rs          # KVM checks, kernel/rootfs provisioning, network, AppArmor
+│   ├── setup.rs          # KVM checks, kernel/rootfs provisioning, network
 │   ├── metrics.rs        # Prometheus metrics registry (counters, gauges, histograms)
 │   ├── server.rs         # HTTP server: /metrics, /healthz, management API
 │   ├── pool.rs           # Named VM pool manager with min/max ready
@@ -63,9 +63,6 @@ fc-runner/
 │   └── microvm-kernel-ci-*.config   # Firecracker kernel configs
 ├── .github/workflows/
 │   └── release.yml       # CI: build binary + kernel + rootfs, publish release
-├── apparmor/
-│   ├── usr.local.bin.firecracker   # AppArmor profile for Firecracker VMM
-│   └── usr.local.bin.fc-runner     # AppArmor profile for orchestrator
 ├── Cargo.toml
 ├── config.toml.example   # Annotated config — copy to /etc/fc-runner/config.toml
 ├── fc-runner.service     # systemd unit
@@ -242,12 +239,6 @@ curl -s \
   | jq '.runners[] | {id, name, status, labels: [.labels[].name]}'
 ```
 
-### Check AppArmor enforcement
-```bash
-sudo aa-status | grep -E '(firecracker|fc-runner)'
-sudo dmesg | grep DENIED | tail -20
-```
-
 ### Verify COW reflink support
 ```bash
 # Must be on btrfs or xfs; tmpfs does NOT support reflinks
@@ -277,7 +268,6 @@ sudo systemctl restart fc-runner
 | GitHub API 422 on JIT config | Runner group ID wrong or PAT missing `repo` scope | Verify `runner_group_id = 1`; re-issue PAT |
 | Jobs dispatched twice | Poll interval < VM startup time | Increase `poll_interval_secs` or the `HashSet` dedup in `orchestrator.rs` will cover it |
 | Rootfs runs out of space mid-job | Image too small for build artefacts | Delete golden rootfs + restart to rebuild |
-| AppArmor `DENIED` | Missing permission in profile | Check `dmesg \| grep DENIED`, update profile, reload with `apparmor_parser -r` |
 | Guest VM emergency mode | Bad fstab or EFI mount units | Delete golden rootfs + restart (auto-fix in setup.rs) |
 
 ---

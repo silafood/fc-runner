@@ -50,7 +50,7 @@ async fn listen_loop(vm_id: &str, cid: u32) -> anyhow::Result<()> {
     use tokio_vsock::VsockListener;
 
     let addr = tokio_vsock::VsockAddr::new(cid, AGENT_PORT);
-    let listener = VsockListener::bind(addr)
+    let mut listener = VsockListener::bind(addr)
         .map_err(|e| anyhow::anyhow!("VSOCK bind CID {} port {}: {}", cid, AGENT_PORT, e))?;
 
     tracing::info!(vm_id = %vm_id, cid, port = AGENT_PORT, "VSOCK listener started");
