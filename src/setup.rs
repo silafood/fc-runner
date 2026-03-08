@@ -556,7 +556,9 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
             "su - runner -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable' && \
              ln -sf /home/runner/.cargo/bin/cargo /usr/local/bin/cargo && \
              ln -sf /home/runner/.cargo/bin/rustc /usr/local/bin/rustc && \
-             ln -sf /home/runner/.cargo/bin/rustup /usr/local/bin/rustup"])
+             ln -sf /home/runner/.cargo/bin/rustup /usr/local/bin/rustup && \
+             echo 'export PATH=/home/runner/.cargo/bin:$PATH' >> /home/runner/.bashrc && \
+             echo 'PATH=/home/runner/.cargo/bin:/usr/local/bin:/usr/bin:/bin' > /etc/environment"])
         .status()
         .await
         .context("installing Rust toolchain in chroot")?;
