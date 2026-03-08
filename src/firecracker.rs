@@ -260,7 +260,14 @@ impl MicroVm {
 
     /// Mount the VM rootfs after exit and dump /var/log/runner.log for debugging.
     async fn dump_guest_log(&self) {
-        let rootfs = match path_str(&self.rootfs_path) {
+        // When jailer is used, the rootfs lives in the chroot directory
+        let rootfs_location = if self.fc_config.jailer_path.is_some() {
+            let name = self.rootfs_path.file_name().unwrap().to_str().unwrap();
+            self.jailer_root_dir().join(name)
+        } else {
+            self.rootfs_path.clone()
+        };
+        let rootfs = match path_str(&rootfs_location) {
             Ok(s) => s,
             Err(_) => return,
         };
@@ -324,15 +331,41 @@ impl MicroVm {
         self.fc_config.vsock_cid_base + self.slot as u32
     }
 
-    fn build_vm_config(&self) -> anyhow::Result<serde_json::Value> {
+    /// Returns the jailer chroot root directory: <chroot_base>/firecracker/<vm_id>/root
+    fn jailer_root_dir(&self) -> PathBuf {
+        PathBuf::from(&self.fc_config.jailer_chroot_base)
+            .join("firecracker")
+            .join(&self.vm_id)
+            .join("root")
+    }
+
+    fn build_vm_config(&self, use_jailer: bool) -> anyhow::Result<serde_json::Value> {
+        // When using jailer, paths must be relative to the chroot root.
+        // The jailer creates <chroot_base>/firecracker/<vm_id>/root/ and
+        // hard-links the firecracker binary. We place kernel, rootfs, log,
+        // and socket inside that root dir and reference them by filename only.
+        let (kernel_path, rootfs_path, log_path) = if use_jailer {
+            (
+                self.rootfs_path.file_name().unwrap().to_str().unwrap().replace(".ext4", "-kernel"),
+                self.rootfs_path.file_name().unwrap().to_str().unwrap().to_string(),
+                self.log_path.file_name().unwrap().to_str().unwrap().to_string(),
+            )
+        } else {
+            (
+                self.fc_config.kernel_path.clone(),
+                path_str(&self.rootfs_path)?.to_string(),
+                path_str(&self.log_path)?.to_string(),
+            )
+        };
+
         let mut config = serde_json::json!({
             "boot-source": {
-                "kernel_image_path": self.fc_config.kernel_path,
+                "kernel_image_path": kernel_path,
                 "boot_args": self.fc_config.boot_args
             },
             "drives": [{
                 "drive_id": "rootfs",
-                "path_on_host": path_str(&self.rootfs_path)?,
+                "path_on_host": rootfs_path,
                 "is_root_device": true,
                 "is_read_only": false
             }],
@@ -346,7 +379,7 @@ impl MicroVm {
                 "host_dev_name": self.tap_name
             }],
             "logger": {
-                "log_path": path_str(&self.log_path)?,
+                "log_path": log_path,
                 "level": self.fc_config.log_level
             }
         });
@@ -362,7 +395,11 @@ impl MicroVm {
         // Add VSOCK device when enabled
         if self.fc_config.vsock_enabled {
             let cid = self.vsock_cid();
-            let uds_path = path_str(&self.socket_path)?;
+            let uds_path = if use_jailer {
+                self.socket_path.file_name().unwrap().to_str().unwrap().to_string()
+            } else {
+                path_str(&self.socket_path)?.to_string()
+            };
             config["vsock"] = serde_json::json!({
                 "guest_cid": cid,
                 "uds_path": uds_path
@@ -378,8 +415,49 @@ impl MicroVm {
         Ok(config)
     }
 
+    /// Set up the jailer chroot directory with all required files.
+    /// The jailer creates <chroot_base>/firecracker/<vm_id>/root/ and hard-links
+    /// the exec-file. We need to place kernel, rootfs, config, and log inside it.
+    async fn setup_jailer_chroot(&self) -> anyhow::Result<PathBuf> {
+        let root_dir = self.jailer_root_dir();
+        tokio::fs::create_dir_all(&root_dir).await
+            .context("creating jailer chroot directory")?;
+
+        // Hard-link (or copy) kernel into chroot
+        let kernel_name = self.rootfs_path.file_name().unwrap().to_str().unwrap().replace(".ext4", "-kernel");
+        let chroot_kernel = root_dir.join(&kernel_name);
+        if tokio::fs::hard_link(&self.fc_config.kernel_path, &chroot_kernel).await.is_err() {
+            tokio::fs::copy(&self.fc_config.kernel_path, &chroot_kernel).await
+                .context("copying kernel into jailer chroot")?;
+        }
+
+        // Hard-link (or copy) rootfs into chroot
+        let rootfs_name = self.rootfs_path.file_name().unwrap().to_str().unwrap();
+        let chroot_rootfs = root_dir.join(rootfs_name);
+        if tokio::fs::hard_link(&self.rootfs_path, &chroot_rootfs).await.is_err() {
+            tokio::fs::copy(&self.rootfs_path, &chroot_rootfs).await
+                .context("copying rootfs into jailer chroot")?;
+        }
+
+        // Create log file in chroot
+        let log_name = self.log_path.file_name().unwrap().to_str().unwrap();
+        tokio::fs::write(root_dir.join(log_name), "").await
+            .context("creating log file in jailer chroot")?;
+
+        // Write VM config with chroot-relative paths
+        let config = self.build_vm_config(true)?;
+        let config_name = self.config_path.file_name().unwrap().to_str().unwrap();
+        let chroot_config = root_dir.join(config_name);
+        let rendered = serde_json::to_string_pretty(&config)
+            .context("serializing VM config for jailer")?;
+        tokio::fs::write(&chroot_config, rendered).await?;
+
+        Ok(root_dir)
+    }
+
     async fn write_vm_config(&self) -> anyhow::Result<()> {
-        let config = self.build_vm_config()?;
+        let use_jailer = self.fc_config.jailer_path.is_some();
+        let config = self.build_vm_config(use_jailer)?;
         let rendered = serde_json::to_string_pretty(&config)
             .context("serializing VM config")?;
         tokio::fs::write(&self.config_path, rendered).await?;
@@ -390,7 +468,9 @@ impl MicroVm {
     ///
     /// The env_content is parsed as KEY=VALUE lines and placed under a
     /// "fc-runner" namespace for the guest agent to read via MMDS V2.
-    async fn put_mmds(&self, env_content: &str) -> anyhow::Result<()> {
+    /// `socket_path` is the host-accessible path to the API socket (which may
+    /// differ from the chroot-relative path passed to firecracker when using jailer).
+    async fn put_mmds_at(&self, socket_path: &std::path::Path, env_content: &str) -> anyhow::Result<()> {
         use http_body_util::Full;
         use hyper::body::Bytes;
         use hyper::Request;
@@ -422,10 +502,9 @@ impl MicroVm {
         let body_json = serde_json::to_string(&serde_json::Value::Object(metadata))
             .context("serializing MMDS metadata")?;
 
-        tracing::info!(vm_id = %self.vm_id, "putting MMDS metadata via API socket");
+        tracing::info!(vm_id = %self.vm_id, socket = %socket_path.display(), "putting MMDS metadata via API socket");
 
         // Wait for the socket to appear (Firecracker creates it on startup)
-        let socket_path = &self.socket_path;
         for attempt in 0..50 {
             if tokio::fs::metadata(socket_path).await.is_ok() {
                 break;
@@ -479,6 +558,8 @@ impl MicroVm {
         let fut = if let Some(jailer_path) = &self.fc_config.jailer_path {
             let uid = self.fc_config.jailer_uid.expect("validated in config");
             let gid = self.fc_config.jailer_gid.expect("validated in config");
+            // Inside the jailer chroot, config is at just the filename
+            let config_name = self.config_path.file_name().unwrap().to_str().unwrap();
             tracing::info!(
                 vm_id = %self.vm_id,
                 jailer = %jailer_path,
@@ -492,7 +573,7 @@ impl MicroVm {
                 .arg("--gid").arg(gid.to_string())
                 .arg("--chroot-base-dir").arg(&self.fc_config.jailer_chroot_base)
                 .arg("--")
-                .arg("--config-file").arg(&self.config_path)
+                .arg("--config-file").arg(config_name)
                 .arg("--no-api")
                 .status()
         } else {
@@ -512,11 +593,24 @@ impl MicroVm {
     /// Start Firecracker with API socket (MMDS mode).
     /// Returns a child process handle so we can inject MMDS data before it exits.
     async fn run_with_api(&self, env_content: &str) -> anyhow::Result<std::process::ExitStatus> {
-        let socket = path_str(&self.socket_path)?;
+        let use_jailer = self.fc_config.jailer_path.is_some();
+
+        // When using jailer, the socket path inside the chroot is just the filename,
+        // but on the host it lives at <chroot_base>/firecracker/<vm_id>/root/<filename>.
+        // We pass the filename to firecracker (it runs inside chroot) and use the
+        // host-absolute path to connect from the host for MMDS injection.
+        let (fc_socket_arg, host_socket_path) = if use_jailer {
+            let sock_name = self.socket_path.file_name().unwrap().to_str().unwrap();
+            let host_path = self.jailer_root_dir().join(sock_name);
+            (sock_name.to_string(), host_path)
+        } else {
+            (path_str(&self.socket_path)?.to_string(), self.socket_path.clone())
+        };
 
         let mut child = if let Some(jailer_path) = &self.fc_config.jailer_path {
             let uid = self.fc_config.jailer_uid.expect("validated in config");
             let gid = self.fc_config.jailer_gid.expect("validated in config");
+            let config_name = self.config_path.file_name().unwrap().to_str().unwrap();
             tracing::info!(
                 vm_id = %self.vm_id,
                 jailer = %jailer_path,
@@ -530,20 +624,21 @@ impl MicroVm {
                 .arg("--gid").arg(gid.to_string())
                 .arg("--chroot-base-dir").arg(&self.fc_config.jailer_chroot_base)
                 .arg("--")
-                .arg("--config-file").arg(&self.config_path)
-                .arg("--api-sock").arg(socket)
+                .arg("--config-file").arg(config_name)
+                .arg("--api-sock").arg(&fc_socket_arg)
                 .spawn()
                 .context("spawning firecracker via jailer")?
         } else {
             Command::new(&self.fc_config.binary_path)
                 .arg("--config-file").arg(&self.config_path)
-                .arg("--api-sock").arg(socket)
+                .arg("--api-sock").arg(&fc_socket_arg)
                 .spawn()
                 .context("spawning firecracker")?
         };
 
-        // Inject MMDS metadata while the VM is booting
-        if let Err(e) = self.put_mmds(env_content).await {
+        // Inject MMDS metadata while the VM is booting.
+        // Use the host-accessible socket path for the connection.
+        if let Err(e) = self.put_mmds_at(&host_socket_path, env_content).await {
             tracing::error!(vm_id = %self.vm_id, error = %e, "MMDS injection failed, killing VM");
             let _ = child.kill().await;
             return Err(e);
@@ -600,11 +695,13 @@ impl MicroVm {
 
     async fn prepare_and_run(&self, env_content: &str) -> anyhow::Result<()> {
         let mmds = self.use_mmds();
+        let use_jailer = self.fc_config.jailer_path.is_some();
         tracing::info!(
             vm_id = %self.vm_id,
             job_id = self.job_id,
             slot = self.slot,
             secret_injection = if mmds { "mmds" } else { "mount" },
+            jailer = use_jailer,
             "preparing VM"
         );
 
@@ -619,11 +716,17 @@ impl MicroVm {
         }
 
         self.create_tap().await?;
-        self.write_vm_config().await?;
 
-        // Pre-create log file so Firecracker can open it
-        tokio::fs::write(&self.log_path, "").await
-            .context("creating log file")?;
+        if use_jailer {
+            // Set up jailer chroot with kernel, rootfs, config, and log
+            // (write_vm_config is called inside setup_jailer_chroot)
+            self.setup_jailer_chroot().await?;
+        } else {
+            self.write_vm_config().await?;
+            // Pre-create log file so Firecracker can open it
+            tokio::fs::write(&self.log_path, "").await
+                .context("creating log file")?;
+        }
 
         // Spawn VSOCK listener before VM starts (if enabled)
         let vsock_handle = if self.fc_config.vsock_enabled {
