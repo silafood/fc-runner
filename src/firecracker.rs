@@ -387,20 +387,38 @@ impl MicroVm {
     }
 
     /// PUT MMDS metadata via the Firecracker API socket.
+    ///
+    /// The env_content is parsed as KEY=VALUE lines and placed under a
+    /// "fc-runner" namespace for the guest agent to read via MMDS V2.
     async fn put_mmds(&self, env_content: &str) -> anyhow::Result<()> {
         use http_body_util::Full;
         use hyper::body::Bytes;
         use hyper::Request;
         use hyper_util::rt::TokioIo;
 
-        // Parse env_content (KEY=VALUE lines) into a JSON object
-        let mut metadata = serde_json::Map::new();
+        // Parse env_content (KEY=VALUE lines) into a structured object
+        let mut inner = serde_json::Map::new();
         for line in env_content.lines() {
             if let Some((key, value)) = line.split_once('=') {
                 let key = key.trim().to_lowercase();
-                metadata.insert(key, serde_json::Value::String(value.trim().to_string()));
+                let value = value.trim();
+                // Parse booleans
+                if value == "true" || value == "false" {
+                    inner.insert(
+                        key,
+                        serde_json::Value::Bool(value == "true"),
+                    );
+                } else {
+                    inner.insert(key, serde_json::Value::String(value.to_string()));
+                }
             }
         }
+        // Wrap under "fc-runner" namespace for the guest agent
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            "fc-runner".to_string(),
+            serde_json::Value::Object(inner),
+        );
         let body_json = serde_json::to_string(&serde_json::Value::Object(metadata))
             .context("serializing MMDS metadata")?;
 
