@@ -127,13 +127,14 @@ impl MicroVm {
         let status = Command::new("cp")
             .args([
                 "--reflink=auto",
+                "--sparse=always",
                 &self.fc_config.rootfs_golden,
                 path_str(&self.rootfs_path)?,
             ])
             .status()
             .await
             .context("spawning cp")?;
-        ensure!(status.success(), "cp --reflink=auto failed");
+        ensure!(status.success(), "cp --reflink=auto --sparse=always failed");
         Ok(())
     }
 
