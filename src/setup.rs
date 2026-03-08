@@ -436,10 +436,10 @@ async fn ensure_golden_rootfs(rootfs_path: &str, cloud_img_url: &str, network: &
             output.flush()?;
             tracing::info!("ext4 partition extracted");
 
-            // Expand to 4GB
+            // Expand to 6GB (need space for cargo, build tools, etc.)
             let file = std::fs::OpenOptions::new().write(true).open(&rootfs_out)?;
-            file.set_len(4 * 1024 * 1024 * 1024)?;
-            tracing::info!("rootfs expanded to 4 GiB");
+            file.set_len(6 * 1024 * 1024 * 1024)?;
+            tracing::info!("rootfs expanded to 6 GiB");
 
             Ok(())
         })
@@ -526,19 +526,43 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
     let _ = tokio::fs::remove_file(&resolv_path).await;
     tokio::fs::write(&resolv_path, "nameserver 8.8.8.8\nnameserver 1.1.1.1\n").await?;
 
-    // ── Install missing packages ────────────────────────────────────
-    tracing::info!("installing runner dependencies...");
+    // ── Install packages (runner deps + build tools) ──────────────
+    tracing::info!("installing runner dependencies and build tools...");
     let status = chroot_command(mount_dir, "bash", &["-c",
             "export DEBIAN_FRONTEND=noninteractive && \
              apt-get update -q && \
              apt-get install -y --no-install-recommends \
-                 curl git jq ca-certificates sudo libicu74 iproute2 systemd-resolved && \
+                 curl git jq ca-certificates sudo libicu74 iproute2 systemd-resolved \
+                 build-essential pkg-config libssl-dev \
+                 gcc g++ make cmake \
+                 python3 python3-pip python3-venv \
+                 nodejs npm \
+                 docker.io containerd \
+                 wget tar gzip xz-utils \
+                 zip bzip2 \
+                 libffi-dev zlib1g-dev \
+                 net-tools dnsutils iputils-ping \
+                 locales && \
              apt-get clean && \
              rm -rf /var/lib/apt/lists/*"])
         .status()
         .await
         .context("installing packages in chroot")?;
     ensure!(status.success(), "apt-get install failed");
+
+    // ── Install Rust toolchain ──────────────────────────────────────
+    tracing::info!("installing Rust toolchain...");
+    let status = chroot_command(mount_dir, "bash", &["-c",
+            "su - runner -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable' && \
+             ln -sf /home/runner/.cargo/bin/cargo /usr/local/bin/cargo && \
+             ln -sf /home/runner/.cargo/bin/rustc /usr/local/bin/rustc && \
+             ln -sf /home/runner/.cargo/bin/rustup /usr/local/bin/rustup"])
+        .status()
+        .await
+        .context("installing Rust toolchain in chroot")?;
+    if !status.success() {
+        tracing::warn!("Rust toolchain installation failed — CI jobs needing cargo will not work");
+    }
 
     // Ensure /var/tmp exists (systemd-resolved needs it for PrivateTmp namespace)
     let var_tmp = format!("{}/var/tmp", mount_dir);
@@ -650,6 +674,10 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
     ensure!(status.success(), "chown failed");
 
     // Write entrypoint (supports JIT and registration modes)
+    // Uses reboot -f (not poweroff -f) because Firecracker has no ACPI —
+    // poweroff halts the CPU in a loop without triggering KVM_EXIT_SHUTDOWN.
+    // reboot -f with reboot=k boot arg triggers keyboard controller reset
+    // which Firecracker intercepts as KVM_EXIT_SHUTDOWN for a clean VMM exit.
     tokio::fs::write(
         format!("{}/entrypoint.sh", mount_dir),
         r#"#!/bin/bash
@@ -661,7 +689,7 @@ echo "=== fc-runner entrypoint $(date) ==="
 if [ ! -f /etc/fc-runner-env ]; then
     echo "ERROR: /etc/fc-runner-env not found"
     sleep 3
-    poweroff -f
+    reboot -f
 fi
 
 source /etc/fc-runner-env
@@ -680,6 +708,9 @@ for i in $(seq 1 30); do
 done
 
 cd /home/runner
+
+# Source Rust environment for CI jobs
+export PATH="/home/runner/.cargo/bin:$PATH"
 
 if [ "${RUNNER_MODE:-jit}" = "jit" ]; then
     echo "Starting runner (JIT mode)..."
@@ -700,7 +731,7 @@ else
 fi
 
 echo "Runner finished, shutting down"
-poweroff -f
+reboot -f
 "#,
     )
     .await?;
