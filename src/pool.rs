@@ -1,5 +1,7 @@
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use serde::Serialize;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -8,6 +10,18 @@ use crate::config::{AppConfig, PoolConfig};
 use crate::firecracker::MicroVm;
 use crate::github::GitHubClient;
 
+/// Runtime status of a pool, returned by the management API.
+#[derive(Clone, Serialize)]
+pub struct PoolStatus {
+    pub name: String,
+    pub repos: Vec<String>,
+    pub min_ready: usize,
+    pub max_ready: usize,
+    pub active: usize,
+    pub idle_slots: usize,
+    pub paused: bool,
+}
+
 /// Manages a named pool of warm VMs for a set of repos.
 pub struct PoolManager {
     pub pool_config: PoolConfig,
@@ -15,7 +29,12 @@ pub struct PoolManager {
     github: Arc<GitHubClient>,
     cancel: CancellationToken,
     slot_pool: Arc<Mutex<Vec<usize>>>,
-    active_count: Arc<Mutex<usize>>,
+    active_count: Arc<AtomicUsize>,
+    paused: Arc<AtomicBool>,
+    /// Runtime-adjustable min_ready
+    min_ready: Arc<AtomicUsize>,
+    /// Runtime-adjustable max_ready
+    max_ready: Arc<AtomicUsize>,
 }
 
 impl PoolManager {
@@ -26,20 +45,75 @@ impl PoolManager {
         cancel: CancellationToken,
         slots: Vec<usize>,
     ) -> Self {
+        let min_ready = pool_config.min_ready;
+        let max_ready = pool_config.max_ready;
         Self {
             pool_config,
             config,
             github,
             cancel,
             slot_pool: Arc::new(Mutex::new(slots)),
-            active_count: Arc::new(Mutex::new(0)),
+            active_count: Arc::new(AtomicUsize::new(0)),
+            paused: Arc::new(AtomicBool::new(false)),
+            min_ready: Arc::new(AtomicUsize::new(min_ready)),
+            max_ready: Arc::new(AtomicUsize::new(max_ready)),
         }
     }
+
+    // ── Runtime management methods ──────────────────────────────────
+
+    /// Pause the pool — stop creating new VMs.
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::Relaxed);
+        tracing::info!(pool = %self.pool_config.name, "pool paused");
+    }
+
+    /// Resume a paused pool.
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::Relaxed);
+        tracing::info!(pool = %self.pool_config.name, "pool resumed");
+    }
+
+    /// Check if the pool is paused.
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    /// Scale the pool by adjusting min_ready and/or max_ready at runtime.
+    pub fn scale(&self, new_min: Option<usize>, new_max: Option<usize>) {
+        if let Some(min) = new_min {
+            self.min_ready.store(min, Ordering::Relaxed);
+        }
+        if let Some(max) = new_max {
+            self.max_ready.store(max, Ordering::Relaxed);
+        }
+        tracing::info!(
+            pool = %self.pool_config.name,
+            min_ready = self.min_ready.load(Ordering::Relaxed),
+            max_ready = self.max_ready.load(Ordering::Relaxed),
+            "pool scaled"
+        );
+    }
+
+    /// Get the current pool status.
+    pub async fn status(&self) -> PoolStatus {
+        PoolStatus {
+            name: self.pool_config.name.clone(),
+            repos: self.pool_config.repos.clone(),
+            min_ready: self.min_ready.load(Ordering::Relaxed),
+            max_ready: self.max_ready.load(Ordering::Relaxed),
+            active: self.active_count.load(Ordering::Relaxed),
+            idle_slots: self.slot_pool.lock().await.len(),
+            paused: self.is_paused(),
+        }
+    }
+
+    // ── Pool lifecycle ──────────────────────────────────────────────
 
     /// Run the pool, maintaining min_ready idle VMs at all times.
     pub async fn run(&self) -> anyhow::Result<()> {
         let pool_name = &self.pool_config.name;
-        let min_ready = self.pool_config.min_ready;
+        let min_ready = self.min_ready.load(Ordering::Relaxed);
         let repos = &self.pool_config.repos;
 
         if repos.is_empty() {
@@ -49,12 +123,14 @@ impl PoolManager {
         tracing::info!(
             pool = %pool_name,
             min_ready,
-            max_ready = self.pool_config.max_ready,
+            max_ready = self.max_ready.load(Ordering::Relaxed),
             repos = ?repos,
             "starting pool manager"
         );
 
-        let (done_tx, mut done_rx) = mpsc::channel::<(usize, String)>(self.pool_config.max_ready * 2);
+        let (done_tx, mut done_rx) = mpsc::channel::<(usize, String)>(
+            self.max_ready.load(Ordering::Relaxed) * 2,
+        );
 
         // Spawn initial pool — distribute across repos round-robin
         for i in 0..min_ready {
@@ -89,9 +165,16 @@ impl PoolManager {
                         break;
                     }
 
-                    // Check if we need a replacement (stay at min_ready)
-                    let active = *self.active_count.lock().await;
-                    if active >= self.pool_config.max_ready {
+                    // Skip spawning replacements if paused
+                    if self.is_paused() {
+                        tracing::debug!(pool = %pool_name, "pool is paused, not spawning replacement");
+                        continue;
+                    }
+
+                    // Check if we need a replacement
+                    let active = self.active_count.load(Ordering::Relaxed);
+                    let max_ready = self.max_ready.load(Ordering::Relaxed);
+                    if active >= max_ready {
                         tracing::debug!(pool = %pool_name, active, "at max_ready, not spawning replacement");
                         continue;
                     }
@@ -129,7 +212,7 @@ impl PoolManager {
         let mem_override = self.pool_config.mem_size_mib;
 
         tokio::spawn(async move {
-            *active_count.lock().await += 1;
+            active_count.fetch_add(1, Ordering::Relaxed);
             tracing::info!(pool = %pool_name, slot, repo = %repo, "starting pool VM");
 
             let result = run_pool_vm(
@@ -153,7 +236,7 @@ impl PoolManager {
                 }
             }
 
-            *active_count.lock().await -= 1;
+            active_count.fetch_sub(1, Ordering::Relaxed);
             let _ = done_tx.send((slot, repo)).await;
         });
     }
@@ -161,7 +244,7 @@ impl PoolManager {
     async fn wait_for_active(&self, max_wait: Duration) {
         let deadline = tokio::time::Instant::now() + max_wait;
         loop {
-            let count = *self.active_count.lock().await;
+            let count = self.active_count.load(Ordering::Relaxed);
             if count == 0 {
                 tracing::info!(pool = %self.pool_config.name, "all pool VMs completed");
                 break;
@@ -174,8 +257,8 @@ impl PoolManager {
         }
     }
 
-    pub async fn active_count(&self) -> usize {
-        *self.active_count.lock().await
+    pub fn get_active_count(&self) -> usize {
+        self.active_count.load(Ordering::Relaxed)
     }
 
     pub async fn available_slots(&self) -> usize {

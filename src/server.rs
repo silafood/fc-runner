@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -5,13 +6,14 @@ use std::time::Instant;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{delete, get};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::config::ServerConfig;
 use crate::metrics;
+use crate::pool::PoolManager;
 
 // ── Shared state ───────────────────────────────────────────────────────
 
@@ -32,6 +34,8 @@ pub struct ServerState {
     pub api_key: Option<String>,
     pub active_vms: Mutex<Vec<VmInfo>>,
     pub mode: Mutex<String>,
+    /// Pool managers indexed by name, set when running in pool mode.
+    pub pools: Mutex<HashMap<String, Arc<PoolManager>>>,
 }
 
 impl ServerState {
@@ -42,6 +46,7 @@ impl ServerState {
             api_key: server_config.api_key.clone(),
             active_vms: Mutex::new(Vec::new()),
             mode: Mutex::new("starting".to_string()),
+            pools: Mutex::new(HashMap::new()),
         }
     }
 
@@ -56,6 +61,11 @@ impl ServerState {
     pub async fn set_mode(&self, mode: &str) {
         *self.mode.lock().await = mode.to_string();
     }
+
+    /// Register pool managers so the API can access them.
+    pub async fn set_pools(&self, pools: HashMap<String, Arc<PoolManager>>) {
+        *self.pools.lock().await = pools;
+    }
 }
 
 // ── Server ─────────────────────────────────────────────────────────────
@@ -67,6 +77,12 @@ pub async fn start(listen_addr: SocketAddr, state: Arc<ServerState>) -> anyhow::
         .route("/api/v1/status", get(status_handler))
         .route("/api/v1/vms", get(list_vms_handler))
         .route("/api/v1/vms/{id}", delete(delete_vm_handler))
+        // Pool management endpoints
+        .route("/api/v1/pools", get(list_pools_handler))
+        .route("/api/v1/pools/{name}", get(get_pool_handler))
+        .route("/api/v1/pools/{name}/scale", post(scale_pool_handler))
+        .route("/api/v1/pools/{name}/pause", post(pause_pool_handler))
+        .route("/api/v1/pools/{name}/resume", post(resume_pool_handler))
         .with_state(state);
 
     tracing::info!(%listen_addr, "starting management HTTP server");
@@ -94,10 +110,7 @@ fn check_auth(state: &ServerState, headers: &HeaderMap) -> Result<(), StatusCode
 
 // ── Handlers ───────────────────────────────────────────────────────────
 
-async fn metrics_handler(
-    State(state): State<Arc<ServerState>>,
-) -> impl IntoResponse {
-    // Update uptime before gathering
+async fn metrics_handler(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
     metrics::UPTIME_SECONDS
         .with_label_values(&[&state.version])
         .set(state.start_time.elapsed().as_secs_f64());
@@ -158,12 +171,103 @@ async fn delete_vm_handler(
     }
     drop(vms);
 
-    // Note: Actually killing the VM process requires integration with the
-    // orchestrator. For now, we log the request. Full kill support will be
-    // added when the pool manager tracks child process handles.
     tracing::warn!(vm_id = %vm_id, "VM kill requested via management API (not yet implemented)");
 
     Ok(Json(DeleteVmResponse {
         message: format!("VM {} kill requested", vm_id),
+    }))
+}
+
+// ── Pool management handlers ──────────────────────────────────────────
+
+async fn list_pools_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, StatusCode> {
+    check_auth(&state, &headers)?;
+
+    let pools = state.pools.lock().await;
+    let mut statuses = Vec::new();
+    for pool in pools.values() {
+        statuses.push(pool.status().await);
+    }
+    // Sort by name for consistent output
+    statuses.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(Json(statuses))
+}
+
+async fn get_pool_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    check_auth(&state, &headers)?;
+
+    let pools = state.pools.lock().await;
+    let pool = pools.get(&name).ok_or(StatusCode::NOT_FOUND)?;
+    let status = pool.status().await;
+    Ok(Json(status))
+}
+
+#[derive(Deserialize)]
+struct ScaleRequest {
+    min_ready: Option<usize>,
+    max_ready: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct PoolActionResponse {
+    message: String,
+}
+
+async fn scale_pool_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(body): Json<ScaleRequest>,
+) -> Result<impl IntoResponse, StatusCode> {
+    check_auth(&state, &headers)?;
+
+    let pools = state.pools.lock().await;
+    let pool = pools.get(&name).ok_or(StatusCode::NOT_FOUND)?;
+    pool.scale(body.min_ready, body.max_ready);
+
+    Ok(Json(PoolActionResponse {
+        message: format!(
+            "pool '{}' scaled (min_ready: {:?}, max_ready: {:?})",
+            name, body.min_ready, body.max_ready
+        ),
+    }))
+}
+
+async fn pause_pool_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    check_auth(&state, &headers)?;
+
+    let pools = state.pools.lock().await;
+    let pool = pools.get(&name).ok_or(StatusCode::NOT_FOUND)?;
+    pool.pause();
+
+    Ok(Json(PoolActionResponse {
+        message: format!("pool '{}' paused", name),
+    }))
+}
+
+async fn resume_pool_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    check_auth(&state, &headers)?;
+
+    let pools = state.pools.lock().await;
+    let pool = pools.get(&name).ok_or(StatusCode::NOT_FOUND)?;
+    pool.resume();
+
+    Ok(Json(PoolActionResponse {
+        message: format!("pool '{}' resumed", name),
     }))
 }
