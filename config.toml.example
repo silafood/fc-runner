@@ -41,7 +41,7 @@ mem_size_mib = 2048
 # jailer_path = "/usr/local/bin/jailer"
 # jailer_uid = 1000
 # jailer_gid = 1000
-# jailer_chroot_base = "/srv/jailer"
+# jailer_chroot_base = "/var/lib/fc-runner/jailer"
 # Cloud image URL for golden rootfs build (default: Ubuntu 24.04 minimal)
 # cloud_img_url = "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img"
 # Secret injection method: "mmds" (default) or "mount" (legacy loop-mount)

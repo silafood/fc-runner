@@ -152,7 +152,7 @@ pub struct FirecrackerConfig {
     pub jailer_uid: Option<u32>,
     /// GID the jailer drops to (required when jailer_path is set)
     pub jailer_gid: Option<u32>,
-    /// Chroot base directory for jailer (default: /srv/jailer)
+    /// Chroot base directory for jailer (default: /var/lib/fc-runner/jailer)
     #[serde(default = "default_jailer_chroot_base")]
     pub jailer_chroot_base: String,
     /// URL for the cloud image used to build the golden rootfs (optional, has default)
@@ -250,7 +250,7 @@ fn default_log_level() -> String {
 }
 
 fn default_jailer_chroot_base() -> String {
-    "/srv/jailer".into()
+    "/var/lib/fc-runner/jailer".into()
 }
 
 
