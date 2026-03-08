@@ -68,6 +68,8 @@ impl Orchestrator {
             "orchestrator starting (pool mode)"
         );
 
+        self.server_state.set_mode("pools").await;
+
         // Distribute slots across pools proportionally
         let total_slots: usize = pools.iter().map(|p| p.max_ready).sum();
         if total_slots > self.config.runner.max_concurrent_jobs {
@@ -79,7 +81,8 @@ impl Orchestrator {
         }
 
         let mut all_slots: Vec<usize> = (0..self.config.runner.max_concurrent_jobs).collect();
-        let mut pool_managers = Vec::new();
+        let mut pool_managers: std::collections::HashMap<String, Arc<PoolManager>> =
+            std::collections::HashMap::new();
 
         for pool_config in pools {
             let slots_for_pool: Vec<usize> = (0..pool_config.max_ready)
@@ -98,22 +101,27 @@ impl Orchestrator {
                 "allocating slots to pool"
             );
 
-            let manager = PoolManager::new(
+            let manager = Arc::new(PoolManager::new(
                 pool_config.clone(),
                 self.config.clone(),
                 self.github.clone(),
                 self.cancel.clone(),
                 slots_for_pool,
-            );
-            pool_managers.push(manager);
+            ));
+            pool_managers.insert(pool_config.name.clone(), manager);
         }
+
+        // Register pool managers with server state for API access
+        self.server_state.set_pools(pool_managers.clone()).await;
 
         // Run all pool managers concurrently
         let mut handles = Vec::new();
-        for manager in pool_managers {
+        for (name, manager) in &pool_managers {
+            let name = name.clone();
+            let manager = manager.clone();
             let handle = tokio::spawn(async move {
                 if let Err(e) = manager.run().await {
-                    tracing::error!(pool = %manager.pool_config.name, error = %e, "pool manager failed");
+                    tracing::error!(pool = %name, error = %e, "pool manager failed");
                 }
             });
             handles.push(handle);
