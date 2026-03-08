@@ -38,7 +38,6 @@ GitHub Actions                fc-runner                    Firecracker
 - **Runtime pool management** — pause, resume, and scale pools at runtime via REST API or CLI
 - **VSOCK guest agent** — host-guest communication via virtio-vsock with NDJSON protocol
 - **Secret protection** — GitHub PAT stored via `secrecy::SecretString`, zeroized on drop, redacted in all logs
-- **AppArmor** — ships restrictive profiles for both `firecracker` and `fc-runner` binaries
 - **Concurrency control** — bounded by `max_concurrent_jobs` via `tokio::sync::Semaphore` (default: 4)
 - **VM timeout** — configurable per-VM execution timeout (default: 3600s) kills hung jobs
 - **Graceful shutdown** — SIGTERM/SIGINT handlers stop the poll loop and wait up to 5 min for active VMs
@@ -56,7 +55,7 @@ GitHub Actions                fc-runner                    Firecracker
 | Guest networking | virtio-net over per-VM TAP (pure Rust rtnetlink) + iptables NAT |
 | CI platform | GitHub Actions REST API |
 | Host init | systemd |
-| Security | AppArmor, secrecy, Firecracker jailer (optional) |
+| Security | Firecracker jailer (chroot + seccomp-BPF), secrecy |
 
 ## Prerequisites
 
@@ -95,7 +94,7 @@ cargo build --release
 sudo bash install.sh
 ```
 
-This installs system packages, Firecracker v1.14.2, AppArmor profiles, config templates, and the systemd service. Kernel, rootfs, and networking are handled automatically by fc-runner at startup.
+This installs system packages, Firecracker v1.14.2 + jailer, config templates, and the systemd service. Kernel, rootfs, and networking are handled automatically by fc-runner at startup.
 
 ### 3. Configure
 
@@ -207,7 +206,7 @@ fc-runner/
 │   ├── firecracker.rs    # MicroVm lifecycle: prepare → run → cleanup (MMDS + mount modes)
 │   ├── netlink.rs        # Pure-Rust TAP device management (rtnetlink + nix ioctl)
 │   ├── orchestrator.rs   # Poll/dispatch loop with dedup (JIT, warm pool, named pools)
-│   ├── setup.rs          # KVM checks, kernel/rootfs provisioning, network, AppArmor
+│   ├── setup.rs          # KVM checks, kernel/rootfs provisioning, network
 │   ├── metrics.rs        # Prometheus metrics registry and counters
 │   ├── server.rs         # HTTP server: /metrics, /healthz, management + pool API
 │   ├── pool.rs           # Named VM pool manager with runtime pause/resume/scale
@@ -217,9 +216,6 @@ fc-runner/
 │   └── microvm-kernel-ci-*.config   # Firecracker kernel configs (x86_64 + aarch64)
 ├── .github/workflows/
 │   └── release.yml       # CI: build binary + kernel + rootfs, publish release
-├── apparmor/
-│   ├── usr.local.bin.firecracker   # Restrictive profile for Firecracker VMM
-│   └── usr.local.bin.fc-runner     # Restrictive profile for orchestrator
 ├── docs/
 │   ├── architecture.md   # System design and module overview
 │   ├── setup.md          # Installation guide
@@ -244,17 +240,10 @@ fc-runner/
 | Token injection | MMDS metadata service (default) or written to ext4 image file — never kernel cmdline or `/proc`-visible env vars |
 | Path validation | Symlink checks on all critical paths at config load time |
 | Mount safety | TOCTOU protection via `mountpoint -q` verification; umount retry with lazy fallback |
-| Filesystem | AppArmor profiles restrict both binaries to minimum required paths |
-| Network | AppArmor `net_admin` capability scoped; Firecracker has no network access in its profile |
 | Rate limiting | Parses `x-ratelimit-remaining` headers; warns at < 100, backs off at < 10 |
-| Process | Firecracker `jailer` for chroot + seccomp-BPF + UID/GID drop (enable via `jailer_path` config) |
+| Process | Firecracker `jailer` for chroot + seccomp-BPF + UID/GID drop (recommended; enable via `jailer_path` config) |
 | Host hardening | systemd: `NoNewPrivileges`, `ProtectSystem=strict`, `MemoryDenyWriteExecute`, restricted capabilities |
 | Cleanup | All VM artifacts deleted after every job, even on failure |
-
-**AppArmor profiles:**
-
-- `usr.local.bin.firecracker` — read-only kernel, r/w only per-VM files, KVM + TAP access, deny-all default
-- `usr.local.bin.fc-runner` — read-only config, r/w work dir, mount capability, can only spawn firecracker/jailer
 
 ## Networking
 
@@ -278,7 +267,6 @@ Each VM gets its own TAP device with a unique subnet. TAP creation uses pure Rus
 | `mount: /dev/loop*: failed` | `sudo modprobe loop max_loop=64` |
 | GitHub API 422 on JIT config | Check `runner_group_id` and PAT `repo` scope |
 | Rootfs runs out of space | Delete golden rootfs and restart to rebuild |
-| AppArmor `DENIED` | Check `dmesg \| grep DENIED`, update profile, `apparmor_parser -r` |
 | Guest VM emergency mode | Delete golden rootfs and restart (fstab/EFI mount fix) |
 
 See [docs/troubleshooting.md](docs/troubleshooting.md) for detailed diagnostics.
@@ -323,9 +311,6 @@ curl -s http://localhost:9090/api/v1/pools | jq .
 
 # Health check
 curl -s http://localhost:9090/healthz
-
-# Check AppArmor enforcement
-sudo aa-status | grep -E '(firecracker|fc-runner)'
 
 # Force rebuild golden rootfs
 sudo rm /opt/fc-runner/runner-rootfs-golden.ext4

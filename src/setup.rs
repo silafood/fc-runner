@@ -90,7 +90,7 @@ async fn lazy_umount(target: &str) -> anyhow::Result<()> {
 
 /// Run a command inside a chroot.
 /// Uses the external `chroot` binary — the chroot(2) syscall requires
-/// CAP_SYS_CHROOT which AppArmor denies for fc-runner.
+/// CAP_SYS_CHROOT.
 fn chroot_command(root: &str, program: &str, args: &[&str]) -> Command {
     let mut cmd = Command::new("chroot");
     cmd.arg(root).arg(program).args(args);
@@ -111,7 +111,7 @@ const RUNNER_VERSION: &str = "2.332.0";
 const DEFAULT_CLOUD_IMG_URL: &str =
     "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img";
 
-/// Ensures all VM prerequisites are in place: KVM, kernel, rootfs, network, and AppArmor.
+/// Ensures all VM prerequisites are in place: KVM, kernel, rootfs, and network.
 pub async fn ensure_vm_assets(config: &mut AppConfig) -> anyhow::Result<()> {
     preflight_kvm()?;
     resolve_allowed_networks(&mut config.network, config.github.token.as_ref()).await?;
@@ -119,7 +119,6 @@ pub async fn ensure_vm_assets(config: &mut AppConfig) -> anyhow::Result<()> {
     let cloud_img_url = config.firecracker.cloud_img_url.as_deref().unwrap_or(DEFAULT_CLOUD_IMG_URL);
     ensure_golden_rootfs(&config.firecracker.rootfs_golden, cloud_img_url, &config.network).await?;
     ensure_network(&config.network).await?;
-    ensure_apparmor(&config.firecracker.binary_path).await?;
     Ok(())
 }
 
@@ -434,17 +433,17 @@ async fn ensure_golden_rootfs(rootfs_path: &str, cloud_img_url: &str, network: &
     let _ = tokio::fs::remove_file(&raw_img).await;
 
     // Run e2fsck + resize2fs to expand the filesystem to fill the 4GB image.
-    // These may fail if AppArmor blocks them — that's OK, the original partition
+    // These may fail if not installed — that's OK, the original partition
     // (~2GB) has enough room for the runner install. We log a warning and continue.
     match run_e2fs_tool("e2fsck", &["-f", "-y", rootfs_path]).await {
         Ok(s) if s.success() => tracing::info!("e2fsck passed"),
         Ok(s) => tracing::warn!("e2fsck exited with {}", s),
-        Err(e) => tracing::warn!("e2fsck skipped (AppArmor or not found): {}", e),
+        Err(e) => tracing::warn!("e2fsck skipped (not found): {}", e),
     }
     match run_e2fs_tool("resize2fs", &[rootfs_path]).await {
         Ok(s) if s.success() => tracing::info!("resize2fs expanded filesystem to fill image"),
         Ok(s) => tracing::warn!("resize2fs exited with {}", s),
-        Err(e) => tracing::warn!("resize2fs skipped (AppArmor or not found): {}", e),
+        Err(e) => tracing::warn!("resize2fs skipped (not found): {}", e),
     }
 
     // ── Step 4: Mount and customize ─────────────────────────────────
@@ -949,97 +948,6 @@ async fn add_iptables_rule_if_missing(add_args: &[&str], check_args: &[&str]) ->
         .await
         .with_context(|| format!("running iptables {:?}", add_args))?;
     ensure!(status.success(), "iptables rule failed: {:?}", add_args);
-    Ok(())
-}
-
-/// Loads and enforces AppArmor profiles for fc-runner and Firecracker if AppArmor is available.
-async fn ensure_apparmor(firecracker_binary: &str) -> anyhow::Result<()> {
-    // Check if AppArmor is enabled on this system
-    if !Path::new("/sys/module/apparmor").exists() {
-        tracing::info!("AppArmor not available on this system, skipping profile enforcement");
-        return Ok(());
-    }
-
-    // Check if aa-enforce is installed
-    let which = Command::new("which")
-        .arg("aa-enforce")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await;
-
-    if !which.map(|s| s.success()).unwrap_or(false) {
-        tracing::warn!(
-            "apparmor-utils not installed, skipping profile enforcement. \
-             Install with: sudo apt install -y apparmor-utils"
-        );
-        return Ok(());
-    }
-
-    let profiles = [
-        ("/etc/apparmor.d/usr.local.bin.firecracker", firecracker_binary),
-        ("/etc/apparmor.d/usr.local.bin.fc-runner", "/usr/local/bin/fc-runner"),
-    ];
-
-    for (profile_path, binary) in &profiles {
-        if !Path::new(profile_path).exists() {
-            tracing::info!(
-                profile = profile_path,
-                "AppArmor profile not installed, skipping. \
-                 Copy from apparmor/ directory to /etc/apparmor.d/"
-            );
-            continue;
-        }
-
-        // Check if already enforced via aa-status
-        let output = Command::new("aa-status")
-            .arg("--json")
-            .output()
-            .await;
-
-        let already_enforced = output
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.contains(binary))
-            .unwrap_or(false);
-
-        if already_enforced {
-            tracing::info!(profile = profile_path, "AppArmor profile already loaded");
-            continue;
-        }
-
-        // Load and enforce the profile
-        tracing::info!(profile = profile_path, "loading AppArmor profile");
-        let status = Command::new("apparmor_parser")
-            .args(["-r", "-W", profile_path])
-            .status()
-            .await
-            .context("loading AppArmor profile")?;
-
-        if !status.success() {
-            tracing::warn!(
-                profile = profile_path,
-                "failed to load AppArmor profile, continuing without enforcement"
-            );
-            continue;
-        }
-
-        let status = Command::new("aa-enforce")
-            .arg(profile_path)
-            .status()
-            .await
-            .context("enforcing AppArmor profile")?;
-
-        if status.success() {
-            tracing::info!(profile = profile_path, "AppArmor profile enforced");
-        } else {
-            tracing::warn!(
-                profile = profile_path,
-                "failed to enforce AppArmor profile, continuing"
-            );
-        }
-    }
-
     Ok(())
 }
 

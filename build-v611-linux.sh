@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build golden rootfs using Ubuntu minimal cloud image + Linux 6.1.102 kernel.
-# Run this manually with sudo BEFORE starting fc-runner to avoid AppArmor issues.
+# Run this manually with sudo BEFORE starting fc-runner.
 # ~1 minute build time.
 set -euo pipefail
 
