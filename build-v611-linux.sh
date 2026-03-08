@@ -62,7 +62,7 @@ losetup -d "$LOOP"
 rm -f "$RAWIMG"
 
 # Expand to 4GB to ensure it's larger than the source partition
-truncate -s 4G "$ROOTFS"
+truncate -s 6G "$ROOTFS"
 e2fsck -f -y "$ROOTFS" || true
 resize2fs "$ROOTFS"
 
@@ -98,14 +98,32 @@ rm -f "$MNT/etc/resolv.conf"
 printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\n' > "$MNT/etc/resolv.conf"
 
 # ── Step 5: Install only what's missing ──────────────────────────────
-echo "[5/8] Installing runner dependencies..."
+echo "[5/8] Installing runner dependencies and build tools..."
 chroot "$MNT" bash -c "
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -q
     apt-get install -y --no-install-recommends \
-        curl git jq ca-certificates sudo libicu74 iproute2 systemd-resolved
+        curl git jq ca-certificates sudo libicu74 iproute2 systemd-resolved \
+        build-essential pkg-config libssl-dev \
+        gcc g++ make cmake \
+        python3 python3-pip python3-venv \
+        nodejs npm \
+        docker.io containerd \
+        wget tar gzip xz-utils \
+        zip bzip2 \
+        libffi-dev zlib1g-dev \
+        net-tools dnsutils iputils-ping \
+        locales
     apt-get clean
     rm -rf /var/lib/apt/lists/*
+"
+
+echo "[5b/8] Installing Rust toolchain..."
+chroot "$MNT" bash -c "
+    su - runner -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable'
+    ln -sf /home/runner/.cargo/bin/cargo /usr/local/bin/cargo
+    ln -sf /home/runner/.cargo/bin/rustc /usr/local/bin/rustc
+    ln -sf /home/runner/.cargo/bin/rustup /usr/local/bin/rustup
 "
 
 # Ensure /var/tmp exists (systemd-resolved needs it for PrivateTmp namespace)
