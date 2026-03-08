@@ -25,7 +25,16 @@ fc-runner supports three operating modes, selected automatically based on config
 ## Modules
 
 ### `main.rs`
-Entry point. Loads configuration, initializes structured logging via `tracing`, sets up signal handlers (SIGTERM/SIGINT) for graceful shutdown, creates the shared `ServerState`, spawns the HTTP server, and launches the orchestrator.
+Entry point with clap CLI dispatch. Parses subcommands (`server`, `agent`, `validate`, `ps`, `pools`, `logs`) and delegates to the appropriate handler. The `server` subcommand loads configuration, initializes structured logging via `tracing`, sets up signal handlers (SIGTERM/SIGINT) for graceful shutdown, creates the shared `ServerState`, spawns the HTTP server, and launches the orchestrator.
+
+### `cli.rs`
+Defines the CLI interface using `clap` derive macros. Contains the `Cli` struct, `Commands` enum (Server, Agent, Validate, Ps, Pools, Logs), and `PoolAction` enum (List, Scale, Pause, Resume). Each subcommand has typed arguments with defaults.
+
+### `api_client.rs`
+HTTP client for CLI-to-server management API communication. Used by the `ps`, `pools`, and `logs` subcommands to query the running fc-runner server. Methods include `status()`, `list_vms()`, `list_pools()`, `get_pool()`, `scale_pool()`, `pause_pool()`, and `resume_pool()`.
+
+### `agent.rs`
+Guest agent that runs inside Firecracker VMs via `fc-runner agent`. Reads MMDS V2 metadata (token acquisition via PUT, then GET `/fc-runner`), starts the GitHub Actions runner with the JIT config, sets the VM hostname, and reports state to the host via VSOCK NDJSON messages (Ready, JobStarted, JobCompleted). Optionally shuts down the VM after the runner exits. Uses conditional compilation (`#[cfg(target_os = "linux")]`) for VSOCK-dependent code.
 
 ### `config.rs`
 Parses `/etc/fc-runner/config.toml` into typed structs using `serde` + `toml`. Validates all paths exist at load time. Redacts the GitHub token in Debug output. Supports both single `repo` and multi-repo `repos` fields (merged and deduplicated via `all_repos()`).
@@ -47,7 +56,9 @@ HTTP client wrapping `reqwest`. Supports two authentication methods:
 
 The `AuthProvider` enum manages both methods. App auth generates a JWT (RS256), exchanges it for an installation access token via `POST /app/installations/{id}/access_tokens`, and caches the result in a `RwLock` with automatic refresh before expiry.
 
-All API methods accept a `repo` parameter, allowing a single client to serve multiple repositories under the same owner.
+All API methods accept a `repo` parameter, allowing a single client to serve multiple repositories under the same owner. When `github.organization` is set, the client operates in org mode — JIT configs and registration tokens are requested at the organization level instead of per-repo.
+
+**Repo-level endpoints:**
 
 | Method | Endpoint | Purpose |
 |--------|----------|---------|
@@ -56,6 +67,15 @@ All API methods accept a `repo` parameter, allowing a single client to serve mul
 | POST | `/repos/{owner}/{repo}/actions/runners/generate-jit-config` | Generate a single-use JIT runner token |
 | POST | `/repos/{owner}/{repo}/actions/runners/registration-token` | Generate a registration token (warm pool mode) |
 | DELETE | `/repos/{owner}/{repo}/actions/runners/{id}` | Remove offline runners after VM exit |
+
+**Org-level endpoints** (when `github.organization` is set):
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| POST | `/orgs/{org}/actions/runners/generate-jit-config` | Generate an org-level JIT runner token |
+| POST | `/orgs/{org}/actions/runners/registration-token` | Generate an org-level registration token |
+| GET | `/orgs/{org}/actions/runners` | List org runners (for offline cleanup) |
+| DELETE | `/orgs/{org}/actions/runners/{id}` | Remove offline org-level runners |
 
 All requests include `Authorization: Bearer <token>` and `X-GitHub-Api-Version: 2022-11-28`.
 
@@ -160,6 +180,11 @@ Axum HTTP server providing Prometheus metrics, health checks, and a management A
 | GET | `/api/v1/status` | No | JSON status (version, uptime, mode, active VM count) |
 | GET | `/api/v1/vms` | API key | List active VMs with job ID, repo, slot, start time |
 | DELETE | `/api/v1/vms/{id}` | API key | Request VM termination |
+| GET | `/api/v1/pools` | API key | List all pools with status |
+| GET | `/api/v1/pools/{name}` | API key | Get single pool detail |
+| POST | `/api/v1/pools/{name}/scale` | API key | Scale pool (body: `{"min_ready": N, "max_ready": M}`) |
+| POST | `/api/v1/pools/{name}/pause` | API key | Pause pool (stops spawning new VMs) |
+| POST | `/api/v1/pools/{name}/resume` | API key | Resume a paused pool |
 
 When `server.api_key` is configured, management endpoints require an `X-Api-Key` header. Health and metrics endpoints are always unauthenticated.
 
@@ -171,6 +196,9 @@ Named VM pool manager. Each `PoolManager` maintains a set of warm VMs for its as
 - Supports per-pool `vcpu_count` and `mem_size_mib` overrides
 - Automatically replaces VMs after they complete a job
 - Uses `mpsc` channels for slot return signaling
+- Runtime management via atomic operations: `pause()`, `resume()`, `scale()`, `status()`
+- Paused pools stop spawning new VMs but let active VMs finish
+- Pool managers are registered with `ServerState` for REST API access
 
 ### `vsock.rs`
 Host-side VSOCK listener for guest agent communication. When `vsock_enabled = true`, a listener is spawned per VM before launch and aborted on VM exit.
