@@ -716,10 +716,10 @@ export PATH="/home/runner/.cargo/bin:$PATH"
 
 if [ "${RUNNER_MODE:-jit}" = "jit" ]; then
     echo "Starting runner (JIT mode)..."
-    sudo -u runner ./run.sh --jitconfig "${RUNNER_TOKEN}"
+    sudo -E -u runner ./run.sh --jitconfig "${RUNNER_TOKEN}"
 else
     echo "Registering runner..."
-    sudo -u runner ./config.sh \
+    sudo -E -u runner ./config.sh \
         --url "${REPO_URL}" \
         --token "${RUNNER_TOKEN}" \
         --name "${RUNNER_NAME:-fc-$(hostname)}" \
@@ -729,7 +729,7 @@ else
         --disableupdate \
         --work /home/runner/_work
     echo "Starting runner (registered mode)..."
-    sudo -u runner ./run.sh
+    sudo -E -u runner ./run.sh
 fi
 
 echo "Runner finished, shutting down"
