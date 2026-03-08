@@ -39,7 +39,6 @@ fi
 # Ensure config is not world-readable (fc-runner refuses to start otherwise)
 chown root:root /etc/fc-runner/config.toml
 chmod 0600 /etc/fc-runner/config.toml
-cp vm-config.json.template /etc/fc-runner/vm-config.json.template
 
 # --- 5. Systemd service ---
 echo "[5/5] Installing systemd service..."
