@@ -148,10 +148,29 @@ async fn run_pools(action: PoolAction) -> anyhow::Result<()> {
     match action {
         PoolAction::List { endpoint } => {
             let client = api_client::ApiClient::new(&endpoint);
-            let status = client.status().await?;
-            println!("server: {} (v{}, uptime: {}s)", endpoint, status.version, status.uptime_seconds);
-            println!("mode: {}, active VMs: {}", status.mode, status.active_vms);
-            println!("\npool management endpoints will be available after pool management API is implemented");
+            let pools = client.list_pools().await?;
+
+            if pools.is_empty() {
+                println!("no pools configured");
+                return Ok(());
+            }
+
+            println!(
+                "{:<20} {:<8} {:<10} {:<10} {:<8} {:<8} {}",
+                "NAME", "PAUSED", "MIN_READY", "MAX_READY", "ACTIVE", "IDLE", "REPOS"
+            );
+            for p in &pools {
+                println!(
+                    "{:<20} {:<8} {:<10} {:<10} {:<8} {:<8} {:?}",
+                    p.name,
+                    if p.paused { "yes" } else { "no" },
+                    p.min_ready,
+                    p.max_ready,
+                    p.active,
+                    p.idle_slots,
+                    p.repos
+                );
+            }
             Ok(())
         }
         PoolAction::Scale {
@@ -160,24 +179,24 @@ async fn run_pools(action: PoolAction) -> anyhow::Result<()> {
             max_ready,
             endpoint,
         } => {
-            println!(
-                "scale pool '{}' at {} (min_ready: {:?}, max_ready: {:?}) — not yet implemented",
-                name, endpoint, min_ready, max_ready
-            );
+            if min_ready.is_none() && max_ready.is_none() {
+                anyhow::bail!("at least one of --min-ready or --max-ready must be specified");
+            }
+            let client = api_client::ApiClient::new(&endpoint);
+            let resp = client.scale_pool(&name, min_ready, max_ready).await?;
+            println!("{}", resp.message);
             Ok(())
         }
         PoolAction::Pause { name, endpoint } => {
-            println!(
-                "pause pool '{}' at {} — not yet implemented",
-                name, endpoint
-            );
+            let client = api_client::ApiClient::new(&endpoint);
+            let resp = client.pause_pool(&name).await?;
+            println!("{}", resp.message);
             Ok(())
         }
         PoolAction::Resume { name, endpoint } => {
-            println!(
-                "resume pool '{}' at {} — not yet implemented",
-                name, endpoint
-            );
+            let client = api_client::ApiClient::new(&endpoint);
+            let resp = client.resume_pool(&name).await?;
+            println!("{}", resp.message);
             Ok(())
         }
     }
