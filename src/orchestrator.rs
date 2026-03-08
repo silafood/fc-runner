@@ -50,12 +50,27 @@ impl Orchestrator {
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
+        // Clean up stale offline runners from previous fc-runner sessions
+        self.cleanup_stale_runners().await;
+
         if !self.config.pool.is_empty() {
             self.run_pools().await
         } else if self.config.runner.warm_pool_size > 0 {
             self.run_warm_pool().await
         } else {
             self.run_reactive().await
+        }
+    }
+
+    /// Remove any offline runners with the `fc-` prefix left over from previous sessions.
+    async fn cleanup_stale_runners(&self) {
+        tracing::info!("cleaning up stale offline runners from previous sessions...");
+        if self.github.is_org_mode() {
+            self.github.remove_org_offline_runners().await;
+        } else {
+            for repo in self.github.repos() {
+                self.github.remove_offline_runners(&repo).await;
+            }
         }
     }
 
