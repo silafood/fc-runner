@@ -109,10 +109,11 @@ impl GitHubConfig {
     /// Returns the deduplicated list of repos to poll.
     pub fn all_repos(&self) -> Vec<String> {
         let mut repos = self.repos.clone();
-        if let Some(ref r) = self.repo {
-            if !r.is_empty() && !repos.contains(r) {
-                repos.insert(0, r.clone());
-            }
+        if let Some(ref r) = self.repo
+            && !r.is_empty()
+            && !repos.contains(r)
+        {
+            repos.insert(0, r.clone());
         }
         repos
     }
@@ -300,14 +301,14 @@ impl Default for NetworkConfig {
 
 /// Check that a path is not a symlink (prevents symlink-based attacks).
 fn reject_symlink(label: &str, path: &Path) -> anyhow::Result<()> {
-    if let Ok(meta) = std::fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() {
-            bail!(
-                "{} is a symlink (security risk): {}",
-                label,
-                path.display()
-            );
-        }
+    if let Ok(meta) = std::fs::symlink_metadata(path)
+        && meta.file_type().is_symlink()
+    {
+        bail!(
+            "{} is a symlink (security risk): {}",
+            label,
+            path.display()
+        );
     }
     Ok(())
 }

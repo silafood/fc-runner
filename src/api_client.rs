@@ -16,6 +16,7 @@ pub struct VmInfo {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct StatusInfo {
     pub version: String,
     pub uptime_seconds: u64,
@@ -55,6 +56,7 @@ impl ApiClient {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn status(&self) -> anyhow::Result<StatusInfo> {
         let resp = self
             .client
@@ -94,6 +96,7 @@ impl ApiClient {
         resp.json().await.context("failed to parse response")
     }
 
+    #[allow(dead_code)]
     pub async fn get_pool(&self, name: &str) -> anyhow::Result<PoolStatus> {
         let resp = self
             .client

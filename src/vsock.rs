@@ -7,6 +7,7 @@ use serde::Deserialize;
 /// Guest agent message types (NDJSON protocol).
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub enum AgentMessage {
     Ready {
         #[serde(default)]
@@ -26,6 +27,7 @@ pub enum AgentMessage {
 }
 
 /// VSOCK port the guest agent connects to.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub const AGENT_PORT: u32 = 1024;
 
 /// Spawn a VSOCK listener for a given VM.
@@ -79,6 +81,7 @@ async fn listen_loop(vm_id: &str, cid: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn handle_message(vm_id: &str, msg: &AgentMessage) {
     match msg {
         AgentMessage::Ready { timestamp } => {

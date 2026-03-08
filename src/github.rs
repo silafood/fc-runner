@@ -483,6 +483,7 @@ impl GitHubClient {
     }
 
     /// Generate an org-level registration token.
+    #[allow(dead_code)]
     pub async fn generate_org_registration_token(&self) -> anyhow::Result<String> {
         metrics::GITHUB_API_CALLS.with_label_values(&["generate_org_registration_token"]).inc();
         let org_url = self.org_url().expect("org mode checked by caller");
@@ -550,10 +551,10 @@ impl GitHubClient {
                 );
                 let del_url = format!("{}/actions/runners/{}", org_url, runner.id);
                 metrics::GITHUB_API_CALLS.with_label_values(&["delete_org_runner"]).inc();
-                if let Ok(req) = self.request(reqwest::Method::DELETE, &del_url).await {
-                    if let Err(e) = req.send().await {
-                        tracing::warn!(runner_id = runner.id, error = %e, "failed to delete org runner");
-                    }
+                if let Ok(req) = self.request(reqwest::Method::DELETE, &del_url).await
+                    && let Err(e) = req.send().await
+                {
+                    tracing::warn!(runner_id = runner.id, error = %e, "failed to delete org runner");
                 }
             }
         }
