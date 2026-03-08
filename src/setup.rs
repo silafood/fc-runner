@@ -37,8 +37,6 @@ async fn mount_ext4(image: &str, target: &str, readonly: bool) -> anyhow::Result
     ensure!(status.success(), "mount -o {} {} {} failed", opts, image, target);
     Ok(())
 }
-/// Set a file as executable (replaces chmod +x).
-
 /// Bind mount a directory.
 async fn bind_mount(source: &str, target: &str) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
@@ -1065,8 +1063,8 @@ async fn run_e2fs_tool(tool: &str, args: &[&str]) -> anyhow::Result<std::process
 ///
 /// The ext4 superblock starts at byte offset 1024 in the filesystem image.
 /// - block_size = 2^(10 + s_log_block_size)  [offset 24, 4 bytes LE]
-/// - block_count = s_blocks_count_lo          [offset 4, 4 bytes LE]
-///              + (s_blocks_count_hi << 32)   [offset 336, 4 bytes LE] (64-bit ext4)
+/// - block_count = s_blocks_count_lo [offset 4, 4 bytes LE]
+///   + (s_blocks_count_hi << 32) [offset 336, 4 bytes LE] (64-bit ext4)
 fn read_ext4_superblock(path: &str) -> anyhow::Result<(u64, u64)> {
     use std::io::{Read, Seek, SeekFrom};
 

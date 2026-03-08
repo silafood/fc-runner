@@ -75,7 +75,7 @@ pub struct MicroVm {
 }
 
 /// Convert a PathBuf to &str with a descriptive error instead of panicking.
-fn path_str(path: &PathBuf) -> anyhow::Result<&str> {
+fn path_str(path: &std::path::Path) -> anyhow::Result<&str> {
     path.to_str()
         .ok_or_else(|| anyhow::anyhow!("path contains invalid UTF-8: {}", path.display()))
 }
@@ -571,10 +571,10 @@ impl MicroVm {
             &self.log_path,
             &console_path,
         ] {
-            if let Err(e) = tokio::fs::remove_file(path).await {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!(vm_id = %self.vm_id, path = %path.display(), error = %e, "CLEANUP_FAILED");
-                }
+            if let Err(e) = tokio::fs::remove_file(path).await
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(vm_id = %self.vm_id, path = %path.display(), error = %e, "CLEANUP_FAILED");
             }
         }
         let _ = tokio::fs::remove_dir(&self.mount_point).await;
@@ -584,10 +584,10 @@ impl MicroVm {
             let chroot_dir = PathBuf::from(&self.fc_config.jailer_chroot_base)
                 .join("firecracker")
                 .join(&self.vm_id);
-            if let Err(e) = tokio::fs::remove_dir_all(&chroot_dir).await {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!(vm_id = %self.vm_id, path = %chroot_dir.display(), error = %e, "jailer chroot cleanup failed");
-                }
+            if let Err(e) = tokio::fs::remove_dir_all(&chroot_dir).await
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(vm_id = %self.vm_id, path = %chroot_dir.display(), error = %e, "jailer chroot cleanup failed");
             }
         }
     }

@@ -257,10 +257,12 @@ impl PoolManager {
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_active_count(&self) -> usize {
         self.active_count.load(Ordering::Relaxed)
     }
 
+    #[allow(dead_code)]
     pub async fn available_slots(&self) -> usize {
         self.slot_pool.lock().await.len()
     }

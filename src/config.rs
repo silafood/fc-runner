@@ -109,10 +109,11 @@ impl GitHubConfig {
     /// Returns the deduplicated list of repos to poll.
     pub fn all_repos(&self) -> Vec<String> {
         let mut repos = self.repos.clone();
-        if let Some(ref r) = self.repo {
-            if !r.is_empty() && !repos.contains(r) {
-                repos.insert(0, r.clone());
-            }
+        if let Some(ref r) = self.repo
+            && !r.is_empty()
+            && !repos.contains(r)
+        {
+            repos.insert(0, r.clone());
         }
         repos
     }
@@ -300,19 +301,27 @@ impl Default for NetworkConfig {
 
 /// Check that a path is not a symlink (prevents symlink-based attacks).
 fn reject_symlink(label: &str, path: &Path) -> anyhow::Result<()> {
-    if let Ok(meta) = std::fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() {
-            bail!(
-                "{} is a symlink (security risk): {}",
-                label,
-                path.display()
-            );
-        }
+    if let Ok(meta) = std::fs::symlink_metadata(path)
+        && meta.file_type().is_symlink()
+    {
+        bail!(
+            "{} is a symlink (security risk): {}",
+            label,
+            path.display()
+        );
     }
     Ok(())
 }
 
 impl AppConfig {
+    /// Parse config from a TOML string (for testing).
+    #[cfg(test)]
+    pub fn from_str(content: &str) -> anyhow::Result<Self> {
+        let config: AppConfig =
+            toml::from_str(content).with_context(|| "parsing config TOML")?;
+        Ok(config)
+    }
+
     pub fn load(path: &str) -> anyhow::Result<Self> {
         // Validate config file permissions (should not be world-readable)
         let config_path = Path::new(path);
@@ -427,5 +436,445 @@ impl AppConfig {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_config(github_extra: &str) -> String {
+        format!(
+            r#"
+[github]
+token = "ghp_test1234567890abcdefghijklmnopqrs"
+owner = "test-org"
+{}
+
+[firecracker]
+binary_path = "/usr/local/bin/firecracker"
+kernel_path = "/opt/fc-runner/vmlinux.bin"
+rootfs_golden = "/opt/fc-runner/rootfs.ext4"
+
+[runner]
+work_dir = "/tmp/fc-runner-test"
+"#,
+            github_extra
+        )
+    }
+
+    #[test]
+    fn parse_single_repo() {
+        let toml = minimal_config(r#"repo = "my-repo""#);
+        let config = AppConfig::from_str(&toml).unwrap();
+        assert_eq!(config.github.owner, "test-org");
+        assert_eq!(config.github.repo.as_deref(), Some("my-repo"));
+        assert_eq!(config.github.all_repos(), vec!["my-repo"]);
+    }
+
+    #[test]
+    fn parse_multi_repo() {
+        let toml = minimal_config(r#"repos = ["repo-a", "repo-b", "repo-c"]"#);
+        let config = AppConfig::from_str(&toml).unwrap();
+        assert_eq!(config.github.all_repos(), vec!["repo-a", "repo-b", "repo-c"]);
+    }
+
+    #[test]
+    fn merge_repo_and_repos() {
+        let toml = minimal_config(
+            r#"
+repo = "repo-x"
+repos = ["repo-a", "repo-b"]
+"#,
+        );
+        let config = AppConfig::from_str(&toml).unwrap();
+        let repos = config.github.all_repos();
+        assert_eq!(repos.len(), 3);
+        assert!(repos.contains(&"repo-x".to_string()));
+        assert!(repos.contains(&"repo-a".to_string()));
+        assert!(repos.contains(&"repo-b".to_string()));
+    }
+
+    #[test]
+    fn dedup_repo_in_repos() {
+        let toml = minimal_config(
+            r#"
+repo = "repo-a"
+repos = ["repo-a", "repo-b"]
+"#,
+        );
+        let config = AppConfig::from_str(&toml).unwrap();
+        let repos = config.github.all_repos();
+        assert_eq!(repos.len(), 2);
+    }
+
+    #[test]
+    fn default_labels() {
+        let toml = minimal_config(r#"repo = "r""#);
+        let config = AppConfig::from_str(&toml).unwrap();
+        assert_eq!(
+            config.github.labels,
+            vec!["self-hosted", "linux", "firecracker"]
+        );
+    }
+
+    #[test]
+    fn custom_labels() {
+        let toml = minimal_config(r#"
+repo = "r"
+labels = ["self-hosted", "arm64"]
+"#);
+        let config = AppConfig::from_str(&toml).unwrap();
+        assert_eq!(config.github.labels, vec!["self-hosted", "arm64"]);
+    }
+
+    #[test]
+    fn default_runner_config() {
+        let toml = minimal_config(r#"repo = "r""#);
+        let config = AppConfig::from_str(&toml).unwrap();
+        assert_eq!(config.runner.poll_interval_secs, 5);
+        assert_eq!(config.runner.max_concurrent_jobs, 4);
+        assert_eq!(config.runner.vm_timeout_secs, 3600);
+        assert_eq!(config.runner.warm_pool_size, 0);
+    }
+
+    #[test]
+    fn default_firecracker_config() {
+        let toml = minimal_config(r#"repo = "r""#);
+        let config = AppConfig::from_str(&toml).unwrap();
+        assert_eq!(config.firecracker.vcpu_count, 2);
+        assert_eq!(config.firecracker.mem_size_mib, 2048);
+        assert_eq!(config.firecracker.secret_injection, "mmds");
+        assert!(!config.firecracker.vsock_enabled);
+        assert_eq!(config.firecracker.vsock_cid_base, 3);
+    }
+
+    #[test]
+    fn default_network_config() {
+        let toml = minimal_config(r#"repo = "r""#);
+        let config = AppConfig::from_str(&toml).unwrap();
+        assert_eq!(config.network.host_ip, "172.16.0.1");
+        assert_eq!(config.network.guest_ip, "172.16.0.2");
+        assert_eq!(config.network.cidr, "24");
+        assert_eq!(config.network.dns, vec!["8.8.8.8", "1.1.1.1"]);
+        assert!(config.network.allowed_networks.is_empty());
+    }
+
+    #[test]
+    fn default_server_config() {
+        let toml = minimal_config(r#"repo = "r""#);
+        let config = AppConfig::from_str(&toml).unwrap();
+        assert!(config.server.enabled);
+        assert_eq!(config.server.listen_addr, "0.0.0.0:9090");
+        assert!(config.server.api_key.is_none());
+    }
+
+    #[test]
+    fn parse_organization() {
+        let toml = minimal_config(
+            r#"
+organization = "my-org"
+repos = ["repo-a"]
+"#,
+        );
+        let config = AppConfig::from_str(&toml).unwrap();
+        assert_eq!(config.github.organization.as_deref(), Some("my-org"));
+    }
+
+    #[test]
+    fn parse_pool_config() {
+        let toml = format!(
+            r#"
+{}
+
+[[pool]]
+name = "default"
+repos = ["repo-a"]
+min_ready = 2
+max_ready = 4
+
+[[pool]]
+name = "heavy"
+repos = ["repo-b"]
+min_ready = 1
+max_ready = 2
+vcpu_count = 8
+mem_size_mib = 8192
+"#,
+            minimal_config(r#"repos = ["repo-a", "repo-b"]"#)
+        );
+        let config = AppConfig::from_str(&toml).unwrap();
+        assert_eq!(config.pool.len(), 2);
+        assert_eq!(config.pool[0].name, "default");
+        assert_eq!(config.pool[0].min_ready, 2);
+        assert_eq!(config.pool[0].max_ready, 4);
+        assert!(config.pool[0].vcpu_count.is_none());
+        assert_eq!(config.pool[1].name, "heavy");
+        assert_eq!(config.pool[1].vcpu_count, Some(8));
+        assert_eq!(config.pool[1].mem_size_mib, Some(8192));
+    }
+
+    #[test]
+    fn parse_vsock_config() {
+        let toml = r#"
+[github]
+token = "ghp_test1234567890abcdefghijklmnopqrs"
+owner = "test-org"
+repo = "r"
+
+[firecracker]
+binary_path = "/usr/local/bin/firecracker"
+kernel_path = "/opt/fc-runner/vmlinux.bin"
+rootfs_golden = "/opt/fc-runner/rootfs.ext4"
+vsock_enabled = true
+vsock_cid_base = 10
+
+[runner]
+work_dir = "/tmp/fc-runner-test"
+"#;
+        let config = AppConfig::from_str(toml).unwrap();
+        assert!(config.firecracker.vsock_enabled);
+        assert_eq!(config.firecracker.vsock_cid_base, 10);
+    }
+
+    #[test]
+    fn parse_server_with_api_key() {
+        let toml = format!(
+            r#"
+{}
+
+[server]
+listen_addr = "127.0.0.1:8080"
+api_key = "secret-key-123"
+"#,
+            minimal_config(r#"repo = "r""#)
+        );
+        let config = AppConfig::from_str(&toml).unwrap();
+        assert_eq!(config.server.listen_addr, "127.0.0.1:8080");
+        assert_eq!(config.server.api_key.as_deref(), Some("secret-key-123"));
+    }
+
+    #[test]
+    fn parse_warm_pool_size() {
+        let toml = r#"
+[github]
+token = "ghp_test1234567890abcdefghijklmnopqrs"
+owner = "test-org"
+repo = "r"
+
+[firecracker]
+binary_path = "/usr/local/bin/firecracker"
+kernel_path = "/opt/fc-runner/vmlinux.bin"
+rootfs_golden = "/opt/fc-runner/rootfs.ext4"
+
+[runner]
+work_dir = "/tmp/fc-runner-test"
+warm_pool_size = 3
+"#;
+        let config = AppConfig::from_str(toml).unwrap();
+        assert_eq!(config.runner.warm_pool_size, 3);
+    }
+
+    #[test]
+    fn empty_owner_fails_validate() {
+        let toml = r#"
+[github]
+token = "ghp_test1234567890abcdefghijklmnopqrs"
+owner = ""
+repo = "r"
+
+[firecracker]
+binary_path = "/usr/local/bin/firecracker"
+kernel_path = "/opt/fc-runner/vmlinux.bin"
+rootfs_golden = "/opt/fc-runner/rootfs.ext4"
+
+[runner]
+work_dir = "/tmp/fc-runner-test"
+"#;
+        let config = AppConfig::from_str(toml).unwrap();
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("owner"));
+    }
+
+    #[test]
+    fn no_auth_fails_validate() {
+        let toml = r#"
+[github]
+owner = "test-org"
+repo = "r"
+
+[firecracker]
+binary_path = "/usr/local/bin/firecracker"
+kernel_path = "/opt/fc-runner/vmlinux.bin"
+rootfs_golden = "/opt/fc-runner/rootfs.ext4"
+
+[runner]
+work_dir = "/tmp/fc-runner-test"
+"#;
+        let config = AppConfig::from_str(toml).unwrap();
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("github.token or [github.app]"));
+    }
+
+    #[test]
+    fn no_repos_fails_validate() {
+        let toml = r#"
+[github]
+token = "ghp_test1234567890abcdefghijklmnopqrs"
+owner = "test-org"
+
+[firecracker]
+binary_path = "/usr/local/bin/firecracker"
+kernel_path = "/opt/fc-runner/vmlinux.bin"
+rootfs_golden = "/opt/fc-runner/rootfs.ext4"
+
+[runner]
+work_dir = "/tmp/fc-runner-test"
+"#;
+        let config = AppConfig::from_str(toml).unwrap();
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("repo"));
+    }
+
+    #[test]
+    fn zero_vcpu_fails_validate() {
+        let toml = r#"
+[github]
+token = "ghp_test1234567890abcdefghijklmnopqrs"
+owner = "test-org"
+repo = "r"
+
+[firecracker]
+binary_path = "/usr/local/bin/firecracker"
+kernel_path = "/opt/fc-runner/vmlinux.bin"
+rootfs_golden = "/opt/fc-runner/rootfs.ext4"
+vcpu_count = 0
+
+[runner]
+work_dir = "/tmp/fc-runner-test"
+"#;
+        let config = AppConfig::from_str(toml).unwrap();
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("vcpu_count"));
+    }
+
+    #[test]
+    fn zero_mem_fails_validate() {
+        let toml = r#"
+[github]
+token = "ghp_test1234567890abcdefghijklmnopqrs"
+owner = "test-org"
+repo = "r"
+
+[firecracker]
+binary_path = "/usr/local/bin/firecracker"
+kernel_path = "/opt/fc-runner/vmlinux.bin"
+rootfs_golden = "/opt/fc-runner/rootfs.ext4"
+mem_size_mib = 0
+
+[runner]
+work_dir = "/tmp/fc-runner-test"
+"#;
+        let config = AppConfig::from_str(toml).unwrap();
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("mem_size_mib"));
+    }
+
+    #[test]
+    fn zero_max_concurrent_fails_validate() {
+        let toml = r#"
+[github]
+token = "ghp_test1234567890abcdefghijklmnopqrs"
+owner = "test-org"
+repo = "r"
+
+[firecracker]
+binary_path = "/usr/local/bin/firecracker"
+kernel_path = "/opt/fc-runner/vmlinux.bin"
+rootfs_golden = "/opt/fc-runner/rootfs.ext4"
+
+[runner]
+work_dir = "/tmp/fc-runner-test"
+max_concurrent_jobs = 0
+"#;
+        let config = AppConfig::from_str(toml).unwrap();
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("max_concurrent_jobs"));
+    }
+
+    #[test]
+    fn github_config_debug_redacts_token() {
+        let toml = minimal_config(r#"repo = "r""#);
+        let config = AppConfig::from_str(&toml).unwrap();
+        let debug = format!("{:?}", config.github);
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("ghp_test"));
+    }
+
+    #[test]
+    fn pool_defaults() {
+        let toml = format!(
+            r#"
+{}
+
+[[pool]]
+name = "test"
+repos = ["repo-a"]
+"#,
+            minimal_config(r#"repos = ["repo-a"]"#)
+        );
+        let config = AppConfig::from_str(&toml).unwrap();
+        assert_eq!(config.pool[0].min_ready, 1);
+        assert_eq!(config.pool[0].max_ready, 4);
+        assert!(config.pool[0].vcpu_count.is_none());
+        assert!(config.pool[0].mem_size_mib.is_none());
+    }
+
+    #[test]
+    fn invalid_toml_fails() {
+        let result = AppConfig::from_str("this is not valid toml {{{}}}");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn missing_required_sections_fails() {
+        let result = AppConfig::from_str("[github]\nowner = \"test\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn jailer_requires_uid_gid() {
+        let toml = r#"
+[github]
+token = "ghp_test1234567890abcdefghijklmnopqrs"
+owner = "test-org"
+repo = "r"
+
+[firecracker]
+binary_path = "/usr/local/bin/firecracker"
+kernel_path = "/opt/fc-runner/vmlinux.bin"
+rootfs_golden = "/opt/fc-runner/rootfs.ext4"
+jailer_path = "/usr/local/bin/jailer"
+
+[runner]
+work_dir = "/tmp/fc-runner-test"
+"#;
+        let config = AppConfig::from_str(toml).unwrap();
+        let result = config.validate();
+        // Should fail because jailer_uid is missing (if jailer binary exists)
+        // or fail because jailer_path doesn't exist
+        assert!(result.is_err());
     }
 }

@@ -271,3 +271,281 @@ async fn resume_pool_handler(
         message: format!("pool '{}' resumed", name),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn test_state() -> Arc<ServerState> {
+        Arc::new(ServerState::new(&ServerConfig {
+            listen_addr: "127.0.0.1:0".to_string(),
+            enabled: true,
+            api_key: None,
+        }))
+    }
+
+    fn test_state_with_key(key: &str) -> Arc<ServerState> {
+        Arc::new(ServerState::new(&ServerConfig {
+            listen_addr: "127.0.0.1:0".to_string(),
+            enabled: true,
+            api_key: Some(key.to_string()),
+        }))
+    }
+
+    fn app(state: Arc<ServerState>) -> Router {
+        Router::new()
+            .route("/metrics", get(metrics_handler))
+            .route("/healthz", get(healthz_handler))
+            .route("/api/v1/status", get(status_handler))
+            .route("/api/v1/vms", get(list_vms_handler))
+            .route("/api/v1/vms/{id}", delete(delete_vm_handler))
+            .route("/api/v1/pools", get(list_pools_handler))
+            .route("/api/v1/pools/{name}", get(get_pool_handler))
+            .route("/api/v1/pools/{name}/scale", post(scale_pool_handler))
+            .route("/api/v1/pools/{name}/pause", post(pause_pool_handler))
+            .route("/api/v1/pools/{name}/resume", post(resume_pool_handler))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn healthz_returns_ok() {
+        let state = test_state();
+        let resp = app(state)
+            .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn status_returns_json() {
+        let state = test_state();
+        state.set_mode("jit").await;
+        let resp = app(state)
+            .oneshot(Request::get("/api/v1/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["mode"], "jit");
+        assert_eq!(json["active_vms"], 0);
+        assert!(json["version"].is_string());
+    }
+
+    #[tokio::test]
+    async fn list_vms_empty() {
+        let state = test_state();
+        let resp = app(state)
+            .oneshot(Request::get("/api/v1/vms").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_vms_with_registered_vm() {
+        let state = test_state();
+        state
+            .register_vm(VmInfo {
+                vm_id: "fc-100-slot0".to_string(),
+                job_id: 100,
+                repo: "test-repo".to_string(),
+                slot: 0,
+                started_at: "1234567890".to_string(),
+            })
+            .await;
+        let resp = app(state)
+            .oneshot(Request::get("/api/v1/vms").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let vms = json.as_array().unwrap();
+        assert_eq!(vms.len(), 1);
+        assert_eq!(vms[0]["vm_id"], "fc-100-slot0");
+        assert_eq!(vms[0]["job_id"], 100);
+        assert_eq!(vms[0]["repo"], "test-repo");
+    }
+
+    #[tokio::test]
+    async fn unregister_vm_removes_it() {
+        let state = test_state();
+        state
+            .register_vm(VmInfo {
+                vm_id: "fc-100-slot0".to_string(),
+                job_id: 100,
+                repo: "test-repo".to_string(),
+                slot: 0,
+                started_at: "1234567890".to_string(),
+            })
+            .await;
+        state.unregister_vm("fc-100-slot0").await;
+        assert!(state.active_vms.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_vm_not_found() {
+        let state = test_state();
+        let resp = app(state)
+            .oneshot(
+                Request::delete("/api/v1/vms/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_vm_found() {
+        let state = test_state();
+        state
+            .register_vm(VmInfo {
+                vm_id: "fc-200-slot1".to_string(),
+                job_id: 200,
+                repo: "r".to_string(),
+                slot: 1,
+                started_at: "0".to_string(),
+            })
+            .await;
+        let resp = app(state)
+            .oneshot(
+                Request::delete("/api/v1/vms/fc-200-slot1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn api_key_auth_rejects_missing_key() {
+        let state = test_state_with_key("secret");
+        let resp = app(state)
+            .oneshot(Request::get("/api/v1/vms").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn api_key_auth_rejects_wrong_key() {
+        let state = test_state_with_key("secret");
+        let resp = app(state)
+            .oneshot(
+                Request::get("/api/v1/vms")
+                    .header("x-api-key", "wrong")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn api_key_auth_accepts_correct_key() {
+        let state = test_state_with_key("secret");
+        let resp = app(state)
+            .oneshot(
+                Request::get("/api/v1/vms")
+                    .header("x-api-key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn healthz_no_auth_required() {
+        let state = test_state_with_key("secret");
+        let resp = app(state)
+            .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn status_no_auth_required() {
+        let state = test_state_with_key("secret");
+        let resp = app(state)
+            .oneshot(Request::get("/api/v1/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn list_pools_empty() {
+        let state = test_state();
+        let resp = app(state)
+            .oneshot(Request::get("/api/v1/pools").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_pool_not_found() {
+        let state = test_state();
+        let resp = app(state)
+            .oneshot(
+                Request::get("/api/v1/pools/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn set_mode_updates_status() {
+        let state = test_state();
+        assert_eq!(*state.mode.lock().await, "starting");
+        state.set_mode("pools").await;
+        assert_eq!(*state.mode.lock().await, "pools");
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_returns_text() {
+        let state = test_state();
+        let resp = app(state)
+            .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(ct.contains("text/plain"));
+    }
+
+    #[tokio::test]
+    async fn pools_auth_required_with_key() {
+        let state = test_state_with_key("secret");
+        let resp = app(state)
+            .oneshot(Request::get("/api/v1/pools").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+}

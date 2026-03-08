@@ -132,8 +132,8 @@ async fn run_ps(endpoint: &str) -> anyhow::Result<()> {
     }
 
     println!(
-        "{:<38} {:<12} {:<30} {:<6} {}",
-        "VM ID", "JOB ID", "REPO", "SLOT", "STARTED"
+        "{:<38} {:<12} {:<30} {:<6} STARTED",
+        "VM ID", "JOB ID", "REPO", "SLOT"
     );
     for vm in &vms {
         println!(
@@ -156,8 +156,8 @@ async fn run_pools(action: PoolAction) -> anyhow::Result<()> {
             }
 
             println!(
-                "{:<20} {:<8} {:<10} {:<10} {:<8} {:<8} {}",
-                "NAME", "PAUSED", "MIN_READY", "MAX_READY", "ACTIVE", "IDLE", "REPOS"
+                "{:<20} {:<8} {:<10} {:<10} {:<8} {:<8} REPOS",
+                "NAME", "PAUSED", "MIN_READY", "MAX_READY", "ACTIVE", "IDLE"
             );
             for p in &pools {
                 println!(

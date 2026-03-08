@@ -34,6 +34,7 @@ struct Metadata {
 /// Messages sent from agent to host via VSOCK.
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 enum AgentMessage {
     Ready { timestamp: String },
     JobStarted { job_id: Option<u64> },
@@ -218,5 +219,122 @@ async fn run_runner(jit_config: &str) -> i32 {
             tracing::error!(error = %e, "runner wait failed");
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metadata_deserialization() {
+        let json = r#"{"runner_jit_config":"abc123","hostname":"fc-42","shutdown_on_exit":true}"#;
+        let meta: Metadata = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.runner_jit_config, "abc123");
+        assert_eq!(meta.hostname, "fc-42");
+        assert!(meta.shutdown_on_exit);
+    }
+
+    #[test]
+    fn metadata_shutdown_defaults_false() {
+        let json = r#"{"runner_jit_config":"token","hostname":"fc-0"}"#;
+        let meta: Metadata = serde_json::from_str(json).unwrap();
+        assert!(!meta.shutdown_on_exit);
+    }
+
+    #[test]
+    fn metadata_missing_required_fields_fails() {
+        let json = r#"{"hostname":"fc-0"}"#;
+        let result = serde_json::from_str::<Metadata>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn agent_message_ready_serialization() {
+        let msg = AgentMessage::Ready {
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""type":"ready""#));
+        assert!(json.contains(r#""timestamp":"2024-01-01T00:00:00Z""#));
+    }
+
+    #[test]
+    fn agent_message_job_started_serialization() {
+        let msg = AgentMessage::JobStarted { job_id: Some(42) };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""type":"job_started""#));
+        assert!(json.contains(r#""job_id":42"#));
+    }
+
+    #[test]
+    fn agent_message_job_started_no_id() {
+        let msg = AgentMessage::JobStarted { job_id: None };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""type":"job_started""#));
+        assert!(json.contains(r#""job_id":null"#));
+    }
+
+    #[test]
+    fn agent_message_log_serialization() {
+        let msg = AgentMessage::Log {
+            line: "hello world".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""type":"log""#));
+        assert!(json.contains(r#""line":"hello world""#));
+    }
+
+    #[test]
+    fn agent_message_job_completed_serialization() {
+        let msg = AgentMessage::JobCompleted { exit_code: 0 };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""type":"job_completed""#));
+        assert!(json.contains(r#""exit_code":0"#));
+    }
+
+    #[test]
+    fn agent_message_job_completed_failure() {
+        let msg = AgentMessage::JobCompleted { exit_code: 1 };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""exit_code":1"#));
+    }
+
+    #[test]
+    fn agent_messages_are_ndjson_compatible() {
+        // Each message should be a single line of JSON
+        let messages = vec![
+            AgentMessage::Ready { timestamp: "t".to_string() },
+            AgentMessage::JobStarted { job_id: Some(1) },
+            AgentMessage::Log { line: "test".to_string() },
+            AgentMessage::JobCompleted { exit_code: 0 },
+        ];
+        for msg in messages {
+            let json = serde_json::to_string(&msg).unwrap();
+            assert!(!json.contains('\n'), "NDJSON messages must not contain newlines");
+            // Verify it's valid JSON
+            let _: serde_json::Value = serde_json::from_str(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn mmds_base_url() {
+        assert_eq!(MMDS_BASE, "http://169.254.169.254");
+    }
+
+    #[test]
+    fn runner_dir_path() {
+        assert_eq!(RUNNER_DIR, "/home/runner/actions-runner");
+    }
+
+    #[tokio::test]
+    async fn mmds_read_failure_with_retry() {
+        // Attempting to read MMDS from a non-existent server should fail
+        let result = read_mmds_with_retry(2, std::time::Duration::from_millis(10)).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("failed to read MMDS"));
     }
 }
