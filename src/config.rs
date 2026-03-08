@@ -137,6 +137,10 @@ pub struct FirecrackerConfig {
     pub binary_path: String,
     pub kernel_path: String,
     pub rootfs_golden: String,
+    /// OCI image reference (e.g., "ghcr.io/org/runner-image:latest").
+    /// When set, the image is pulled and converted to ext4, cached at rootfs_golden path.
+    /// Takes precedence over the cloud image build pipeline.
+    pub image: Option<String>,
     #[serde(default = "default_vcpu_count")]
     pub vcpu_count: u32,
     #[serde(default = "default_mem_size_mib")]

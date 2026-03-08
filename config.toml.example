@@ -29,6 +29,11 @@ labels = ["self-hosted", "linux", "firecracker"]
 binary_path = "/usr/local/bin/firecracker"
 kernel_path = "/opt/fc-runner/vmlinux.bin"
 rootfs_golden = "/opt/fc-runner/runner-rootfs-golden.ext4"
+# OCI image reference (alternative to cloud image build).
+# When set, the image is pulled from the registry, extracted to ext4,
+# and cached at rootfs_golden path. Supports Docker Hub, GHCR, etc.
+# The image should contain all packages needed for CI jobs.
+# image = "ghcr.io/your-org/fc-runner-image:latest"
 vcpu_count = 2
 mem_size_mib = 2048
 # Kernel boot arguments (default shown below)
