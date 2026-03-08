@@ -22,7 +22,7 @@ RestrictRealtime=true
 SupplementaryGroups=kvm
 
 # Ensure fc-runner can write to runtime directories
-ReadWritePaths=/srv/jailer /var/lib/fc-runner /opt/fc-runner
+ReadWritePaths=/var/lib/fc-runner /opt/fc-runner
 
 [Install]
 WantedBy=multi-user.target

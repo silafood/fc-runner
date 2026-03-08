@@ -407,7 +407,7 @@ impl MicroVm {
         if self.fc_config.vsock_enabled {
             let cid = self.vsock_cid();
             let uds_path = if use_jailer {
-                filename_str(&self.socket_path)?.to_string()
+                "vsock.sock".to_string()
             } else {
                 path_str(&self.socket_path)?.to_string()
             };
@@ -646,8 +646,8 @@ impl MicroVm {
         // We pass the filename to firecracker (it runs inside chroot) and use the
         // host-absolute path to connect from the host for MMDS injection.
         let (fc_socket_arg, host_socket_path) = if use_jailer {
-            let sock_name = filename_str(&self.socket_path)
-                .expect("socket_path must have a valid filename");
+            // Use a short socket name to stay under SUN_LEN (108 bytes)
+            let sock_name = "api.sock";
             let host_path = self.jailer_root_dir().join(sock_name);
             (sock_name.to_string(), host_path)
         } else {

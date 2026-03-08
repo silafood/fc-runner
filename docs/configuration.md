@@ -46,7 +46,7 @@ mem_size_mib = 2048
 # jailer_path = "/usr/local/bin/jailer"
 # jailer_uid = 1000
 # jailer_gid = 1000
-# jailer_chroot_base = "/srv/jailer"
+# jailer_chroot_base = "/var/lib/fc-runner/jailer"
 # secret_injection = "mmds"
 # vsock_enabled = true
 # vsock_cid_base = 3
@@ -153,7 +153,7 @@ private_key_path = "/etc/fc-runner/app-key.pem"
 | `jailer_path` | No | — | Path to the jailer binary. Enables chroot + seccomp-BPF + UID/GID drop |
 | `jailer_uid` | If jailer | — | UID the jailer drops to before starting the VMM |
 | `jailer_gid` | If jailer | — | GID the jailer drops to before starting the VMM |
-| `jailer_chroot_base` | No | `/srv/jailer` | Base directory for jailer chroot environments |
+| `jailer_chroot_base` | No | `/var/lib/fc-runner/jailer` | Base directory for jailer chroot environments |
 | `secret_injection` | No | `mmds` | Secret injection method: `mmds` (Firecracker metadata service) or `mount` (legacy loop-mount) |
 | `vsock_enabled` | No | `false` | Enable virtio-vsock device for guest agent communication |
 | `vsock_cid_base` | No | `3` | Base CID for VSOCK devices. Each VM gets CID = `vsock_cid_base + slot`. CIDs 0-2 are reserved. |
