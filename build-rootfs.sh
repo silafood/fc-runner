@@ -12,13 +12,13 @@ umount -l "$MNT" 2>/dev/null || true
 rm -rf "$MNT"
 rm -f "$ROOTFS"
 
-echo "[1/7] Creating 4GB image..."
-dd if=/dev/zero of="$ROOTFS" bs=1M count=4096 status=progress
+echo "[1/9] Creating 6GB image..."
+dd if=/dev/zero of="$ROOTFS" bs=1M count=6144 status=progress
 
-echo "[2/7] Formatting ext4..."
+echo "[2/9] Formatting ext4..."
 mkfs.ext4 -F "$ROOTFS"
 
-echo "[3/7] Mounting..."
+echo "[3/9] Mounting..."
 mkdir -p "$MNT"
 mount -o loop "$ROOTFS" "$MNT"
 
@@ -34,14 +34,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "[4/7] Running debootstrap (takes ~5 minutes)..."
+echo "[4/9] Running debootstrap (takes ~5 minutes)..."
 debootstrap --arch=amd64 \
-    --include=systemd,systemd-sysv,curl,git,jq,ca-certificates,sudo,openssh-client,unzip,libicu74 \
+    --include=systemd,systemd-sysv,curl,git,jq,ca-certificates,sudo,openssh-client,unzip,libicu74,iproute2,systemd-resolved \
     noble "$MNT" http://archive.ubuntu.com/ubuntu
 
 # Fix fstab: debootstrap writes build-time loop device UUID,
 # but inside Firecracker the root device is always /dev/vda.
 echo -e "/dev/vda\t/\text4\tdefaults,noatime\t0\t1" > "$MNT/etc/fstab"
+
+# Ensure /var/tmp exists (systemd-resolved needs it for PrivateTmp namespace)
+mkdir -p "$MNT/var/tmp"
+chmod 1777 "$MNT/var/tmp"
 
 # Mount pseudo-filesystems needed by chroot commands
 mount --bind /dev "$MNT/dev"
@@ -49,7 +53,36 @@ mount --bind /dev/pts "$MNT/dev/pts"
 mount -t proc proc "$MNT/proc"
 mount -t sysfs sys "$MNT/sys"
 
-echo "[5/7] Configuring network..."
+echo "[5/9] Installing packages (build tools, Docker, Rust dependencies)..."
+chroot "$MNT" bash -c "
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -q
+    apt-get install -y --no-install-recommends \
+        build-essential pkg-config libssl-dev \
+        gcc g++ make cmake \
+        python3 python3-pip python3-venv \
+        nodejs npm \
+        docker.io containerd \
+        wget tar gzip xz-utils \
+        zip bzip2 \
+        libffi-dev zlib1g-dev \
+        net-tools dnsutils iputils-ping \
+        locales
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+"
+
+echo "[6/9] Installing Rust toolchain..."
+chroot "$MNT" bash -c "
+    # Install rustup for the runner user
+    su - runner -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable'
+    # Make cargo/rustc available system-wide via symlinks
+    ln -sf /home/runner/.cargo/bin/cargo /usr/local/bin/cargo
+    ln -sf /home/runner/.cargo/bin/rustc /usr/local/bin/rustc
+    ln -sf /home/runner/.cargo/bin/rustup /usr/local/bin/rustup
+"
+
+echo "[7/9] Configuring network and runner user..."
 mkdir -p "$MNT/etc/systemd/network"
 cat > "$MNT/etc/systemd/network/20-eth.network" << 'EOF'
 [Match]
@@ -62,12 +95,28 @@ DNS=8.8.8.8
 DNS=1.1.1.1
 EOF
 
-chroot "$MNT" systemctl enable systemd-networkd systemd-resolved
+chroot "$MNT" systemctl enable systemd-networkd systemd-resolved 2>/dev/null || true
 
-echo "[6/7] Creating runner user and installing GitHub Actions runner..."
-chroot "$MNT" useradd -m -s /bin/bash runner || true
+# Belt-and-suspenders: create symlinks manually in case chroot systemctl fails
+mkdir -p "$MNT/etc/systemd/system/multi-user.target.wants"
+ln -sf /lib/systemd/system/systemd-networkd.service "$MNT/etc/systemd/system/multi-user.target.wants/systemd-networkd.service"
+ln -sf /lib/systemd/system/systemd-resolved.service "$MNT/etc/systemd/system/multi-user.target.wants/systemd-resolved.service"
+
+# Restore systemd-resolved symlink
+rm -f "$MNT/etc/resolv.conf"
+ln -s /run/systemd/resolve/stub-resolv.conf "$MNT/etc/resolv.conf"
+
+# Disable services that slow boot and aren't needed
+chroot "$MNT" bash -c "
+    systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+    systemctl disable motd-news.timer 2>/dev/null || true
+    systemctl mask systemd-timesyncd.service 2>/dev/null || true
+" 2>/dev/null || true
+
+chroot "$MNT" useradd -m -s /bin/bash runner 2>/dev/null || true
 echo "runner ALL=(ALL) NOPASSWD:ALL" > "$MNT/etc/sudoers.d/runner"
 
+echo "[8/9] Installing GitHub Actions runner v${RUNNER_VERSION}..."
 curl -fsSL -o "$MNT/home/runner/actions-runner.tar.gz" \
     "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
 tar xzf "$MNT/home/runner/actions-runner.tar.gz" -C "$MNT/home/runner/"
@@ -76,7 +125,7 @@ rm "$MNT/home/runner/actions-runner.tar.gz"
 chroot "$MNT" /home/runner/bin/installdependencies.sh
 chroot "$MNT" chown -R runner:runner /home/runner
 
-echo "[7/7] Writing entrypoint..."
+echo "[9/9] Writing entrypoint..."
 cat > "$MNT/entrypoint.sh" << 'ENTRYEOF'
 #!/bin/bash
 set -euo pipefail
@@ -87,7 +136,7 @@ echo "=== fc-runner entrypoint $(date) ==="
 if [ ! -f /etc/fc-runner-env ]; then
     echo "ERROR: /etc/fc-runner-env not found"
     sleep 3
-    poweroff -f
+    reboot -f
 fi
 
 source /etc/fc-runner-env
@@ -106,6 +155,9 @@ for i in $(seq 1 30); do
 done
 
 cd /home/runner
+
+# Source Rust environment for CI jobs
+export PATH="/home/runner/.cargo/bin:$PATH"
 
 if [ "${RUNNER_MODE:-jit}" = "jit" ]; then
     echo "Starting runner (JIT mode)..."
@@ -126,12 +178,29 @@ else
 fi
 
 echo "Runner finished, shutting down"
-poweroff -f
+reboot -f
 ENTRYEOF
 chmod +x "$MNT/entrypoint.sh"
 
-# Enable rc-local.service explicitly
+# Create rc-local.service unit (not shipped in Ubuntu 24.04 cloud images)
+cat > "$MNT/etc/systemd/system/rc-local.service" << 'SVCEOF'
+[Unit]
+Description=/etc/rc.local Compatibility
+ConditionFileIsExecutable=/etc/rc.local
+
+[Service]
+Type=forking
+ExecStart=/etc/rc.local
+TimeoutSec=0
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+
 chroot "$MNT" systemctl enable rc-local.service 2>/dev/null || true
+# Manual symlink fallback
+ln -sf /etc/systemd/system/rc-local.service "$MNT/etc/systemd/system/multi-user.target.wants/rc-local.service"
 
 cat > "$MNT/etc/rc.local" << 'RCEOF'
 #!/bin/bash
