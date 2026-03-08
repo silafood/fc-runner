@@ -1,0 +1,28 @@
+[github]
+token = "ghp_test_token_1234567890abcdef"
+owner = "test-org"
+repos = ["repo-a", "repo-b", "repo-c"]
+runner_group_id = 1
+labels = ["self-hosted", "linux", "firecracker"]
+
+[firecracker]
+binary_path = "/usr/local/bin/firecracker"
+kernel_path = "/opt/fc-runner/vmlinux.bin"
+rootfs_golden = "/opt/fc-runner/runner-rootfs-golden.ext4"
+vcpu_count = 4
+mem_size_mib = 4096
+
+[runner]
+work_dir = "/tmp/fc-runner-test-vms"
+poll_interval_secs = 10
+max_concurrent_jobs = 8
+vm_timeout_secs = 7200
+
+[network]
+host_ip = "172.16.0.1"
+guest_ip = "172.16.0.2"
+cidr = "24"
+dns = ["8.8.8.8", "1.1.1.1"]
+
+[server]
+listen_addr = "0.0.0.0:9090"

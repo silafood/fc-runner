@@ -89,3 +89,63 @@ pub fn gather() -> String {
     encoder.encode(&metric_families, &mut buffer).unwrap();
     String::from_utf8(buffer).unwrap()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gather_returns_valid_prometheus_text() {
+        let output = gather();
+        // Prometheus text format uses "# HELP" and "# TYPE" lines
+        // At minimum the registry should produce some output
+        assert!(output.is_ascii() || output.is_empty());
+    }
+
+    #[test]
+    fn jobs_dispatched_counter() {
+        JOBS_DISPATCHED.with_label_values(&["test-repo"]).inc();
+        let val = JOBS_DISPATCHED
+            .with_label_values(&["test-repo"])
+            .get();
+        assert!(val >= 1);
+    }
+
+    #[test]
+    fn jobs_active_gauge() {
+        let before = JOBS_ACTIVE.get();
+        JOBS_ACTIVE.inc();
+        assert_eq!(JOBS_ACTIVE.get(), before + 1);
+        JOBS_ACTIVE.dec();
+        assert_eq!(JOBS_ACTIVE.get(), before);
+    }
+
+    #[test]
+    fn pool_slots_gauge() {
+        let before = POOL_SLOTS_AVAILABLE.get();
+        POOL_SLOTS_AVAILABLE.set(10);
+        assert_eq!(POOL_SLOTS_AVAILABLE.get(), 10);
+        POOL_SLOTS_AVAILABLE.set(before);
+    }
+
+    #[test]
+    fn rate_limit_gauge() {
+        GITHUB_RATE_LIMIT_REMAINING.set(4999);
+        assert_eq!(GITHUB_RATE_LIMIT_REMAINING.get(), 4999);
+    }
+
+    #[test]
+    fn uptime_gauge() {
+        UPTIME_SECONDS.with_label_values(&["test"]).set(42.0);
+        let val = UPTIME_SECONDS.with_label_values(&["test"]).get();
+        assert!((val - 42.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn gather_includes_registered_metrics() {
+        // Force initialization of at least one metric
+        JOBS_ACTIVE.set(0);
+        let output = gather();
+        assert!(output.contains("fc_jobs_active"));
+    }
+}
