@@ -6,6 +6,10 @@
 # Personal access token (see docs/setup.md for generation guide)
 token = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 owner = "your-org"
+# Organization-level runners (optional).
+# When set, runners register at the org level and can pick up jobs
+# from any repo in the organization. Repos list is still used for filtering.
+# organization = "your-org"
 # Single repo (simple setup)
 repo = "your-repo"
 # Multiple repos under the same owner (overrides repo if both set)

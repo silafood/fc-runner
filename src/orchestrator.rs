@@ -269,7 +269,11 @@ impl Orchestrator {
             metrics::POOL_SLOTS_AVAILABLE.inc();
 
             // Clean up offline runners left by this (and any previous) VMs
-            github.remove_offline_runners(&repo).await;
+            if github.is_org_mode() {
+                github.remove_org_offline_runners().await;
+            } else {
+                github.remove_offline_runners(&repo).await;
+            }
 
             match result {
                 Ok(()) => {
@@ -368,7 +372,11 @@ impl Orchestrator {
             timer.observe_duration();
 
             // Clean up offline runners left by this VM
-            github.remove_offline_runners(&repo).await;
+            if github.is_org_mode() {
+                github.remove_org_offline_runners().await;
+            } else {
+                github.remove_offline_runners(&repo).await;
+            }
 
             match &result {
                 Ok(()) => {
