@@ -1,3 +1,4 @@
+mod agent;
 mod api_client;
 mod cli;
 mod config;
@@ -88,10 +89,8 @@ async fn run_server(config_path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_agent(_log_level: &str) -> anyhow::Result<()> {
-    eprintln!("agent mode is not yet implemented (coming in a future release)");
-    eprintln!("this command is intended to run inside a Firecracker VM");
-    std::process::exit(1);
+async fn run_agent(log_level: &str) -> anyhow::Result<()> {
+    agent::run(log_level).await
 }
 
 fn run_validate(config_path: &str) -> anyhow::Result<()> {

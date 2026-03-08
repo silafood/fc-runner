@@ -427,8 +427,8 @@ async fn run_jit_job(
         slot,
     );
     let env_content = format!(
-        "RUNNER_MODE=jit\nRUNNER_TOKEN={}\nREPO_URL={}\nVM_ID={}\n",
-        jit_token, repo_url, vm.vm_id
+        "RUNNER_MODE=jit\nRUNNER_TOKEN={}\nREPO_URL={}\nVM_ID={}\nRUNNER_JIT_CONFIG={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\n",
+        jit_token, repo_url, vm.vm_id, jit_token, vm.vm_id
     );
     vm.execute(&env_content).await
 }
