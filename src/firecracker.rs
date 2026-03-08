@@ -490,6 +490,22 @@ impl MicroVm {
         tokio::fs::write(&chroot_config, &rendered).await
             .with_context(|| format!("writing VM config to {}", chroot_config.display()))?;
 
+        // Chown all files to the jailer UID/GID so Firecracker can access
+        // them after the jailer drops privileges.
+        if let (Some(uid), Some(gid)) = (self.fc_config.jailer_uid, self.fc_config.jailer_gid) {
+            use std::os::unix::fs::chown;
+            for entry in std::fs::read_dir(&root_dir)
+                .context("reading jailer chroot directory")?
+            {
+                let entry = entry?;
+                chown(entry.path(), Some(uid), Some(gid))
+                    .with_context(|| format!(
+                        "chown {}:{} {}",
+                        uid, gid, entry.path().display()
+                    ))?;
+            }
+        }
+
         tracing::info!(
             vm_id = %self.vm_id,
             chroot = %root_dir.display(),
