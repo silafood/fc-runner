@@ -167,7 +167,7 @@ echo "=== fc-runner entrypoint $(date) ==="
 if [ ! -f /etc/fc-runner-env ]; then
     echo "ERROR: /etc/fc-runner-env not found"
     sleep 3
-    poweroff -f
+    reboot -f
 fi
 
 source /etc/fc-runner-env
@@ -206,7 +206,7 @@ else
 fi
 
 echo "Runner finished, shutting down"
-poweroff -f
+reboot -f
 ENTRYEOF
 chmod +x "$MNT/entrypoint.sh"
 
