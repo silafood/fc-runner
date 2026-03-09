@@ -346,6 +346,34 @@ impl MicroVm {
             ),
         )
         .await?;
+
+        // Write static resolv.conf — the squashfs may have a dangling symlink to
+        // /run/systemd/resolve/stub-resolv.conf which only works if systemd-resolved
+        // is running. This static file ensures DNS works immediately at boot.
+        let resolv_entries: String = self
+            .network_dns
+            .iter()
+            .map(|d| format!("nameserver {}", d))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let etc_dir = mount_point.join("etc");
+        // Remove any existing resolv.conf (might be a symlink in the overlay)
+        let resolv_path = etc_dir.join("resolv.conf");
+        let _ = tokio::fs::remove_file(&resolv_path).await;
+        tokio::fs::write(&resolv_path, format!("{}\n", resolv_entries)).await?;
+
+        // Enable systemd-resolved via symlink (if not already enabled in squashfs)
+        let wants_dir = mount_point.join("etc/systemd/system/multi-user.target.wants");
+        tokio::fs::create_dir_all(&wants_dir).await?;
+        let resolved_link = wants_dir.join("systemd-resolved.service");
+        if !resolved_link.exists() {
+            let _ = tokio::fs::symlink(
+                "/usr/lib/systemd/system/systemd-resolved.service",
+                &resolved_link,
+            )
+            .await;
+        }
+
         Ok(())
     }
 
