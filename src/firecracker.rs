@@ -282,6 +282,12 @@ impl MicroVm {
         // Write per-VM guest network config (unique IP/gateway per slot)
         self.write_network_config_to(&write_base).await?;
 
+        // In overlay mode, override fstab so systemd-remount-fs doesn't try to
+        // remount root as ext4 (root is overlayfs, not a block device)
+        if self.use_overlay() {
+            self.write_overlay_fstab(&write_base).await?;
+        }
+
         self.umount_with_retry().await?;
         let _ = tokio::fs::remove_dir(&self.mount_point).await;
         Ok(())
@@ -311,20 +317,10 @@ impl MicroVm {
 
         self.write_network_config_to(&write_base).await?;
 
-        // Debug: verify the network config was written
-        let net_file = write_base.join("etc/systemd/network/20-eth.network");
-        if net_file.exists() {
-            tracing::info!(
-                vm_id = %self.vm_id,
-                path = %net_file.display(),
-                "network config written to overlay"
-            );
-        } else {
-            tracing::error!(
-                vm_id = %self.vm_id,
-                path = %net_file.display(),
-                "network config file NOT found after write!"
-            );
+        // In overlay mode, override fstab so systemd-remount-fs doesn't try to
+        // remount root as ext4 (root is overlayfs, not a block device)
+        if self.use_overlay() {
+            self.write_overlay_fstab(&write_base).await?;
         }
 
         self.umount_with_retry().await?;
@@ -348,6 +344,24 @@ impl MicroVm {
                 "[Match]\nName=eth0\n\n[Network]\nAddress={}/24\nGateway={}\n{}\n",
                 self.guest_ip, self.host_ip, dns_entries
             ),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Write a corrected fstab for overlay mode.
+    /// The squashfs has fstab pointing to /dev/vda as ext4, but in overlay mode
+    /// /dev/vda is squashfs and / is overlayfs. systemd-remount-fs reads fstab
+    /// and would fail trying to remount root as ext4, potentially cascading to
+    /// other services including networking.
+    async fn write_overlay_fstab(&self, write_base: &std::path::Path) -> anyhow::Result<()> {
+        let etc_dir = write_base.join("etc");
+        tokio::fs::create_dir_all(&etc_dir).await?;
+        tokio::fs::write(
+            etc_dir.join("fstab"),
+            "# OverlayFS mode — root is overlay, not a block device\n\
+             # /dev/vda is the read-only squashfs base layer\n\
+             # /dev/vdb is the writable ext4 overlay (mounted by overlay-init)\n",
         )
         .await?;
         Ok(())
