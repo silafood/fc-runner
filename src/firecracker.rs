@@ -311,6 +311,22 @@ impl MicroVm {
 
         self.write_network_config_to(&write_base).await?;
 
+        // Debug: verify the network config was written
+        let net_file = write_base.join("etc/systemd/network/20-eth.network");
+        if net_file.exists() {
+            tracing::info!(
+                vm_id = %self.vm_id,
+                path = %net_file.display(),
+                "network config written to overlay"
+            );
+        } else {
+            tracing::error!(
+                vm_id = %self.vm_id,
+                path = %net_file.display(),
+                "network config file NOT found after write!"
+            );
+        }
+
         self.umount_with_retry().await?;
         let _ = tokio::fs::remove_dir(&self.mount_point).await;
         Ok(())
