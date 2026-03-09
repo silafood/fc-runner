@@ -942,14 +942,10 @@ done
 echo "overlay-init: overlay_root=$overlay_root"
 
 pivot() {
-    echo "overlay-init: mounting overlayfs upper=$1 work=$2"
     /bin/mount \
         -o noatime,lowerdir=/,upperdir="$1",workdir="$2" \
         -t overlay "overlayfs:$1" /mnt
-    echo "overlay-init: overlayfs mount rc=$?"
-    echo "overlay-init: pivot_root /mnt /mnt/rom"
     pivot_root /mnt /mnt/rom
-    echo "overlay-init: pivot_root rc=$?"
 }
 
 if [ -z "$overlay_root" ]; then
@@ -964,41 +960,46 @@ else
         echo "FATAL: /dev/$overlay_root does not exist"
         exec /sbin/init "$@"
     fi
-    echo "overlay-init: mounting /dev/$overlay_root at /overlay"
     /bin/mount -t ext4 -o noatime "/dev/$overlay_root" /overlay
-    echo "overlay-init: ext4 mount rc=$?"
 fi
-
-echo "overlay-init: upper dir contents:"
-ls -la /overlay/root/ 2>&1
-ls -la /overlay/root/etc/ 2>&1
-ls -la /overlay/root/etc/systemd/network/ 2>&1
-echo "overlay-init: fstab on overlay:"
-cat /overlay/root/etc/fstab 2>&1
 
 mkdir -p /overlay/root /overlay/work
 
-# Unmount /proc before creating overlayfs — we don't want the procfs mount
-# to leak into the overlay's lower layer view
+# Unmount /proc before creating overlayfs
 /bin/umount /proc
 
 pivot /overlay/root /overlay/work
 
-# Bind-mount raw ext4 for Docker — overlayfs-on-overlayfs is not supported,
-# so give Docker a native ext4 at /var/lib/docker via the raw overlay device
-# (/rom/overlay is the ext4 on /dev/$overlay_root, not overlayfs)
+# Bind-mount raw ext4 for Docker — overlayfs-on-overlayfs is not supported
 mkdir -p /rom/overlay/docker /var/lib/docker
 /bin/mount --bind /rom/overlay/docker /var/lib/docker
 
-echo "overlay-init: merged view after pivot_root:"
-ls -la /etc/systemd/network/ 2>&1
-cat /etc/systemd/network/20-eth.network 2>&1
-echo "overlay-init: fstab in merged view:"
-cat /etc/fstab 2>&1
-echo "overlay-init: systemd-networkd enabled?"
-ls -la /etc/systemd/system/multi-user.target.wants/systemd-networkd* 2>&1
-echo "overlay-init: systemd-resolved enabled?"
-ls -la /etc/systemd/system/multi-user.target.wants/systemd-resolved* 2>&1
+# Pre-configure network directly via ip commands — systemd-networkd has
+# issues reading config files on overlayfs. Parse the injected networkd
+# config and apply it immediately so networking works before systemd starts.
+/bin/mount -t proc proc /proc
+/bin/mount -t sysfs sys /sys
+
+if [ -f /etc/systemd/network/20-eth.network ]; then
+    addr=$(grep '^Address=' /etc/systemd/network/20-eth.network | head -1 | cut -d= -f2)
+    gw=$(grep '^Gateway=' /etc/systemd/network/20-eth.network | head -1 | cut -d= -f2)
+    if [ -n "$addr" ] && [ -n "$gw" ]; then
+        ip link set eth0 up
+        ip addr add "$addr" dev eth0 2>/dev/null
+        ip route add default via "$gw" 2>/dev/null
+        echo "overlay-init: network pre-configured $addr gw $gw"
+    fi
+fi
+
+# Diagnostic: verify network state
+echo "overlay-init: ip addr:"
+ip addr show eth0 2>&1
+echo "overlay-init: ip route:"
+ip route show 2>&1
+
+/bin/umount /sys
+/bin/umount /proc
+
 echo "overlay-init: done, exec /sbin/init"
 exec /sbin/init "$@"
 "#,

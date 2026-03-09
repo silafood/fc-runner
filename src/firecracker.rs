@@ -288,6 +288,13 @@ impl MicroVm {
             self.write_overlay_fstab(&write_base).await?;
         }
 
+        // In overlay + mount mode, write an entrypoint with shell fallback.
+        // The agent only reads MMDS, which isn't available in --no-api mode.
+        // The overlay entrypoint overrides the squashfs one.
+        if self.use_overlay() {
+            self.write_mount_mode_entrypoint(&write_base).await?;
+        }
+
         self.umount_with_retry().await?;
         let _ = tokio::fs::remove_dir(&self.mount_point).await;
         Ok(())
@@ -392,6 +399,81 @@ impl MicroVm {
              # /dev/vdb is the writable ext4 overlay (mounted by overlay-init)\n",
         )
         .await?;
+        Ok(())
+    }
+
+    /// Write entrypoint.sh for mount mode (no MMDS available).
+    /// The fc-runner agent only reads MMDS, which doesn't exist in --no-api mode.
+    /// This entrypoint falls back to reading /etc/fc-runner-env directly.
+    async fn write_mount_mode_entrypoint(
+        &self,
+        write_base: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        let entrypoint = write_base.join("entrypoint.sh");
+        tokio::fs::write(
+            &entrypoint,
+            r#"#!/bin/bash
+set -euo pipefail
+exec > /var/log/runner.log 2>&1
+
+echo "=== fc-runner entrypoint $(date) ==="
+echo "Network state:"
+ip addr show eth0 2>&1 || true
+ip route show 2>&1 || true
+echo "DNS:"
+cat /etc/resolv.conf 2>&1 || true
+
+# In mount mode (--no-api), MMDS is not available.
+# Read config from /etc/fc-runner-env instead.
+if [ -f /etc/fc-runner-env ]; then
+    echo "Loading /etc/fc-runner-env"
+    source /etc/fc-runner-env
+    echo "VM_ID=${VM_ID:-unset} MODE=${RUNNER_MODE:-jit}"
+
+    # Wait for network connectivity
+    for i in $(seq 1 30); do
+        if curl -sf --connect-timeout 3 --max-time 5 https://github.com > /dev/null 2>&1; then
+            echo "Network ready (attempt $i)"
+            break
+        fi
+        echo "Waiting for network ($i/30)..."
+        sleep 1
+    done
+
+    cd /home/runner
+
+    if [ "${RUNNER_MODE:-jit}" = "jit" ]; then
+        echo "Starting runner (JIT mode)..."
+        sudo -E -u runner ./run.sh --jitconfig "${RUNNER_TOKEN}"
+    else
+        echo "Registering runner..."
+        sudo -E -u runner ./config.sh \
+            --url "${REPO_URL}" \
+            --token "${RUNNER_TOKEN}" \
+            --name "${RUNNER_NAME:-fc-$(hostname)}" \
+            --labels "firecracker,linux,x64" \
+            --ephemeral \
+            --unattended \
+            --disableupdate \
+            --work /home/runner/_work
+        echo "Starting runner (registered mode)..."
+        sudo -E -u runner ./run.sh
+    fi
+
+    echo "Runner finished, shutting down"
+    reboot -f
+else
+    echo "ERROR: /etc/fc-runner-env not found and MMDS not available"
+    sleep 5
+    reboot -f
+fi
+"#,
+        )
+        .await?;
+        std::fs::set_permissions(
+            &entrypoint,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )?;
         Ok(())
     }
 
