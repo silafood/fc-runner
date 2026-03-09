@@ -201,7 +201,7 @@ async fn read_mmds(client: &reqwest::Client) -> anyhow::Result<Metadata> {
     Ok(metadata)
 }
 
-/// Set the system hostname.
+/// Set the system hostname and update /etc/hosts.
 async fn set_hostname(hostname: &str) {
     if let Err(e) = tokio::process::Command::new("hostname")
         .arg(hostname)
@@ -209,6 +209,13 @@ async fn set_hostname(hostname: &str) {
         .await
     {
         tracing::warn!(error = %e, "failed to set hostname");
+    }
+    let hosts = format!(
+        "127.0.0.1 localhost localhost.localdomain {hostname}\n\
+         ::1 localhost ip6-localhost ip6-loopback {hostname}\n"
+    );
+    if let Err(e) = tokio::fs::write("/etc/hosts", hosts).await {
+        tracing::warn!(error = %e, "failed to update /etc/hosts");
     }
 }
 
