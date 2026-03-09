@@ -175,8 +175,8 @@ pub struct FirecrackerConfig {
     /// Enable OverlayFS COW rootfs mode.
     /// When enabled, the golden rootfs is converted to squashfs and shared read-only
     /// across all VMs. Each VM gets a small sparse ext4 overlay for writes.
-    /// Requires squashfs-tools on the host.
-    #[serde(default)]
+    /// Requires squashfs-tools on the host. Set to false to fall back to cp --reflink.
+    #[serde(default = "default_overlay_rootfs")]
     pub overlay_rootfs: bool,
     /// Per-VM overlay device size in MiB (default: 512).
     /// Only used when overlay_rootfs = true.
@@ -190,6 +190,10 @@ fn default_secret_injection() -> String {
 
 fn default_vsock_cid_base() -> u32 {
     3
+}
+
+fn default_overlay_rootfs() -> bool {
+    true
 }
 
 fn default_overlay_size_mib() -> u32 {
@@ -565,7 +569,7 @@ labels = ["self-hosted", "arm64"]
         assert_eq!(config.firecracker.secret_injection, "mmds");
         assert!(!config.firecracker.vsock_enabled);
         assert_eq!(config.firecracker.vsock_cid_base, 3);
-        assert!(!config.firecracker.overlay_rootfs);
+        assert!(config.firecracker.overlay_rootfs);
         assert_eq!(config.firecracker.overlay_size_mib, 512);
     }
 
@@ -681,10 +685,10 @@ work_dir = "/tmp/fc-runner-test"
     }
 
     #[test]
-    fn overlay_defaults_to_disabled() {
+    fn overlay_defaults_to_enabled() {
         let toml = minimal_config(r#"repo = "r""#);
         let config = AppConfig::from_str(&toml).unwrap();
-        assert!(!config.firecracker.overlay_rootfs);
+        assert!(config.firecracker.overlay_rootfs);
         assert_eq!(config.firecracker.overlay_size_mib, 512);
     }
 

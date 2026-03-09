@@ -57,9 +57,10 @@ mem_size_mib = 2048
 # Each VM gets CID = vsock_cid_base + slot (CIDs 0-2 are reserved).
 # vsock_enabled = true
 # vsock_cid_base = 3
-# Enable overlay rootfs mode for instant COW (requires squashfs-tools on host).
-# When enabled, the golden rootfs is converted to squashfs and shared read-only
-# across all VMs. Each VM gets a small sparse ext4 overlay for writes.
+# OverlayFS COW rootfs mode (enabled by default, requires squashfs-tools on host).
+# The golden rootfs is converted to squashfs and shared read-only across all VMs.
+# Each VM gets a small sparse ext4 overlay for writes (~1ms vs full copy).
+# Set to false to fall back to cp --reflink (legacy mode).
 # overlay_rootfs = true
 # overlay_size_mib = 512  # Per-VM overlay device size in MiB
 
