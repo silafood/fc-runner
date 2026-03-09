@@ -256,6 +256,22 @@ async fn install_agent_if_missing(rootfs_path: &str) -> anyhow::Result<()> {
     let fstab = format!("{}/etc/fstab", mount_dir);
     tokio::fs::write(&fstab, "/dev/vda\t/\text4\tdefaults,noatime\t0\t1\n").await?;
 
+    // Configure Docker to use vfs storage driver — overlayfs-on-overlayfs not supported
+    let docker_conf_dir = format!("{}/etc/docker", mount_dir);
+    tokio::fs::create_dir_all(&docker_conf_dir).await?;
+    tokio::fs::write(
+        format!("{}/daemon.json", docker_conf_dir),
+        r#"{"storage-driver": "vfs"}"#,
+    )
+    .await?;
+
+    // Mask serial-getty@ttyS0 — Firecracker has no real serial console device
+    let mask_dir = format!("{}/etc/systemd/system", mount_dir);
+    tokio::fs::create_dir_all(&mask_dir).await?;
+    let mask_link = format!("{}/serial-getty@ttyS0.service", mask_dir);
+    let _ = tokio::fs::remove_file(&mask_link).await;
+    tokio::fs::symlink("/dev/null", &mask_link).await?;
+
     // Install overlay-init script and directories for OverlayFS COW mode
     install_overlay_init_into(&mount_dir).await?;
 
