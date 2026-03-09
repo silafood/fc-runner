@@ -293,6 +293,8 @@ async fn install_overlay_init_into(mount_dir: &str) -> anyhow::Result<()> {
         r#"#!/bin/sh
 # overlay-init: OverlayFS COW boot for Firecracker VMs
 
+echo "overlay-init: starting"
+
 # Mount /proc so we can read kernel command line (not available as PID 1)
 /bin/mount -t proc proc /proc
 
@@ -304,14 +306,21 @@ for arg in $(cat /proc/cmdline); do
     esac
 done
 
+echo "overlay-init: overlay_root=$overlay_root"
+
 pivot() {
+    echo "overlay-init: mounting overlayfs upper=$1 work=$2"
     /bin/mount \
         -o noatime,lowerdir=/,upperdir="$1",workdir="$2" \
         -t overlay "overlayfs:$1" /mnt
+    echo "overlay-init: overlayfs mount rc=$?"
+    echo "overlay-init: pivot_root /mnt /mnt/rom"
     pivot_root /mnt /mnt/rom
+    echo "overlay-init: pivot_root rc=$?"
 }
 
 if [ -z "$overlay_root" ]; then
+    echo "overlay-init: no overlay_root, booting normally"
     exec /sbin/init "$@"
 fi
 
@@ -322,8 +331,15 @@ else
         echo "FATAL: /dev/$overlay_root does not exist"
         exec /sbin/init "$@"
     fi
+    echo "overlay-init: mounting /dev/$overlay_root at /overlay"
     /bin/mount -t ext4 -o noatime "/dev/$overlay_root" /overlay
+    echo "overlay-init: ext4 mount rc=$?"
 fi
+
+echo "overlay-init: upper dir contents:"
+ls -la /overlay/root/ 2>&1
+ls -la /overlay/root/etc/ 2>&1
+ls -la /overlay/root/etc/systemd/network/ 2>&1
 
 mkdir -p /overlay/root /overlay/work
 pivot /overlay/root /overlay/work
@@ -333,6 +349,7 @@ pivot /overlay/root /overlay/work
 mkdir -p /rom/overlay/docker /var/lib/docker
 /bin/mount --bind /rom/overlay/docker /var/lib/docker
 
+echo "overlay-init: done, exec /sbin/init"
 exec /sbin/init "$@"
 "#,
     )
