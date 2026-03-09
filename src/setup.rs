@@ -970,9 +970,21 @@ mkdir -p /overlay/root /overlay/work
 
 pivot /overlay/root /overlay/work
 
-# Bind-mount raw ext4 for Docker — overlayfs-on-overlayfs is not supported
-mkdir -p /rom/overlay/docker /var/lib/docker
-/bin/mount --bind /rom/overlay/docker /var/lib/docker
+# Mount devtmpfs so we have access to /dev/vdb in the new root
+/bin/mount -t devtmpfs devtmpfs /dev
+
+# Mount overlay ext4 at a persistent path (not under /rom which systemd cleans up)
+# Docker needs a real ext4 backing store — overlayfs-on-overlayfs is not supported
+mkdir -p /overlay-data
+/bin/mount -t ext4 -o noatime /dev/vdb /overlay-data
+mkdir -p /overlay-data/docker /var/lib/docker
+/bin/mount --bind /overlay-data/docker /var/lib/docker
+
+# Write /etc/hosts to fix "unable to resolve host" warnings
+cat > /etc/hosts <<HOSTS
+127.0.0.1 localhost localhost.localdomain
+::1 localhost ip6-localhost ip6-loopback
+HOSTS
 
 # Pre-configure network directly via ip commands — systemd-networkd has
 # issues reading config files on overlayfs. Parse the injected networkd
