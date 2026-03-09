@@ -97,6 +97,8 @@ pub struct MicroVm {
     socket_path: PathBuf,
     log_path: PathBuf,
     mount_point: PathBuf,
+    /// Per-VM overlay ext4 file (used only when overlay_rootfs = true).
+    overlay_path: PathBuf,
     fc_config: FirecrackerConfig,
     vm_timeout_secs: u64,
     // Per-VM networking
@@ -138,6 +140,7 @@ impl MicroVm {
             socket_path: base.join(format!("{}.sock", vm_id)),
             log_path: base.join(format!("{}.log", vm_id)),
             mount_point: base.join(format!("{}.mnt", vm_id)),
+            overlay_path: base.join(format!("{}.overlay.ext4", vm_id)),
             job_id,
             vm_id,
             fc_config: fc_config.clone(),
@@ -153,6 +156,41 @@ impl MicroVm {
 
     fn use_mmds(&self) -> bool {
         self.fc_config.secret_injection == "mmds"
+    }
+
+    fn use_overlay(&self) -> bool {
+        self.fc_config.overlay_rootfs
+    }
+
+    /// Path to the shared squashfs rootfs (derived from golden rootfs path).
+    fn squashfs_path(&self) -> String {
+        self.fc_config.rootfs_golden.replace(".ext4", ".squashfs")
+    }
+
+    /// Create a per-VM sparse overlay ext4 file for OverlayFS COW mode.
+    async fn create_overlay(&self) -> anyhow::Result<()> {
+        let size_bytes = self.fc_config.overlay_size_mib as u64 * 1024 * 1024;
+        let overlay = path_str(&self.overlay_path)?;
+
+        tracing::info!(
+            vm_id = %self.vm_id,
+            size_mib = self.fc_config.overlay_size_mib,
+            "creating sparse overlay ext4"
+        );
+
+        // Create sparse file (instant, no actual disk allocation)
+        let f = std::fs::File::create(overlay).context("creating overlay file")?;
+        f.set_len(size_bytes).context("setting overlay size")?;
+        drop(f);
+
+        // Format as ext4
+        let status = Command::new("mkfs.ext4")
+            .args(["-F", "-q", overlay])
+            .status()
+            .await
+            .context("running mkfs.ext4 on overlay")?;
+        ensure!(status.success(), "mkfs.ext4 overlay failed");
+        Ok(())
     }
 
     async fn copy_rootfs(&self) -> anyhow::Result<()> {
@@ -238,12 +276,17 @@ impl MicroVm {
 
     /// Inject network config only (no env vars) — used in MMDS mode where
     /// secrets go via MMDS but network config still needs to be on disk.
+    /// In overlay mode, writes to the per-VM overlay ext4 instead of the rootfs copy.
     async fn inject_network_config(&self) -> anyhow::Result<()> {
-        let rootfs = path_str(&self.rootfs_path)?;
+        let image_to_mount = if self.use_overlay() {
+            path_str(&self.overlay_path)?
+        } else {
+            path_str(&self.rootfs_path)?
+        };
         let mnt = path_str(&self.mount_point)?;
 
         tokio::fs::create_dir_all(&self.mount_point).await?;
-        mount_loop_ext4(rootfs, mnt).context("mounting rootfs")?;
+        mount_loop_ext4(image_to_mount, mnt).context("mounting for network config")?;
 
         self.write_network_config_to(&self.mount_point).await?;
 
@@ -294,9 +337,13 @@ impl MicroVm {
     }
 
     /// Mount the VM rootfs after exit and dump /var/log/runner.log for debugging.
+    /// In overlay mode, the log is in the per-VM overlay ext4 (upper dir).
     async fn dump_guest_log(&self) {
-        // When jailer is used, the rootfs lives in the chroot directory
-        let rootfs_location = if self.fc_config.jailer_path.is_some() {
+        // Determine which image to mount for log retrieval
+        let rootfs_location = if self.use_overlay() {
+            // In overlay mode, guest writes go to the overlay ext4
+            self.overlay_path.clone()
+        } else if self.fc_config.jailer_path.is_some() {
             let name = match filename_str(&self.rootfs_path) {
                 Ok(n) => n,
                 Err(_) => return,
@@ -396,17 +443,58 @@ impl MicroVm {
             )
         };
 
-        let mut config = serde_json::json!({
-            "boot-source": {
-                "kernel_image_path": kernel_path,
-                "boot_args": self.fc_config.boot_args
-            },
-            "drives": [{
+        // Build boot args — append overlay init params when in overlay mode
+        let boot_args = if self.use_overlay() {
+            format!(
+                "{} init=/sbin/overlay-init overlay_root=vdb",
+                self.fc_config.boot_args
+            )
+        } else {
+            self.fc_config.boot_args.clone()
+        };
+
+        // Build drives array — overlay mode uses two drives
+        let drives = if self.use_overlay() {
+            let squashfs = if use_jailer {
+                filename_str(&self.rootfs_path)?
+                    .replace(".ext4", "-rootfs.squashfs")
+            } else {
+                self.squashfs_path()
+            };
+            let overlay = if use_jailer {
+                filename_str(&self.overlay_path)?.to_string()
+            } else {
+                path_str(&self.overlay_path)?.to_string()
+            };
+            serde_json::json!([
+                {
+                    "drive_id": "rootfs",
+                    "path_on_host": squashfs,
+                    "is_root_device": true,
+                    "is_read_only": true
+                },
+                {
+                    "drive_id": "overlay",
+                    "path_on_host": overlay,
+                    "is_root_device": false,
+                    "is_read_only": false
+                }
+            ])
+        } else {
+            serde_json::json!([{
                 "drive_id": "rootfs",
                 "path_on_host": rootfs_path,
                 "is_root_device": true,
                 "is_read_only": false
-            }],
+            }])
+        };
+
+        let mut config = serde_json::json!({
+            "boot-source": {
+                "kernel_image_path": kernel_path,
+                "boot_args": boot_args
+            },
+            "drives": drives,
             "machine-config": {
                 "vcpu_count": self.fc_config.vcpu_count,
                 "mem_size_mib": self.fc_config.mem_size_mib
@@ -494,28 +582,53 @@ impl MicroVm {
                 })?;
         }
 
-        // Hard-link (or copy) rootfs into chroot
-        let rootfs_name = filename_str(&self.rootfs_path)?;
-        let chroot_rootfs = root_dir.join(rootfs_name);
-        tracing::debug!(
-            vm_id = %self.vm_id,
-            src = %self.rootfs_path.display(),
-            dst = %chroot_rootfs.display(),
-            "linking rootfs into chroot"
-        );
-        if tokio::fs::hard_link(&self.rootfs_path, &chroot_rootfs)
-            .await
-            .is_err()
-        {
-            tokio::fs::copy(&self.rootfs_path, &chroot_rootfs)
+        if self.use_overlay() {
+            // Overlay mode: link squashfs (shared) and overlay ext4 (per-VM) into chroot
+            let squashfs_src = self.squashfs_path();
+            let squashfs_name = filename_str(&self.rootfs_path)?
+                .replace(".ext4", "-rootfs.squashfs");
+            let chroot_squashfs = root_dir.join(&squashfs_name);
+            if tokio::fs::hard_link(&squashfs_src, &chroot_squashfs)
                 .await
-                .with_context(|| {
-                    format!(
-                        "copying rootfs {} -> {}",
-                        self.rootfs_path.display(),
-                        chroot_rootfs.display()
-                    )
-                })?;
+                .is_err()
+            {
+                tokio::fs::copy(&squashfs_src, &chroot_squashfs).await
+                    .context("copying squashfs into chroot")?;
+            }
+
+            let overlay_name = filename_str(&self.overlay_path)?;
+            let chroot_overlay = root_dir.join(overlay_name);
+            if tokio::fs::hard_link(&self.overlay_path, &chroot_overlay)
+                .await
+                .is_err()
+            {
+                tokio::fs::copy(&self.overlay_path, &chroot_overlay).await
+                    .context("copying overlay into chroot")?;
+            }
+        } else {
+            // Legacy mode: link rootfs copy into chroot
+            let rootfs_name = filename_str(&self.rootfs_path)?;
+            let chroot_rootfs = root_dir.join(rootfs_name);
+            tracing::debug!(
+                vm_id = %self.vm_id,
+                src = %self.rootfs_path.display(),
+                dst = %chroot_rootfs.display(),
+                "linking rootfs into chroot"
+            );
+            if tokio::fs::hard_link(&self.rootfs_path, &chroot_rootfs)
+                .await
+                .is_err()
+            {
+                tokio::fs::copy(&self.rootfs_path, &chroot_rootfs)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "copying rootfs {} -> {}",
+                            self.rootfs_path.display(),
+                            chroot_rootfs.display()
+                        )
+                    })?;
+            }
         }
 
         // Create log file in chroot
@@ -587,31 +700,74 @@ impl MicroVm {
             .await
             .map_err(|e| anyhow::anyhow!("put_machine_configuration failed: {}", e))?;
 
-        // Boot source
+        // Boot source — append overlay init params when in overlay mode
+        let boot_args = if self.use_overlay() {
+            format!(
+                "{} init=/sbin/overlay-init overlay_root=vdb",
+                self.fc_config.boot_args
+            )
+        } else {
+            self.fc_config.boot_args.clone()
+        };
         instance
             .put_guest_boot_source(&BootSource {
                 kernel_image_path: PathBuf::from(&self.fc_config.kernel_path),
-                boot_args: Some(self.fc_config.boot_args.clone()),
+                boot_args: Some(boot_args),
                 initrd_path: None,
             })
             .await
             .map_err(|e| anyhow::anyhow!("put_guest_boot_source failed: {}", e))?;
 
-        // Root drive
-        instance
-            .put_guest_drive_by_id(&Drive {
-                drive_id: "rootfs".to_string(),
-                path_on_host: self.rootfs_path.clone(),
-                is_root_device: true,
-                is_read_only: false,
-                partuuid: None,
-                cache_type: None,
-                rate_limiter: None,
-                io_engine: None,
-                socket: None,
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("put_guest_drive_by_id failed: {}", e))?;
+        if self.use_overlay() {
+            // Overlay mode: squashfs (read-only root) + overlay ext4 (read-write)
+            instance
+                .put_guest_drive_by_id(&Drive {
+                    drive_id: "rootfs".to_string(),
+                    path_on_host: PathBuf::from(self.squashfs_path()),
+                    is_root_device: true,
+                    is_read_only: true,
+                    partuuid: None,
+                    cache_type: None,
+                    rate_limiter: None,
+                    io_engine: None,
+                    socket: None,
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("put_guest_drive_by_id (squashfs) failed: {}", e))?;
+
+            instance
+                .put_guest_drive_by_id(&Drive {
+                    drive_id: "overlay".to_string(),
+                    path_on_host: self.overlay_path.clone(),
+                    is_root_device: false,
+                    is_read_only: false,
+                    partuuid: None,
+                    cache_type: None,
+                    rate_limiter: None,
+                    io_engine: None,
+                    socket: None,
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("put_guest_drive_by_id (overlay) failed: {}", e))?;
+
+            tracing::info!(vm_id = %self.vm_id, "overlay drives configured: squashfs (ro) + overlay ext4 (rw)");
+        } else {
+            // Legacy mode: single read-write rootfs
+            instance
+                .put_guest_drive_by_id(&Drive {
+                    drive_id: "rootfs".to_string(),
+                    path_on_host: self.rootfs_path.clone(),
+                    is_root_device: true,
+                    is_read_only: false,
+                    partuuid: None,
+                    cache_type: None,
+                    rate_limiter: None,
+                    io_engine: None,
+                    socket: None,
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("put_guest_drive_by_id failed: {}", e))?;
+        }
 
         // Network interface
         instance
@@ -877,6 +1033,7 @@ impl MicroVm {
             &self.socket_path,
             &self.log_path,
             &console_path,
+            &self.overlay_path,
         ] {
             if let Err(e) = tokio::fs::remove_file(path).await
                 && e.kind() != std::io::ErrorKind::NotFound
@@ -918,7 +1075,13 @@ impl MicroVm {
             "preparing VM"
         );
 
-        self.copy_rootfs().await?;
+        if self.use_overlay() {
+            // Overlay mode: create sparse overlay ext4 (no rootfs copy needed)
+            self.create_overlay().await?;
+        } else {
+            // Legacy mode: full rootfs copy
+            self.copy_rootfs().await?;
+        }
 
         if mmds {
             // MMDS mode: only inject network config to disk, secrets via MMDS
@@ -998,5 +1161,146 @@ fn log_level_from_str(s: &str) -> LogLevel {
         "info" => LogLevel::Info,
         "debug" => LogLevel::Debug,
         _ => LogLevel::Warning,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{FirecrackerConfig, NetworkConfig};
+
+    fn test_fc_config(overlay: bool) -> FirecrackerConfig {
+        FirecrackerConfig {
+            binary_path: "/usr/local/bin/firecracker".to_string(),
+            kernel_path: "/opt/fc-runner/vmlinux.bin".to_string(),
+            rootfs_golden: "/opt/fc-runner/runner-rootfs-golden.ext4".to_string(),
+            image: None,
+            vcpu_count: 2,
+            mem_size_mib: 2048,
+            boot_args: "console=ttyS0 reboot=k panic=1 pci=off".to_string(),
+            log_level: "Warning".to_string(),
+            jailer_path: None,
+            jailer_uid: None,
+            jailer_gid: None,
+            jailer_chroot_base: "/var/lib/fc-runner/jailer".to_string(),
+            cloud_img_url: None,
+            secret_injection: "mmds".to_string(),
+            vsock_enabled: false,
+            vsock_cid_base: 3,
+            overlay_rootfs: overlay,
+            overlay_size_mib: 512,
+        }
+    }
+
+    fn test_network_config() -> NetworkConfig {
+        NetworkConfig {
+            host_ip: "172.16.0.1".to_string(),
+            guest_ip: "172.16.0.2".to_string(),
+            cidr: "24".to_string(),
+            dns: vec!["8.8.8.8".to_string()],
+            allowed_networks: vec![],
+            resolved_networks: vec![],
+        }
+    }
+
+    fn create_test_vm(overlay: bool) -> MicroVm {
+        let fc_config = test_fc_config(overlay);
+        let network = test_network_config();
+        MicroVm::new(12345, &fc_config, &network, "/tmp/fc-test", 3600, 0)
+    }
+
+    #[test]
+    fn overlay_path_set_on_new() {
+        let vm = create_test_vm(true);
+        assert!(vm.overlay_path.to_string_lossy().contains(".overlay.ext4"));
+    }
+
+    #[test]
+    fn use_overlay_returns_correct_value() {
+        let vm_overlay = create_test_vm(true);
+        assert!(vm_overlay.use_overlay());
+
+        let vm_no_overlay = create_test_vm(false);
+        assert!(!vm_no_overlay.use_overlay());
+    }
+
+    #[test]
+    fn squashfs_path_derived_from_golden() {
+        let vm = create_test_vm(true);
+        assert_eq!(
+            vm.squashfs_path(),
+            "/opt/fc-runner/runner-rootfs-golden.squashfs"
+        );
+    }
+
+    #[test]
+    fn build_vm_config_legacy_single_drive() {
+        let vm = create_test_vm(false);
+        let config = vm.build_vm_config(false).unwrap();
+        let drives = config["drives"].as_array().unwrap();
+        assert_eq!(drives.len(), 1);
+        assert_eq!(drives[0]["drive_id"], "rootfs");
+        assert_eq!(drives[0]["is_read_only"], false);
+        assert!(!config["boot-source"]["boot_args"]
+            .as_str()
+            .unwrap()
+            .contains("overlay-init"));
+    }
+
+    #[test]
+    fn build_vm_config_overlay_two_drives() {
+        let vm = create_test_vm(true);
+        let config = vm.build_vm_config(false).unwrap();
+        let drives = config["drives"].as_array().unwrap();
+        assert_eq!(drives.len(), 2);
+
+        // First drive: squashfs, read-only root
+        assert_eq!(drives[0]["drive_id"], "rootfs");
+        assert_eq!(drives[0]["is_root_device"], true);
+        assert_eq!(drives[0]["is_read_only"], true);
+        assert!(drives[0]["path_on_host"]
+            .as_str()
+            .unwrap()
+            .ends_with(".squashfs"));
+
+        // Second drive: overlay, read-write
+        assert_eq!(drives[1]["drive_id"], "overlay");
+        assert_eq!(drives[1]["is_root_device"], false);
+        assert_eq!(drives[1]["is_read_only"], false);
+        assert!(drives[1]["path_on_host"]
+            .as_str()
+            .unwrap()
+            .contains(".overlay.ext4"));
+    }
+
+    #[test]
+    fn build_vm_config_overlay_boot_args() {
+        let vm = create_test_vm(true);
+        let config = vm.build_vm_config(false).unwrap();
+        let boot_args = config["boot-source"]["boot_args"].as_str().unwrap();
+        assert!(boot_args.contains("init=/sbin/overlay-init"));
+        assert!(boot_args.contains("overlay_root=vdb"));
+        // Original args still present
+        assert!(boot_args.contains("console=ttyS0"));
+    }
+
+    #[test]
+    fn build_vm_config_legacy_no_overlay_boot_args() {
+        let vm = create_test_vm(false);
+        let config = vm.build_vm_config(false).unwrap();
+        let boot_args = config["boot-source"]["boot_args"].as_str().unwrap();
+        assert!(!boot_args.contains("overlay-init"));
+        assert!(!boot_args.contains("overlay_root"));
+    }
+
+    #[test]
+    fn log_level_parsing() {
+        assert!(matches!(log_level_from_str("error"), LogLevel::Error));
+        assert!(matches!(log_level_from_str("Error"), LogLevel::Error));
+        assert!(matches!(log_level_from_str("warning"), LogLevel::Warning));
+        assert!(matches!(log_level_from_str("warn"), LogLevel::Warning));
+        assert!(matches!(log_level_from_str("info"), LogLevel::Info));
+        assert!(matches!(log_level_from_str("debug"), LogLevel::Debug));
+        assert!(matches!(log_level_from_str("unknown"), LogLevel::Warning));
     }
 }

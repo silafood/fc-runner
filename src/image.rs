@@ -256,6 +256,9 @@ async fn install_agent_if_missing(rootfs_path: &str) -> anyhow::Result<()> {
     let fstab = format!("{}/etc/fstab", mount_dir);
     tokio::fs::write(&fstab, "/dev/vda\t/\text4\tdefaults,noatime\t0\t1\n").await?;
 
+    // Install overlay-init script and directories for OverlayFS COW mode
+    install_overlay_init_into(&mount_dir).await?;
+
     umount(&mount_dir).await?;
     let _ = tokio::fs::remove_dir(&mount_dir).await;
 
@@ -265,6 +268,63 @@ async fn install_agent_if_missing(rootfs_path: &str) -> anyhow::Result<()> {
         tracing::debug!("fc-runner agent already present in rootfs");
     }
 
+    Ok(())
+}
+
+/// Install the overlay-init script and required directories into a mounted rootfs.
+async fn install_overlay_init_into(mount_dir: &str) -> anyhow::Result<()> {
+    // Create overlay directories
+    for dir in ["/overlay/root", "/overlay/work", "/mnt", "/rom"] {
+        tokio::fs::create_dir_all(format!("{}{}", mount_dir, dir)).await?;
+    }
+
+    let sbin_dir = format!("{}/sbin", mount_dir);
+    tokio::fs::create_dir_all(&sbin_dir).await?;
+    let overlay_init = format!("{}/overlay-init", sbin_dir);
+    tokio::fs::write(
+        &overlay_init,
+        r#"#!/bin/sh
+# overlay-init: OverlayFS COW boot for Firecracker VMs
+for arg in $(cat /proc/cmdline); do
+    key="${arg%%=*}"
+    val="${arg#*=}"
+    case "$key" in
+        overlay_root) overlay_root="$val" ;;
+    esac
+done
+
+pivot() {
+    /bin/mount \
+        -o noatime,lowerdir=/,upperdir="$1",workdir="$2" \
+        -t overlay "overlayfs:$1" /mnt
+    pivot_root /mnt /mnt/rom
+}
+
+if [ -z "$overlay_root" ]; then
+    exec /sbin/init "$@"
+fi
+
+if [ "$overlay_root" = "ram" ]; then
+    /bin/mount -t tmpfs -o noatime,mode=0755 tmpfs /overlay
+else
+    if [ ! -b "/dev/$overlay_root" ]; then
+        echo "FATAL: /dev/$overlay_root does not exist"
+        exec /sbin/init "$@"
+    fi
+    /bin/mount -t ext4 -o noatime "/dev/$overlay_root" /overlay
+fi
+
+mkdir -p /overlay/root /overlay/work
+pivot /overlay/root /overlay/work
+exec /sbin/init "$@"
+"#,
+    )
+    .await?;
+    std::fs::set_permissions(
+        &overlay_init,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )?;
+    tracing::debug!("installed overlay-init into rootfs");
     Ok(())
 }
 

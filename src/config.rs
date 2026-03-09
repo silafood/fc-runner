@@ -172,6 +172,16 @@ pub struct FirecrackerConfig {
     /// Base CID for VSOCK devices (default: 3, since CID 1 and 2 are reserved).
     #[serde(default = "default_vsock_cid_base")]
     pub vsock_cid_base: u32,
+    /// Enable OverlayFS COW rootfs mode.
+    /// When enabled, the golden rootfs is converted to squashfs and shared read-only
+    /// across all VMs. Each VM gets a small sparse ext4 overlay for writes.
+    /// Requires squashfs-tools on the host.
+    #[serde(default)]
+    pub overlay_rootfs: bool,
+    /// Per-VM overlay device size in MiB (default: 512).
+    /// Only used when overlay_rootfs = true.
+    #[serde(default = "default_overlay_size_mib")]
+    pub overlay_size_mib: u32,
 }
 
 fn default_secret_injection() -> String {
@@ -180,6 +190,10 @@ fn default_secret_injection() -> String {
 
 fn default_vsock_cid_base() -> u32 {
     3
+}
+
+fn default_overlay_size_mib() -> u32 {
+    512
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -551,6 +565,8 @@ labels = ["self-hosted", "arm64"]
         assert_eq!(config.firecracker.secret_injection, "mmds");
         assert!(!config.firecracker.vsock_enabled);
         assert_eq!(config.firecracker.vsock_cid_base, 3);
+        assert!(!config.firecracker.overlay_rootfs);
+        assert_eq!(config.firecracker.overlay_size_mib, 512);
     }
 
     #[test]
@@ -639,6 +655,81 @@ work_dir = "/tmp/fc-runner-test"
         let config = AppConfig::from_str(toml).unwrap();
         assert!(config.firecracker.vsock_enabled);
         assert_eq!(config.firecracker.vsock_cid_base, 10);
+    }
+
+    #[test]
+    fn parse_overlay_config() {
+        let toml = r#"
+[github]
+token = "ghp_test1234567890abcdefghijklmnopqrs"
+owner = "test-org"
+repo = "r"
+
+[firecracker]
+binary_path = "/usr/local/bin/firecracker"
+kernel_path = "/opt/fc-runner/vmlinux.bin"
+rootfs_golden = "/opt/fc-runner/rootfs.ext4"
+overlay_rootfs = true
+overlay_size_mib = 1024
+
+[runner]
+work_dir = "/tmp/fc-runner-test"
+"#;
+        let config = AppConfig::from_str(toml).unwrap();
+        assert!(config.firecracker.overlay_rootfs);
+        assert_eq!(config.firecracker.overlay_size_mib, 1024);
+    }
+
+    #[test]
+    fn overlay_defaults_to_disabled() {
+        let toml = minimal_config(r#"repo = "r""#);
+        let config = AppConfig::from_str(&toml).unwrap();
+        assert!(!config.firecracker.overlay_rootfs);
+        assert_eq!(config.firecracker.overlay_size_mib, 512);
+    }
+
+    #[test]
+    fn overlay_enabled_without_size_uses_default() {
+        let toml = r#"
+[github]
+token = "ghp_test1234567890abcdefghijklmnopqrs"
+owner = "test-org"
+repo = "r"
+
+[firecracker]
+binary_path = "/usr/local/bin/firecracker"
+kernel_path = "/opt/fc-runner/vmlinux.bin"
+rootfs_golden = "/opt/fc-runner/rootfs.ext4"
+overlay_rootfs = true
+
+[runner]
+work_dir = "/tmp/fc-runner-test"
+"#;
+        let config = AppConfig::from_str(toml).unwrap();
+        assert!(config.firecracker.overlay_rootfs);
+        assert_eq!(config.firecracker.overlay_size_mib, 512);
+    }
+
+    #[test]
+    fn overlay_custom_size() {
+        let toml = r#"
+[github]
+token = "ghp_test1234567890abcdefghijklmnopqrs"
+owner = "test-org"
+repo = "r"
+
+[firecracker]
+binary_path = "/usr/local/bin/firecracker"
+kernel_path = "/opt/fc-runner/vmlinux.bin"
+rootfs_golden = "/opt/fc-runner/rootfs.ext4"
+overlay_rootfs = true
+overlay_size_mib = 2048
+
+[runner]
+work_dir = "/tmp/fc-runner-test"
+"#;
+        let config = AppConfig::from_str(toml).unwrap();
+        assert_eq!(config.firecracker.overlay_size_mib, 2048);
     }
 
     #[test]
