@@ -258,8 +258,16 @@ impl MicroVm {
 
         mount_loop_ext4(rootfs, mnt).context("mounting rootfs")?;
 
+        // In overlay mode, files must go under root/ subdirectory because
+        // overlay-init uses upperdir=/overlay/root (not /overlay itself)
+        let write_base = if self.use_overlay() {
+            self.mount_point.join("root")
+        } else {
+            self.mount_point.clone()
+        };
+
         // Write environment file
-        let env_dir = self.mount_point.join("etc");
+        let env_dir = write_base.join("etc");
         tokio::fs::create_dir_all(&env_dir).await?;
 
         let env_path = env_dir.join("fc-runner-env");
@@ -272,7 +280,7 @@ impl MicroVm {
         )?;
 
         // Write per-VM guest network config (unique IP/gateway per slot)
-        self.write_network_config_to(&self.mount_point).await?;
+        self.write_network_config_to(&write_base).await?;
 
         self.umount_with_retry().await?;
         let _ = tokio::fs::remove_dir(&self.mount_point).await;
@@ -293,7 +301,15 @@ impl MicroVm {
         tokio::fs::create_dir_all(&self.mount_point).await?;
         mount_loop_ext4(image_to_mount, mnt).context("mounting for network config")?;
 
-        self.write_network_config_to(&self.mount_point).await?;
+        // In overlay mode, files must go under root/ subdirectory because
+        // overlay-init uses upperdir=/overlay/root
+        let write_base = if self.use_overlay() {
+            self.mount_point.join("root")
+        } else {
+            self.mount_point.clone()
+        };
+
+        self.write_network_config_to(&write_base).await?;
 
         self.umount_with_retry().await?;
         let _ = tokio::fs::remove_dir(&self.mount_point).await;
@@ -377,7 +393,12 @@ impl MicroVm {
             return;
         }
 
-        let log_path = self.mount_point.join("var/log/runner.log");
+        // In overlay mode, guest files are under root/ on the overlay ext4
+        let log_path = if self.use_overlay() {
+            self.mount_point.join("root/var/log/runner.log")
+        } else {
+            self.mount_point.join("var/log/runner.log")
+        };
         match tokio::fs::read_to_string(&log_path).await {
             Ok(contents) => {
                 // Strip ANSI escape sequences and log each line
