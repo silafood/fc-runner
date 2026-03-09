@@ -125,6 +125,12 @@ pub async fn ensure_vm_assets(config: &mut AppConfig) -> anyhow::Result<()> {
         let cloud_img_url = config.firecracker.cloud_img_url.as_deref().unwrap_or(DEFAULT_CLOUD_IMG_URL);
         ensure_golden_rootfs(&config.firecracker.rootfs_golden, cloud_img_url, &config.network).await?;
     }
+
+    // Convert golden rootfs to squashfs when overlay mode is enabled
+    if config.firecracker.overlay_rootfs {
+        convert_to_squashfs(&config.firecracker.rootfs_golden).await?;
+    }
+
     ensure_network(&config.network).await?;
     ensure_directories(config).await?;
     Ok(())
@@ -818,6 +824,140 @@ reboot -f
         .await;
     }
 
+    // ── Install overlay-init for OverlayFS COW rootfs mode ──────────
+    install_overlay_init(mount_dir).await?;
+
+    Ok(())
+}
+
+/// Convert the golden ext4 rootfs to squashfs for read-only sharing across VMs.
+/// The squashfs file is cached alongside the ext4 (e.g., runner-rootfs-golden.squashfs).
+/// Skips conversion if squashfs already exists and is newer than the ext4.
+async fn convert_to_squashfs(ext4_path: &str) -> anyhow::Result<()> {
+    let squashfs_path = ext4_path.replace(".ext4", ".squashfs");
+
+    // Skip if squashfs already exists and is newer than ext4
+    if let (Ok(sq_meta), Ok(ext4_meta)) = (
+        tokio::fs::metadata(&squashfs_path).await,
+        tokio::fs::metadata(ext4_path).await,
+    )
+        && let (Ok(sq_mod), Ok(ext4_mod)) = (sq_meta.modified(), ext4_meta.modified())
+        && sq_mod >= ext4_mod
+    {
+        tracing::info!(path = %squashfs_path, "squashfs already up-to-date, skipping conversion");
+        return Ok(());
+    }
+
+    // Check that mksquashfs is available
+    let check = tokio::process::Command::new("which")
+        .arg("mksquashfs")
+        .output()
+        .await;
+    if check.is_err() || !check.unwrap().status.success() {
+        anyhow::bail!(
+            "squashfs-tools not installed (mksquashfs not found). \
+             Install with: apt install squashfs-tools"
+        );
+    }
+
+    tracing::info!(ext4 = %ext4_path, squashfs = %squashfs_path, "converting rootfs to squashfs");
+
+    // Mount the ext4 image to a temp directory
+    let mount_dir = format!("{}-squashfs-mount", ext4_path);
+    tokio::fs::create_dir_all(&mount_dir).await?;
+    let status = tokio::process::Command::new("mount")
+        .args(["-o", "loop,ro", ext4_path, &mount_dir])
+        .status()
+        .await
+        .context("mounting ext4 for squashfs conversion")?;
+    ensure!(status.success(), "mount ext4 for squashfs conversion failed");
+
+    // Run mksquashfs with zstd compression
+    let result = tokio::process::Command::new("mksquashfs")
+        .args([&mount_dir, &squashfs_path, "-noappend", "-comp", "zstd"])
+        .status()
+        .await
+        .context("running mksquashfs");
+
+    // Always unmount, even if mksquashfs failed
+    let _ = tokio::process::Command::new("umount")
+        .arg(&mount_dir)
+        .status()
+        .await;
+    let _ = tokio::fs::remove_dir(&mount_dir).await;
+
+    let status = result?;
+    ensure!(status.success(), "mksquashfs failed");
+
+    let sq_size = tokio::fs::metadata(&squashfs_path).await?.len();
+    let ext4_size = tokio::fs::metadata(ext4_path).await?.len();
+    tracing::info!(
+        squashfs = %squashfs_path,
+        squashfs_size_mib = sq_size / (1024 * 1024),
+        ext4_size_mib = ext4_size / (1024 * 1024),
+        "squashfs rootfs ready for overlay mode"
+    );
+
+    Ok(())
+}
+
+/// Install the overlay-init script and required directories into the rootfs.
+/// This script is used as init=/sbin/overlay-init when overlay_rootfs mode is enabled.
+/// It mounts the overlay ext4 device on top of the squashfs root via pivot_root.
+async fn install_overlay_init(mount_dir: &str) -> anyhow::Result<()> {
+    // Create overlay directories
+    for dir in ["/overlay/root", "/overlay/work", "/mnt", "/rom"] {
+        tokio::fs::create_dir_all(format!("{}{}", mount_dir, dir)).await?;
+    }
+
+    // Write overlay-init script
+    let overlay_init = format!("{}/sbin/overlay-init", mount_dir);
+    tokio::fs::write(
+        &overlay_init,
+        r#"#!/bin/sh
+# overlay-init: OverlayFS COW boot for Firecracker VMs
+# Mounts a read-write overlay on top of the read-only squashfs root.
+# Usage: kernel boot args: init=/sbin/overlay-init overlay_root=vdb
+
+# Parse overlay_root from /proc/cmdline
+for arg in $(cat /proc/cmdline); do
+    key="${arg%%=*}"
+    val="${arg#*=}"
+    case "$key" in
+        overlay_root) overlay_root="$val" ;;
+    esac
+done
+
+pivot() {
+    /bin/mount \
+        -o noatime,lowerdir=/,upperdir="$1",workdir="$2" \
+        -t overlay "overlayfs:$1" /mnt
+    pivot_root /mnt /mnt/rom
+}
+
+if [ -z "$overlay_root" ]; then
+    # No overlay requested — boot normally
+    exec /sbin/init "$@"
+fi
+
+if [ "$overlay_root" = "ram" ]; then
+    /bin/mount -t tmpfs -o noatime,mode=0755 tmpfs /overlay
+else
+    if [ ! -b "/dev/$overlay_root" ]; then
+        echo "FATAL: /dev/$overlay_root does not exist"
+        exec /sbin/init "$@"
+    fi
+    /bin/mount -t ext4 -o noatime "/dev/$overlay_root" /overlay
+fi
+
+mkdir -p /overlay/root /overlay/work
+pivot /overlay/root /overlay/work
+exec /sbin/init "$@"
+"#,
+    )
+    .await?;
+    set_executable(&overlay_init)?;
+    tracing::info!("installed overlay-init script into rootfs");
     Ok(())
 }
 
