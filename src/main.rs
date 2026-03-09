@@ -4,6 +4,7 @@ mod cli;
 mod config;
 mod firecracker;
 mod github;
+mod image;
 mod metrics;
 mod netlink;
 mod orchestrator;

@@ -1,0 +1,366 @@
+//! OCI image pull and convert to ext4 for Firecracker.
+//!
+//! Pulls an OCI container image from a registry (Docker Hub, GHCR, etc.),
+//! extracts all layers onto a loop-mounted ext4 image, and handles OCI
+//! whiteout files. The resulting ext4 image is used as the golden rootfs.
+
+use std::path::Path;
+
+use anyhow::{Context, ensure};
+use oci_client::manifest::{IMAGE_DOCKER_LAYER_GZIP_MEDIA_TYPE, IMAGE_LAYER_GZIP_MEDIA_TYPE};
+use oci_client::secrets::RegistryAuth;
+use oci_client::{Client, Reference};
+use tokio::process::Command;
+
+/// Default rootfs size in bytes (6 GiB).
+const DEFAULT_IMAGE_SIZE: u64 = 6 * 1024 * 1024 * 1024;
+
+/// Pull an OCI image and convert it to an ext4 rootfs.
+///
+/// If the image has already been pulled and the digest matches, the cached
+/// rootfs is reused. The `fc-runner` binary is installed into the image
+/// automatically if not already present.
+pub async fn pull_and_convert(
+    image_ref: &str,
+    output_path: &str,
+) -> anyhow::Result<()> {
+    let reference: Reference = image_ref
+        .parse()
+        .context("parsing OCI image reference")?;
+
+    let client = Client::default();
+    let auth = RegistryAuth::Anonymous;
+
+    // Pull manifest to get digest and layer info
+    let (manifest, digest) = client
+        .pull_image_manifest(&reference, &auth)
+        .await
+        .context("pulling image manifest")?;
+
+    // Check cache — skip pull if digest matches
+    let digest_file = format!("{}.digest", output_path);
+    if Path::new(output_path).exists() && Path::new(&digest_file).exists() {
+        let cached = tokio::fs::read_to_string(&digest_file)
+            .await
+            .unwrap_or_default();
+        if cached.trim() == digest {
+            tracing::info!(image = image_ref, "OCI image unchanged (digest match), using cached rootfs");
+            return Ok(());
+        }
+    }
+
+    tracing::info!(
+        image = image_ref,
+        digest = %digest,
+        layers = manifest.layers.len(),
+        "pulling OCI image and converting to ext4"
+    );
+
+    // Remove stale rootfs if exists
+    let _ = tokio::fs::remove_file(output_path).await;
+
+    // Create blank ext4 image
+    create_ext4_image(output_path, DEFAULT_IMAGE_SIZE).await?;
+
+    // Mount the ext4 image
+    let mount_dir = format!("{}-oci-mount", output_path);
+    tokio::fs::create_dir_all(&mount_dir).await?;
+    mount_ext4(output_path, &mount_dir).await?;
+
+    // Extract layers in order (bottom to top)
+    let result = extract_all_layers(&client, &reference, &auth, &manifest, &mount_dir).await;
+
+    // Always unmount, even on error
+    let umount_result = umount(&mount_dir).await;
+    let _ = tokio::fs::remove_dir(&mount_dir).await;
+
+    // Propagate errors
+    result.context("extracting OCI layers")?;
+    umount_result.context("unmounting OCI image")?;
+
+    // Install fc-runner agent if not already in the image
+    install_agent_if_missing(output_path).await?;
+
+    // Save digest for cache check
+    tokio::fs::write(&digest_file, &digest).await?;
+
+    tracing::info!(
+        image = image_ref,
+        path = output_path,
+        "OCI image converted to ext4 rootfs"
+    );
+    Ok(())
+}
+
+/// Extract all layers from the manifest onto the mounted rootfs.
+async fn extract_all_layers(
+    client: &Client,
+    reference: &Reference,
+    _auth: &RegistryAuth,
+    manifest: &oci_client::manifest::OciImageManifest,
+    mount_dir: &str,
+) -> anyhow::Result<()> {
+    for (i, layer) in manifest.layers.iter().enumerate() {
+        let media_type = &layer.media_type;
+
+        // Only extract filesystem layers (gzip compressed tar)
+        if media_type != IMAGE_LAYER_GZIP_MEDIA_TYPE
+            && media_type != IMAGE_DOCKER_LAYER_GZIP_MEDIA_TYPE
+        {
+            tracing::debug!(
+                layer = i + 1,
+                media_type = %media_type,
+                "skipping non-filesystem layer"
+            );
+            continue;
+        }
+
+        tracing::info!(
+            layer = i + 1,
+            total = manifest.layers.len(),
+            size = layer.size,
+            digest = %layer.digest,
+            "extracting layer"
+        );
+
+        let mut layer_data: Vec<u8> = Vec::with_capacity(layer.size as usize);
+        client
+            .pull_blob(reference, layer, &mut layer_data)
+            .await
+            .with_context(|| format!("pulling layer {} ({})", i + 1, layer.digest))?;
+
+        extract_layer(&layer_data, mount_dir)
+            .with_context(|| format!("extracting layer {} ({})", i + 1, layer.digest))?;
+    }
+    Ok(())
+}
+
+/// Extract a single tar.gz layer onto the mount directory, handling OCI whiteouts.
+fn extract_layer(layer_data: &[u8], mount_dir: &str) -> anyhow::Result<()> {
+    let gz = flate2::read::GzDecoder::new(layer_data);
+    let mut archive = tar::Archive::new(gz);
+    archive.set_overwrite(true);
+    // Preserve ownership and permissions
+    archive.set_preserve_ownerships(true);
+    archive.set_preserve_permissions(true);
+    // Don't unpack outside mount_dir
+    archive.set_unpack_xattrs(true);
+
+    let mount_path = Path::new(mount_dir);
+
+    for entry in archive.entries().context("reading tar entries")? {
+        let mut entry = entry.context("reading tar entry")?;
+        let path = entry.path().context("reading entry path")?.into_owned();
+
+        // Handle OCI whiteout files
+        if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+            if file_name == ".wh..wh..opq" {
+                // Opaque whiteout: delete all contents of the parent directory
+                let parent = mount_path.join(
+                    path.parent().unwrap_or_else(|| Path::new(".")),
+                );
+                if parent.exists() {
+                    for child in std::fs::read_dir(&parent)? {
+                        let child = child?;
+                        let child_path = child.path();
+                        if child_path.is_dir() {
+                            let _ = std::fs::remove_dir_all(&child_path);
+                        } else {
+                            let _ = std::fs::remove_file(&child_path);
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if let Some(target_name) = file_name.strip_prefix(".wh.") {
+                // Regular whiteout: delete the specific file/dir
+                let target = mount_path.join(
+                    path.parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join(target_name),
+                );
+                if target.is_dir() {
+                    let _ = std::fs::remove_dir_all(&target);
+                } else {
+                    let _ = std::fs::remove_file(&target);
+                }
+                continue;
+            }
+        }
+
+        // Normal entry: extract to mount directory
+        entry
+            .unpack_in(mount_path)
+            .with_context(|| format!("unpacking {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+/// Install fc-runner agent binary into the rootfs if not already present.
+async fn install_agent_if_missing(rootfs_path: &str) -> anyhow::Result<()> {
+    let mount_dir = format!("{}-agent-install", rootfs_path);
+    tokio::fs::create_dir_all(&mount_dir).await?;
+    mount_ext4(rootfs_path, &mount_dir).await?;
+
+    let agent_path = format!("{}/usr/local/bin/fc-runner", mount_dir);
+    let needs_install = !Path::new(&agent_path).exists();
+
+    if needs_install {
+        tracing::info!("installing fc-runner agent into OCI-based rootfs");
+        let self_exe = std::env::current_exe().context("getting current executable path")?;
+        tokio::fs::create_dir_all(format!("{}/usr/local/bin", mount_dir)).await?;
+        tokio::fs::copy(&self_exe, &agent_path).await?;
+        std::fs::set_permissions(
+            &agent_path,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )?;
+    }
+
+    // Write entrypoint that uses fc-runner agent
+    let entrypoint_path = format!("{}/entrypoint.sh", mount_dir);
+    if needs_install || !Path::new(&entrypoint_path).exists() {
+        tokio::fs::write(
+            &entrypoint_path,
+            "#!/bin/bash\nset -euo pipefail\nexec > /var/log/runner.log 2>&1\n\
+             echo \"=== fc-runner entrypoint $(date) ===\"\n\
+             if [ -x /usr/local/bin/fc-runner ]; then\n\
+             \texec /usr/local/bin/fc-runner agent --log-level info\n\
+             fi\n\
+             echo \"fc-runner binary not found\"\nreboot -f\n",
+        )
+        .await?;
+        std::fs::set_permissions(
+            &entrypoint_path,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )?;
+    }
+
+    // Ensure rc.local exists to boot the entrypoint
+    let rc_local = format!("{}/etc/rc.local", mount_dir);
+    if !Path::new(&rc_local).exists() {
+        tokio::fs::create_dir_all(format!("{}/etc", mount_dir)).await?;
+        tokio::fs::write(
+            &rc_local,
+            "#!/bin/bash\n/entrypoint.sh >> /var/log/runner.log 2>&1 &\nexit 0\n",
+        )
+        .await?;
+        std::fs::set_permissions(
+            &rc_local,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )?;
+    }
+
+    // Ensure fstab uses /dev/vda (Firecracker block device)
+    let fstab = format!("{}/etc/fstab", mount_dir);
+    tokio::fs::write(&fstab, "/dev/vda\t/\text4\tdefaults,noatime\t0\t1\n").await?;
+
+    umount(&mount_dir).await?;
+    let _ = tokio::fs::remove_dir(&mount_dir).await;
+
+    if needs_install {
+        tracing::info!("fc-runner agent installed into rootfs");
+    } else {
+        tracing::debug!("fc-runner agent already present in rootfs");
+    }
+
+    Ok(())
+}
+
+/// Create a blank ext4 filesystem image.
+async fn create_ext4_image(path: &str, size_bytes: u64) -> anyhow::Result<()> {
+    // Create sparse file
+    let f = std::fs::File::create(path).context("creating image file")?;
+    f.set_len(size_bytes).context("setting image size")?;
+    drop(f);
+
+    // Format as ext4
+    let status = Command::new("mkfs.ext4")
+        .args(["-F", "-q", path])
+        .status()
+        .await
+        .context("running mkfs.ext4")?;
+    ensure!(status.success(), "mkfs.ext4 failed");
+    Ok(())
+}
+
+/// Mount an ext4 image via loop device.
+async fn mount_ext4(image: &str, target: &str) -> anyhow::Result<()> {
+    let status = Command::new("mount")
+        .args(["-o", "loop,noatime", image, target])
+        .status()
+        .await
+        .context("running mount")?;
+    ensure!(status.success(), "mount failed: {} -> {}", image, target);
+    Ok(())
+}
+
+/// Unmount a filesystem (lazy unmount for safety).
+async fn umount(target: &str) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        nix::mount::umount2(target, nix::mount::MntFlags::MNT_DETACH)
+            .map_err(|e| anyhow::anyhow!("umount {} failed: {}", target, e))?;
+        return Ok(());
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let status = Command::new("umount")
+            .args(["-l", target])
+            .status()
+            .await
+            .context("running umount")?;
+        ensure!(status.success(), "umount failed: {}", target);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_image_reference() {
+        let r: Reference = "ghcr.io/silafood/fc-runner-image:latest"
+            .parse()
+            .unwrap();
+        assert_eq!(r.registry(), "ghcr.io");
+        assert_eq!(r.repository(), "silafood/fc-runner-image");
+        assert_eq!(r.tag().unwrap(), "latest");
+    }
+
+    #[test]
+    fn parse_docker_hub_reference() {
+        let r: Reference = "ubuntu:24.04".parse().unwrap();
+        assert_eq!(r.repository(), "library/ubuntu");
+        assert_eq!(r.tag().unwrap(), "24.04");
+    }
+
+    #[test]
+    fn whiteout_detection() {
+        assert!(".wh.somefile".starts_with(".wh."));
+        assert!(".wh..wh..opq".starts_with(".wh."));
+        assert_eq!(".wh.somefile".strip_prefix(".wh."), Some("somefile"));
+    }
+
+    #[test]
+    fn extract_layer_handles_empty() {
+        // Create a valid empty tar.gz
+        let mut builder = tar::Builder::new(Vec::new());
+        let tar_data = builder.into_inner().unwrap();
+        let mut gz_data = Vec::new();
+        {
+            use std::io::Write;
+            let mut encoder =
+                flate2::write::GzEncoder::new(&mut gz_data, flate2::Compression::fast());
+            encoder.write_all(&tar_data).unwrap();
+            encoder.finish().unwrap();
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let result = extract_layer(&gz_data, tmp.path().to_str().unwrap());
+        assert!(result.is_ok());
+    }
+
+}

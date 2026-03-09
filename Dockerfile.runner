@@ -1,0 +1,67 @@
+# Sample Dockerfile for building a Firecracker VM rootfs image.
+#
+# Build and push:
+#   docker build -t ghcr.io/your-org/fc-runner-image:latest -f Dockerfile.runner .
+#   docker push ghcr.io/your-org/fc-runner-image:latest
+#
+# Then set in config.toml:
+#   [firecracker]
+#   image = "ghcr.io/your-org/fc-runner-image:latest"
+#
+# fc-runner will pull this image, convert layers to ext4, and boot VMs from it.
+# The fc-runner agent binary is installed automatically if not present.
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# System packages + CI dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        systemd systemd-sysv systemd-resolved \
+        curl git jq ca-certificates sudo libicu74 iproute2 \
+        build-essential pkg-config libssl-dev \
+        gcc g++ make cmake \
+        python3 python3-pip python3-venv \
+        nodejs npm \
+        docker.io containerd \
+        wget tar gzip xz-utils zip bzip2 \
+        libffi-dev zlib1g-dev \
+        net-tools dnsutils iputils-ping \
+        locales \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Locale
+RUN locale-gen en_US.UTF-8
+ENV LANG=en_US.UTF-8
+
+# Runner user
+RUN useradd -m -s /bin/bash runner && \
+    echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner
+
+# GitHub Actions runner
+ARG RUNNER_VERSION=2.332.0
+RUN cd /home/runner && \
+    curl -fsSL -o runner.tar.gz \
+      "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz" && \
+    tar xzf runner.tar.gz && \
+    rm runner.tar.gz && \
+    chown -R runner:runner /home/runner
+
+# Rust toolchain (installed as runner user)
+RUN su - runner -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable' && \
+    ln -sf /home/runner/.cargo/bin/cargo /usr/local/bin/cargo && \
+    ln -sf /home/runner/.cargo/bin/rustc /usr/local/bin/rustc && \
+    ln -sf /home/runner/.cargo/bin/rustup /usr/local/bin/rustup
+
+# Networking (systemd-networkd + resolved)
+RUN systemctl enable systemd-networkd systemd-resolved && \
+    systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true && \
+    systemctl disable motd-news.timer 2>/dev/null || true && \
+    systemctl mask systemd-timesyncd.service 2>/dev/null || true
+
+# fstab for Firecracker (/dev/vda)
+RUN printf '/dev/vda\t/\text4\tdefaults,noatime\t0\t1\n' > /etc/fstab
+
+# Ensure /var/tmp exists (systemd-resolved PrivateTmp)
+RUN mkdir -p /var/tmp && chmod 1777 /var/tmp

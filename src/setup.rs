@@ -116,8 +116,15 @@ pub async fn ensure_vm_assets(config: &mut AppConfig) -> anyhow::Result<()> {
     preflight_kvm()?;
     resolve_allowed_networks(&mut config.network, config.github.token.as_ref()).await?;
     ensure_kernel(&config.firecracker.kernel_path).await?;
-    let cloud_img_url = config.firecracker.cloud_img_url.as_deref().unwrap_or(DEFAULT_CLOUD_IMG_URL);
-    ensure_golden_rootfs(&config.firecracker.rootfs_golden, cloud_img_url, &config.network).await?;
+    if let Some(image_ref) = &config.firecracker.image {
+        // OCI image mode: pull and convert to ext4
+        crate::image::pull_and_convert(image_ref, &config.firecracker.rootfs_golden).await
+            .context("OCI image pull and convert failed")?;
+    } else {
+        // Cloud image mode: build from Ubuntu cloud image
+        let cloud_img_url = config.firecracker.cloud_img_url.as_deref().unwrap_or(DEFAULT_CLOUD_IMG_URL);
+        ensure_golden_rootfs(&config.firecracker.rootfs_golden, cloud_img_url, &config.network).await?;
+    }
     ensure_network(&config.network).await?;
     ensure_directories(config).await?;
     Ok(())
