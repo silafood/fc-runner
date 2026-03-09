@@ -83,26 +83,29 @@ All API methods accept a `repo` parameter, allowing a single client to serve mul
 All requests include `Authorization: Bearer <token>` and `X-GitHub-Api-Version: 2022-11-28`.
 
 ### `firecracker.rs`
-Manages the full VM lifecycle through the `MicroVm` struct. Supports two secret injection modes:
+Manages the full VM lifecycle through the `MicroVm` struct. Uses the `firecracker-rs-sdk` crate for typed API interactions in MMDS mode, replacing manual JSON config building and raw HTTP calls. Supports two secret injection modes:
 
 **MMDS mode** (default, `secret_injection = "mmds"`):
 1. **copy_rootfs** — `cp --reflink=auto` of the golden ext4 image
 2. **create_tap** — creates a per-VM TAP device (`tap-fc<slot>`) via `netlink.rs`
 3. **inject_network_config** — loop-mount the copy, write per-VM network config (but not secrets)
-4. **write_vm_config** — generate VM config JSON with MMDS V2 enabled
-5. **run_with_api** — spawn `firecracker --config-file <path> --api-sock <sock>`, then PUT secrets to MMDS via Unix socket HTTP
-6. **dump_guest_log** / **cleanup**
+4. **build_sdk_instance** — create an SDK `Instance` via `FirecrackerOption`/`JailerOption` builders
+5. **start_vmm** — SDK spawns the firecracker/jailer process and connects to the API socket
+6. **configure_instance** — typed SDK API calls: `put_machine_configuration`, `put_guest_boot_source`, `put_guest_drive_by_id`, `put_guest_network_interface_by_id`, `put_logger`, `put_mmds_config`, `put_mmds`, `put_guest_vsock`
+7. **start** — SDK sends `InstanceStart` action to boot the VM
+8. **wait_for_exit** — polls the firecracker PID until the process exits (via `nix::sys::signal::kill`)
+9. **dump_guest_log** / **cleanup**
 
 **Mount mode** (legacy, `secret_injection = "mount"`):
 1. **copy_rootfs** + **create_tap** (same as above)
 2. **inject_env_mount** — loop-mount, write `/etc/fc-runner-env` with JIT token + repo URL + network config
 3. **write_vm_config** — generate VM config JSON (no MMDS)
-4. **run_no_api** — spawn `firecracker --config-file <path> --no-api`
+4. **run_no_api** — spawn `firecracker --config-file <path> --no-api` via tokio process
 5. **dump_guest_log** / **cleanup**
 
 When VSOCK is enabled (`vsock_enabled = true`), the VM config includes a `vsock` device with `guest_cid = vsock_cid_base + slot`.
 
-Cleanup runs unconditionally, even if earlier steps fail.
+The SDK's `FStack` (Drop-based cleanup) handles process termination and jailer workspace removal. Our `cleanup()` also runs unconditionally for TAP devices, rootfs copies, and any remaining artifacts.
 
 ### `netlink.rs`
 Pure-Rust TAP device management module. On Linux, uses `ioctl(TUNSETIFF)` via `nix` crate for TAP creation and `rtnetlink` crate for IP assignment and link state management. On non-Linux platforms, falls back to `ip` commands for development/testing.
@@ -271,12 +274,13 @@ fc-runner supports two methods for injecting secrets (JIT token, repo URL) into 
 
 ### MMDS (default)
 Uses Firecracker's built-in Metadata Data Store at `169.254.169.254`:
-1. VM starts with `--api-sock` (API socket enabled)
-2. Host PUTs metadata as JSON to the MMDS via the Unix socket
-3. Guest fetches secrets from `http://169.254.169.254/latest/meta-data/` using a V2 session token
-4. No loop-mount needed for secret injection (only for network config)
+1. SDK spawns firecracker with API socket via `FirecrackerOption`/`JailerOption` builders
+2. SDK configures the VM via typed API calls (`put_machine_configuration`, `put_guest_boot_source`, etc.)
+3. Host injects metadata via `instance.put_mmds()` (SDK handles Unix socket HTTP internally)
+4. Guest fetches secrets from `http://169.254.169.254/latest/meta-data/` using a V2 session token
+5. No loop-mount needed for secret injection (only for network config)
 
-**Advantages:** No root required for secret injection, no loop device exhaustion risk, secrets never written to disk.
+**Advantages:** No root required for secret injection, no loop device exhaustion risk, secrets never written to disk, typed SDK API calls for compile-time safety.
 
 ### Mount (legacy)
 Injects secrets by loop-mounting the rootfs copy:
@@ -313,8 +317,8 @@ Active job count is tracked via `Arc<Mutex<usize>>`.
 - `path_str()` helper converts `PathBuf` to `&str` with descriptive errors instead of panicking
 
 ### VM Lifecycle
-- `--no-api` disables the Firecracker management socket (mount mode)
-- `--api-sock` enables it only for MMDS injection, then the socket is cleaned up
+- **MMDS mode**: SDK manages the API socket lifecycle — spawns process, connects socket, configures VM via API, boots, and cleans up via `FStack` (Drop-based)
+- **Mount mode**: `--no-api` disables the Firecracker management socket
 - `umount_with_retry()`: 3 attempts with 200ms delay, then lazy umount fallback to prevent leaked mounts
 - Guest log dump after every VM exit (mount read-only, extract `/var/log/runner.log`)
 - Cleanup runs unconditionally, even on failure
