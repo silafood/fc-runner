@@ -1301,13 +1301,23 @@ fi
             }
             match self.run_no_api().await {
                 Ok(exit_status) => {
-                    if !exit_status.success() {
+                    use std::os::unix::process::ExitStatusExt;
+                    if exit_status.success() {
+                        Ok(())
+                    } else if exit_status.signal().is_some() {
+                        // Signal-based exit is normal when the guest does reboot -f:
+                        // KVM_EXIT_SHUTDOWN causes Firecracker/jailer to exit via signal
+                        tracing::info!(
+                            vm_id = %self.vm_id,
+                            signal = exit_status.signal(),
+                            "VM exited via signal (normal for guest reboot)"
+                        );
+                        Ok(())
+                    } else {
                         Err(anyhow::anyhow!(
                             "firecracker exited with status {:?}",
                             exit_status.code()
                         ))
-                    } else {
-                        Ok(())
                     }
                 }
                 Err(e) => Err(e),
