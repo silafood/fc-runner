@@ -579,6 +579,22 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
         tracing::warn!("Rust toolchain installation failed — CI jobs needing cargo will not work");
     }
 
+    // Configure Docker to use vfs storage driver — overlayfs-on-overlayfs is not
+    // supported, so Docker's default overlay2 driver fails in overlay rootfs mode.
+    let docker_conf_dir = format!("{}/etc/docker", mount_dir);
+    tokio::fs::create_dir_all(&docker_conf_dir).await?;
+    tokio::fs::write(
+        format!("{}/daemon.json", docker_conf_dir),
+        r#"{"storage-driver": "vfs"}"#,
+    )
+    .await?;
+
+    // Mask serial-getty@ttyS0 — Firecracker has no real serial console device,
+    // so this service just times out waiting for /dev/ttyS0 on every boot.
+    let _ = chroot_command(mount_dir, "systemctl", &["mask", "serial-getty@ttyS0.service"])
+        .status()
+        .await;
+
     // Ensure /var/tmp exists (systemd-resolved needs it for PrivateTmp namespace)
     let var_tmp = format!("{}/var/tmp", mount_dir);
     tokio::fs::create_dir_all(&var_tmp).await?;
