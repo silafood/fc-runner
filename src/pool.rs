@@ -276,13 +276,20 @@ async fn run_pool_vm(
     vcpu_override: Option<u32>,
     mem_override: Option<u32>,
 ) -> anyhow::Result<()> {
-    tracing::info!(slot, repo = %repo, "requesting registration token for pool VM");
-    let reg_token = github.generate_registration_token(repo).await?;
+    let is_org = github.is_org_mode();
 
-    let repo_url = format!(
-        "https://github.com/{}/{}",
-        config.github.owner, repo
-    );
+    let (reg_token, registration_url) = if is_org {
+        let org = config.github.organization.as_deref().unwrap_or("unknown");
+        tracing::info!(slot, organization = org, "requesting org registration token for pool VM");
+        let token = github.generate_org_registration_token().await?;
+        let url = format!("https://github.com/{}", org);
+        (token, url)
+    } else {
+        tracing::info!(slot, repo = %repo, "requesting registration token for pool VM");
+        let token = github.generate_registration_token(repo).await?;
+        let url = format!("https://github.com/{}/{}", config.github.owner, repo);
+        (token, url)
+    };
     let runner_name = format!(
         "fc-pool-{}-{}",
         slot,
@@ -308,7 +315,7 @@ async fn run_pool_vm(
     );
     let env_content = format!(
         "RUNNER_MODE=register\nRUNNER_TOKEN={}\nREPO_URL={}\nRUNNER_NAME={}\nVM_ID={}\n",
-        reg_token, repo_url, runner_name, vm.vm_id
+        reg_token, registration_url, runner_name, vm.vm_id
     );
     vm.execute(&env_content).await
 }

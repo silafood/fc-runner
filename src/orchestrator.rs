@@ -310,22 +310,37 @@ impl Orchestrator {
         self.server_state.set_mode("warm_pool").await;
         let pool_size = self.config.runner.warm_pool_size;
         let repos = self.github.repos();
-        if repos.is_empty() {
-            anyhow::bail!("no repos configured for warm pool");
+        let is_org = self.github.is_org_mode();
+        if repos.is_empty() && !is_org {
+            anyhow::bail!("no repos configured for warm pool (set github.repo/repos or github.organization)");
         }
 
-        tracing::info!(
-            pool_size,
-            repos = ?repos,
-            "orchestrator starting (warm pool mode)"
-        );
+        if is_org {
+            let org = self.config.github.organization.as_deref().unwrap_or("unknown");
+            tracing::info!(
+                pool_size,
+                organization = org,
+                "orchestrator starting (warm pool mode, org-level runners)"
+            );
+        } else {
+            tracing::info!(
+                pool_size,
+                repos = ?repos,
+                "orchestrator starting (warm pool mode)"
+            );
+        }
 
         // Channel for VMs to signal slot return
         let (done_tx, mut done_rx) = mpsc::channel::<(usize, String)>(pool_size * 2);
 
-        // Spawn initial pool — distribute across repos round-robin
+        // Spawn initial pool
         for i in 0..pool_size {
-            let repo = repos[i % repos.len()].clone();
+            // In org mode, repo is empty — runners register at org level
+            let repo = if is_org {
+                String::new()
+            } else {
+                repos[i % repos.len()].clone()
+            };
             let slot = {
                 let mut pool = self.slot_pool.lock().await;
                 pool.pop().expect("pool should have enough slots")
@@ -470,14 +485,23 @@ async fn run_warm_vm(
     slot: usize,
     repo: &str,
 ) -> anyhow::Result<()> {
-    tracing::info!(slot, repo = %repo, "requesting registration token");
-    let reg_token = github.generate_registration_token(repo).await?;
-    tracing::info!(slot, repo = %repo, "registration token acquired");
+    let is_org = github.is_org_mode();
 
-    let repo_url = format!(
-        "https://github.com/{}/{}",
-        config.github.owner, repo
-    );
+    let (reg_token, registration_url) = if is_org {
+        let org = config.github.organization.as_deref().unwrap_or("unknown");
+        tracing::info!(slot, organization = org, "requesting org registration token");
+        let token = github.generate_org_registration_token().await?;
+        let url = format!("https://github.com/{}", org);
+        tracing::info!(slot, organization = org, "org registration token acquired");
+        (token, url)
+    } else {
+        tracing::info!(slot, repo = %repo, "requesting registration token");
+        let token = github.generate_registration_token(repo).await?;
+        let url = format!("https://github.com/{}/{}", config.github.owner, repo);
+        tracing::info!(slot, repo = %repo, "registration token acquired");
+        (token, url)
+    };
+
     let runner_name = format!(
         "fc-warm-{}-{}",
         slot,
@@ -493,7 +517,7 @@ async fn run_warm_vm(
     );
     let env_content = format!(
         "RUNNER_MODE=register\nRUNNER_TOKEN={}\nREPO_URL={}\nRUNNER_NAME={}\nVM_ID={}\n",
-        reg_token, repo_url, runner_name, vm.vm_id
+        reg_token, registration_url, runner_name, vm.vm_id
     );
     vm.execute(&env_content).await
 }
