@@ -340,8 +340,15 @@ echo "overlay-init: upper dir contents:"
 ls -la /overlay/root/ 2>&1
 ls -la /overlay/root/etc/ 2>&1
 ls -la /overlay/root/etc/systemd/network/ 2>&1
+echo "overlay-init: fstab on overlay:"
+cat /overlay/root/etc/fstab 2>&1
 
 mkdir -p /overlay/root /overlay/work
+
+# Unmount /proc before creating overlayfs — we don't want the procfs mount
+# to leak into the overlay's lower layer view
+/bin/umount /proc
+
 pivot /overlay/root /overlay/work
 
 # Bind-mount raw ext4 for Docker — overlayfs-on-overlayfs is not supported,
@@ -352,8 +359,12 @@ mkdir -p /rom/overlay/docker /var/lib/docker
 echo "overlay-init: merged view after pivot_root:"
 ls -la /etc/systemd/network/ 2>&1
 cat /etc/systemd/network/20-eth.network 2>&1
+echo "overlay-init: fstab in merged view:"
+cat /etc/fstab 2>&1
 echo "overlay-init: systemd-networkd enabled?"
 ls -la /etc/systemd/system/multi-user.target.wants/systemd-networkd* 2>&1
+echo "overlay-init: systemd-resolved enabled?"
+ls -la /etc/systemd/system/multi-user.target.wants/systemd-resolved* 2>&1
 echo "overlay-init: done, exec /sbin/init"
 exec /sbin/init "$@"
 "#,
