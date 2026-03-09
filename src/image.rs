@@ -285,6 +285,10 @@ async fn install_overlay_init_into(mount_dir: &str) -> anyhow::Result<()> {
         &overlay_init,
         r#"#!/bin/sh
 # overlay-init: OverlayFS COW boot for Firecracker VMs
+
+# Mount /proc so we can read kernel command line (not available as PID 1)
+/bin/mount -t proc proc /proc
+
 for arg in $(cat /proc/cmdline); do
     key="${arg%%=*}"
     val="${arg#*=}"

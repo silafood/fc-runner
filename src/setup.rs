@@ -919,6 +919,9 @@ async fn install_overlay_init(mount_dir: &str) -> anyhow::Result<()> {
 # Mounts a read-write overlay on top of the read-only squashfs root.
 # Usage: kernel boot args: init=/sbin/overlay-init overlay_root=vdb
 
+# Mount /proc so we can read kernel command line (not available as PID 1)
+/bin/mount -t proc proc /proc
+
 # Parse overlay_root from /proc/cmdline
 for arg in $(cat /proc/cmdline); do
     key="${arg%%=*}"
