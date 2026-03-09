@@ -245,8 +245,13 @@ impl MicroVm {
     }
 
     /// Inject environment variables into the rootfs via loop mount (legacy mode).
+    /// In overlay mode, writes to the per-VM overlay ext4 instead of the rootfs copy.
     async fn inject_env_mount(&self, env_content: &str) -> anyhow::Result<()> {
-        let rootfs = path_str(&self.rootfs_path)?;
+        let rootfs = if self.use_overlay() {
+            path_str(&self.overlay_path)?
+        } else {
+            path_str(&self.rootfs_path)?
+        };
         let mnt = path_str(&self.mount_point)?;
 
         tokio::fs::create_dir_all(&self.mount_point).await?;
