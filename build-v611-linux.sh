@@ -128,6 +128,13 @@ chroot "$MNT" bash -c "
     echo 'PATH=/home/runner/.cargo/bin:/usr/local/bin:/usr/bin:/bin' > /etc/environment
 "
 
+# Configure Docker to use vfs storage driver (overlayfs-on-overlayfs not supported)
+mkdir -p "$MNT/etc/docker"
+echo '{"storage-driver": "vfs"}' > "$MNT/etc/docker/daemon.json"
+
+# Mask serial-getty@ttyS0 (Firecracker has no serial console device)
+chroot "$MNT" systemctl mask serial-getty@ttyS0.service 2>/dev/null || true
+
 # Ensure /var/tmp exists (systemd-resolved needs it for PrivateTmp namespace)
 mkdir -p "$MNT/var/tmp"
 chmod 1777 "$MNT/var/tmp"
