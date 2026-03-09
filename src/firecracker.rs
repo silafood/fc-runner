@@ -1,6 +1,10 @@
 use std::path::PathBuf;
 
 use anyhow::{ensure, Context};
+use firecracker_rs_sdk::firecracker::FirecrackerOption;
+use firecracker_rs_sdk::instance::Instance;
+use firecracker_rs_sdk::jailer::JailerOption;
+use firecracker_rs_sdk::models::*;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
@@ -28,16 +32,29 @@ fn mount_loop_ext4_ro(image: &str, target: &str) -> anyhow::Result<()> {
         .args(["-o", "loop,ro,noload", image, target])
         .status()
         .context("running mount (ro)")?;
-    ensure!(status.success(), "mount -o loop,ro {} {} failed", image, target);
+    ensure!(
+        status.success(),
+        "mount -o loop,ro {} {} failed",
+        image,
+        target
+    );
     Ok(())
 }
 
 /// Try a normal umount, returns true on success.
 fn try_umount(target: &str) -> bool {
     #[cfg(target_os = "linux")]
-    { nix::mount::umount(target).is_ok() }
+    {
+        nix::mount::umount(target).is_ok()
+    }
     #[cfg(not(target_os = "linux"))]
-    { std::process::Command::new("umount").arg(target).status().map(|s| s.success()).unwrap_or(false) }
+    {
+        std::process::Command::new("umount")
+            .arg(target)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
 }
 
 /// Lazy (detach) umount.
@@ -49,9 +66,25 @@ fn lazy_umount_sync(target: &str) -> anyhow::Result<()> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let status = std::process::Command::new("umount").args(["-l", target]).status()?;
+        let status = std::process::Command::new("umount")
+            .args(["-l", target])
+            .status()?;
         ensure!(status.success(), "lazy umount failed");
         Ok(())
+    }
+}
+
+/// Check if a process is still alive by sending signal 0.
+fn is_process_alive(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // On non-Linux (e.g. macOS for dev), check if /proc/{pid} exists
+        // or just assume alive (Firecracker only runs on Linux anyway)
+        std::path::Path::new(&format!("/proc/{}", pid)).exists()
     }
 }
 
@@ -151,15 +184,17 @@ impl MicroVm {
         // Delete if exists from a previous crashed VM
         let _ = netlink::delete_link(&self.tap_name).await;
 
-        netlink::create_tap(&self.tap_name).await
+        netlink::create_tap(&self.tap_name)
+            .await
             .context("creating TAP device")?;
 
-        let ip: std::net::Ipv4Addr = self.host_ip.parse()
-            .context("parsing host IP")?;
-        netlink::add_address_v4(&self.tap_name, ip, 24).await
+        let ip: std::net::Ipv4Addr = self.host_ip.parse().context("parsing host IP")?;
+        netlink::add_address_v4(&self.tap_name, ip, 24)
+            .await
             .context("assigning IP to TAP")?;
 
-        netlink::set_link_up(&self.tap_name).await
+        netlink::set_link_up(&self.tap_name)
+            .await
             .context("bringing TAP up")?;
 
         Ok(())
@@ -194,22 +229,7 @@ impl MicroVm {
         )?;
 
         // Write per-VM guest network config (unique IP/gateway per slot)
-        let network_dir = self.mount_point.join("etc/systemd/network");
-        tokio::fs::create_dir_all(&network_dir).await?;
-        let dns_entries: String = self
-            .network_dns
-            .iter()
-            .map(|d| format!("DNS={}", d))
-            .collect::<Vec<_>>()
-            .join("\n");
-        tokio::fs::write(
-            network_dir.join("20-eth.network"),
-            format!(
-                "[Match]\nName=eth0\n\n[Network]\nAddress={}/24\nGateway={}\n{}\n",
-                self.guest_ip, self.host_ip, dns_entries
-            ),
-        )
-        .await?;
+        self.write_network_config_to(&self.mount_point).await?;
 
         self.umount_with_retry().await?;
         let _ = tokio::fs::remove_dir(&self.mount_point).await;
@@ -225,7 +245,16 @@ impl MicroVm {
         tokio::fs::create_dir_all(&self.mount_point).await?;
         mount_loop_ext4(rootfs, mnt).context("mounting rootfs")?;
 
-        let network_dir = self.mount_point.join("etc/systemd/network");
+        self.write_network_config_to(&self.mount_point).await?;
+
+        self.umount_with_retry().await?;
+        let _ = tokio::fs::remove_dir(&self.mount_point).await;
+        Ok(())
+    }
+
+    /// Write systemd-networkd config for guest networking.
+    async fn write_network_config_to(&self, mount_point: &std::path::Path) -> anyhow::Result<()> {
+        let network_dir = mount_point.join("etc/systemd/network");
         tokio::fs::create_dir_all(&network_dir).await?;
         let dns_entries: String = self
             .network_dns
@@ -241,9 +270,6 @@ impl MicroVm {
             ),
         )
         .await?;
-
-        self.umount_with_retry().await?;
-        let _ = tokio::fs::remove_dir(&self.mount_point).await;
         Ok(())
     }
 
@@ -309,7 +335,9 @@ impl MicroVm {
                         .chars()
                         .scan(false, |in_escape, c| {
                             if *in_escape {
-                                if c.is_ascii_alphabetic() { *in_escape = false; }
+                                if c.is_ascii_alphabetic() {
+                                    *in_escape = false;
+                                }
                                 Some(None)
                             } else if c == '\x1b' {
                                 *in_escape = true;
@@ -351,11 +379,9 @@ impl MicroVm {
             .join("root")
     }
 
+    /// Build a Firecracker VM config as a JSON value (for --config-file / no-api mode).
+    /// Uses SDK model types for type safety.
     fn build_vm_config(&self, use_jailer: bool) -> anyhow::Result<serde_json::Value> {
-        // When using jailer, paths must be relative to the chroot root.
-        // The jailer creates <chroot_base>/firecracker/<vm_id>/root/ and
-        // hard-links the firecracker binary. We place kernel, rootfs, log,
-        // and socket inside that root dir and reference them by filename only.
         let (kernel_path, rootfs_path, log_path) = if use_jailer {
             (
                 filename_str(&self.rootfs_path)?.replace(".ext4", "-kernel"),
@@ -428,8 +454,6 @@ impl MicroVm {
     }
 
     /// Set up the jailer chroot directory with all required files.
-    /// The jailer creates <chroot_base>/firecracker/<vm_id>/root/ and hard-links
-    /// the exec-file. We need to place kernel, rootfs, config, and log inside it.
     async fn setup_jailer_chroot(&self) -> anyhow::Result<PathBuf> {
         let root_dir = self.jailer_root_dir();
         tracing::info!(
@@ -437,11 +461,14 @@ impl MicroVm {
             chroot = %root_dir.display(),
             "setting up jailer chroot"
         );
-        tokio::fs::create_dir_all(&root_dir).await
-            .with_context(|| format!(
-                "creating jailer chroot directory: {}",
-                root_dir.display()
-            ))?;
+        tokio::fs::create_dir_all(&root_dir)
+            .await
+            .with_context(|| {
+                format!(
+                    "creating jailer chroot directory: {}",
+                    root_dir.display()
+                )
+            })?;
 
         // Hard-link (or copy) kernel into chroot
         let kernel_name = filename_str(&self.rootfs_path)?.replace(".ext4", "-kernel");
@@ -452,12 +479,19 @@ impl MicroVm {
             dst = %chroot_kernel.display(),
             "linking kernel into chroot"
         );
-        if tokio::fs::hard_link(&self.fc_config.kernel_path, &chroot_kernel).await.is_err() {
-            tokio::fs::copy(&self.fc_config.kernel_path, &chroot_kernel).await
-                .with_context(|| format!(
-                    "copying kernel {} -> {}",
-                    self.fc_config.kernel_path, chroot_kernel.display()
-                ))?;
+        if tokio::fs::hard_link(&self.fc_config.kernel_path, &chroot_kernel)
+            .await
+            .is_err()
+        {
+            tokio::fs::copy(&self.fc_config.kernel_path, &chroot_kernel)
+                .await
+                .with_context(|| {
+                    format!(
+                        "copying kernel {} -> {}",
+                        self.fc_config.kernel_path,
+                        chroot_kernel.display()
+                    )
+                })?;
         }
 
         // Hard-link (or copy) rootfs into chroot
@@ -469,41 +503,48 @@ impl MicroVm {
             dst = %chroot_rootfs.display(),
             "linking rootfs into chroot"
         );
-        if tokio::fs::hard_link(&self.rootfs_path, &chroot_rootfs).await.is_err() {
-            tokio::fs::copy(&self.rootfs_path, &chroot_rootfs).await
-                .with_context(|| format!(
-                    "copying rootfs {} -> {}",
-                    self.rootfs_path.display(), chroot_rootfs.display()
-                ))?;
+        if tokio::fs::hard_link(&self.rootfs_path, &chroot_rootfs)
+            .await
+            .is_err()
+        {
+            tokio::fs::copy(&self.rootfs_path, &chroot_rootfs)
+                .await
+                .with_context(|| {
+                    format!(
+                        "copying rootfs {} -> {}",
+                        self.rootfs_path.display(),
+                        chroot_rootfs.display()
+                    )
+                })?;
         }
 
         // Create log file in chroot
         let log_name = filename_str(&self.log_path)?;
-        tokio::fs::write(root_dir.join(log_name), "").await
+        tokio::fs::write(root_dir.join(log_name), "")
+            .await
             .context("creating log file in jailer chroot")?;
 
         // Write VM config with chroot-relative paths
         let config = self.build_vm_config(true)?;
         let config_name = filename_str(&self.config_path)?;
         let chroot_config = root_dir.join(config_name);
-        let rendered = serde_json::to_string_pretty(&config)
-            .context("serializing VM config for jailer")?;
-        tokio::fs::write(&chroot_config, &rendered).await
+        let rendered =
+            serde_json::to_string_pretty(&config).context("serializing VM config for jailer")?;
+        tokio::fs::write(&chroot_config, &rendered)
+            .await
             .with_context(|| format!("writing VM config to {}", chroot_config.display()))?;
 
         // Chown all files to the jailer UID/GID so Firecracker can access
         // them after the jailer drops privileges.
         if let (Some(uid), Some(gid)) = (self.fc_config.jailer_uid, self.fc_config.jailer_gid) {
             use std::os::unix::fs::chown;
-            for entry in std::fs::read_dir(&root_dir)
-                .context("reading jailer chroot directory")?
+            for entry in
+                std::fs::read_dir(&root_dir).context("reading jailer chroot directory")?
             {
                 let entry = entry?;
-                chown(entry.path(), Some(uid), Some(gid))
-                    .with_context(|| format!(
-                        "chown {}:{} {}",
-                        uid, gid, entry.path().display()
-                    ))?;
+                chown(entry.path(), Some(uid), Some(gid)).with_context(|| {
+                    format!("chown {}:{} {}", uid, gid, entry.path().display())
+                })?;
             }
         }
 
@@ -518,98 +559,262 @@ impl MicroVm {
     async fn write_vm_config(&self) -> anyhow::Result<()> {
         let use_jailer = self.fc_config.jailer_path.is_some();
         let config = self.build_vm_config(use_jailer)?;
-        let rendered = serde_json::to_string_pretty(&config)
-            .context("serializing VM config")?;
+        let rendered =
+            serde_json::to_string_pretty(&config).context("serializing VM config")?;
         tokio::fs::write(&self.config_path, rendered).await?;
         Ok(())
     }
 
-    /// PUT MMDS metadata via the Firecracker API socket.
+    /// Configure a running Firecracker instance via the SDK API.
     ///
-    /// The env_content is parsed as KEY=VALUE lines and placed under a
-    /// "fc-runner" namespace for the guest agent to read via MMDS V2.
-    /// `socket_path` is the host-accessible path to the API socket (which may
-    /// differ from the chroot-relative path passed to firecracker when using jailer).
-    async fn put_mmds_at(&self, socket_path: &std::path::Path, env_content: &str) -> anyhow::Result<()> {
-        use http_body_util::Full;
-        use hyper::body::Bytes;
-        use hyper::Request;
-        use hyper_util::rt::TokioIo;
+    /// Calls the typed SDK methods to set machine config, boot source, drives,
+    /// network interfaces, logger, MMDS, and VSOCK via the Firecracker API socket.
+    async fn configure_instance(
+        &self,
+        instance: &mut Instance,
+        env_content: &str,
+    ) -> anyhow::Result<()> {
+        // Machine configuration
+        instance
+            .put_machine_configuration(&MachineConfiguration {
+                vcpu_count: self.fc_config.vcpu_count as isize,
+                mem_size_mib: self.fc_config.mem_size_mib as isize,
+                cpu_template: None,
+                smt: None,
+                track_dirty_pages: None,
+                huge_pages: None,
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("put_machine_configuration failed: {}", e))?;
 
-        // Parse env_content (KEY=VALUE lines) into a structured object
+        // Boot source
+        instance
+            .put_guest_boot_source(&BootSource {
+                kernel_image_path: PathBuf::from(&self.fc_config.kernel_path),
+                boot_args: Some(self.fc_config.boot_args.clone()),
+                initrd_path: None,
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("put_guest_boot_source failed: {}", e))?;
+
+        // Root drive
+        instance
+            .put_guest_drive_by_id(&Drive {
+                drive_id: "rootfs".to_string(),
+                path_on_host: self.rootfs_path.clone(),
+                is_root_device: true,
+                is_read_only: false,
+                partuuid: None,
+                cache_type: None,
+                rate_limiter: None,
+                io_engine: None,
+                socket: None,
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("put_guest_drive_by_id failed: {}", e))?;
+
+        // Network interface
+        instance
+            .put_guest_network_interface_by_id(&NetworkInterface {
+                iface_id: "eth0".to_string(),
+                guest_mac: Some(self.guest_mac.clone()),
+                host_dev_name: PathBuf::from(&self.tap_name),
+                rx_rate_limiter: None,
+                tx_rate_limiter: None,
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("put_guest_network_interface_by_id failed: {}", e))?;
+
+        // Logger
+        instance
+            .put_logger(&Logger {
+                log_path: self.log_path.clone(),
+                level: Some(log_level_from_str(&self.fc_config.log_level)),
+                show_level: None,
+                show_log_origin: None,
+                module: None,
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("put_logger failed: {}", e))?;
+
+        // MMDS configuration and metadata
+        if self.use_mmds() {
+            instance
+                .put_mmds_config(&MmdsConfig {
+                    version: Some(MmdsConfigVersion::V2),
+                    ipv4_address: None,
+                    network_interfaces: vec!["eth0".to_string()],
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("put_mmds_config failed: {}", e))?;
+
+            let mmds_json = self.build_mmds_payload(env_content)?;
+            instance
+                .put_mmds(&mmds_json)
+                .await
+                .map_err(|e| anyhow::anyhow!("put_mmds failed: {}", e))?;
+
+            tracing::info!(vm_id = %self.vm_id, "MMDS metadata injected via SDK");
+        }
+
+        // VSOCK device
+        if self.fc_config.vsock_enabled {
+            let cid = self.vsock_cid();
+            instance
+                .put_guest_vsock(&Vsock {
+                    guest_cid: cid,
+                    uds_path: PathBuf::from("vsock.sock"),
+                    vsock_id: None,
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("put_guest_vsock failed: {}", e))?;
+
+            tracing::info!(vm_id = %self.vm_id, cid, "VSOCK device configured via SDK");
+        }
+
+        Ok(())
+    }
+
+    /// Build the MMDS metadata JSON string from env_content (KEY=VALUE lines).
+    fn build_mmds_payload(&self, env_content: &str) -> anyhow::Result<MmdsContentsObject> {
         let mut inner = serde_json::Map::new();
         for line in env_content.lines() {
             if let Some((key, value)) = line.split_once('=') {
                 let key = key.trim().to_lowercase();
                 let value = value.trim();
-                // Parse booleans
                 if value == "true" || value == "false" {
-                    inner.insert(
-                        key,
-                        serde_json::Value::Bool(value == "true"),
-                    );
+                    inner.insert(key, serde_json::Value::Bool(value == "true"));
                 } else {
                     inner.insert(key, serde_json::Value::String(value.to_string()));
                 }
             }
         }
-        // Wrap under "fc-runner" namespace for the guest agent
         let mut metadata = serde_json::Map::new();
         metadata.insert(
             "fc-runner".to_string(),
             serde_json::Value::Object(inner),
         );
-        let body_json = serde_json::to_string(&serde_json::Value::Object(metadata))
+        let json = serde_json::to_string(&serde_json::Value::Object(metadata))
             .context("serializing MMDS metadata")?;
+        Ok(json)
+    }
 
-        tracing::info!(vm_id = %self.vm_id, socket = %socket_path.display(), "putting MMDS metadata via API socket");
+    /// Create an SDK Instance using FirecrackerOption or JailerOption.
+    fn build_sdk_instance(&self) -> anyhow::Result<Instance> {
+        let use_jailer = self.fc_config.jailer_path.is_some();
+        let sock_name = "api.sock";
 
-        // Wait for the socket to appear (Firecracker creates it on startup)
-        for attempt in 0..50 {
-            if tokio::fs::metadata(socket_path).await.is_ok() {
-                break;
+        if use_jailer {
+            let jailer_path = self.fc_config.jailer_path.as_ref().unwrap();
+            let uid = self.fc_config.jailer_uid.expect("validated in config") as usize;
+            let gid = self.fc_config.jailer_gid.expect("validated in config") as usize;
+
+            let mut fc_opt = FirecrackerOption::new(&self.fc_config.binary_path);
+            fc_opt.api_sock(sock_name);
+
+            let mut jailer_opt = JailerOption::new(
+                jailer_path,
+                &self.fc_config.binary_path,
+                &self.vm_id,
+                gid,
+                uid,
+            );
+            jailer_opt
+                .chroot_base_dir(Some(&self.fc_config.jailer_chroot_base))
+                .firecracker_option(Some(&fc_opt))
+                .remove_jailer_workspace_dir();
+
+            let instance = jailer_opt
+                .build()
+                .map_err(|e| anyhow::anyhow!("building jailer instance: {}", e))?;
+
+            tracing::info!(
+                vm_id = %self.vm_id,
+                jailer = %jailer_path,
+                uid, gid,
+                chroot_base = %self.fc_config.jailer_chroot_base,
+                "SDK instance created with jailer"
+            );
+
+            Ok(instance)
+        } else {
+            let socket_path = self.socket_path.with_file_name(sock_name);
+            let mut fc_opt = FirecrackerOption::new(&self.fc_config.binary_path);
+            fc_opt.api_sock(&socket_path).id(&self.vm_id);
+
+            let instance = fc_opt
+                .build()
+                .map_err(|e| anyhow::anyhow!("building firecracker instance: {}", e))?;
+
+            tracing::info!(
+                vm_id = %self.vm_id,
+                socket = %socket_path.display(),
+                "SDK instance created (bare firecracker)"
+            );
+
+            Ok(instance)
+        }
+    }
+
+    /// Wait for the firecracker process to exit by polling the PID.
+    async fn wait_for_exit(&self, instance: &Instance) -> anyhow::Result<()> {
+        let pid = instance.firecracker_pid().ok_or_else(|| {
+            anyhow::anyhow!("no firecracker PID available")
+        })?;
+
+        tracing::info!(vm_id = %self.vm_id, pid, "waiting for firecracker process to exit");
+
+        let wait_fut = async {
+            loop {
+                if !is_process_alive(pid) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
             }
-            if attempt == 49 {
-                anyhow::bail!("Firecracker API socket did not appear at {:?}", socket_path);
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+
+        timeout(Duration::from_secs(self.vm_timeout_secs), wait_fut)
+            .await
+            .context("VM execution timed out")?;
+
+        tracing::info!(vm_id = %self.vm_id, pid, "firecracker process exited");
+        Ok(())
+    }
+
+    /// Start Firecracker via SDK with API socket (MMDS mode).
+    async fn run_with_sdk(&self, env_content: &str) -> anyhow::Result<()> {
+        let mut instance = self.build_sdk_instance()?;
+
+        // Pre-create log file so Firecracker can open it
+        tokio::fs::write(&self.log_path, "")
+            .await
+            .context("creating log file")?;
+
+        // start_vmm spawns the process and connects to the API socket
+        instance
+            .start_vmm()
+            .await
+            .map_err(|e| anyhow::anyhow!("start_vmm failed: {}", e))?;
+
+        // Configure the VM via typed API calls
+        if let Err(e) = self.configure_instance(&mut instance, env_content).await {
+            tracing::error!(vm_id = %self.vm_id, error = %e, "VM configuration failed");
+            let _ = instance.stop().await;
+            return Err(e);
         }
 
-        let stream = tokio::net::UnixStream::connect(socket_path)
+        // Boot the VM
+        instance
+            .start()
             .await
-            .context("connecting to Firecracker API socket")?;
+            .map_err(|e| anyhow::anyhow!("instance start failed: {}", e))?;
 
-        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
-            .await
-            .context("HTTP handshake with Firecracker API")?;
+        tracing::info!(vm_id = %self.vm_id, "VM booted via SDK");
 
-        // Spawn the connection driver
-        tokio::spawn(async move {
-            if let Err(e) = conn.await {
-                tracing::warn!(error = %e, "Firecracker API connection error");
-            }
-        });
+        // Wait for the VM process to exit
+        self.wait_for_exit(&instance).await?;
 
-        let req = Request::builder()
-            .method("PUT")
-            .uri("/mmds")
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json")
-            .body(Full::new(Bytes::from(body_json)))
-            .context("building MMDS request")?;
-
-        let resp = sender.send_request(req).await.context("sending MMDS PUT")?;
-        let status = resp.status();
-
-        if !status.is_success() {
-            let body = http_body_util::BodyExt::collect(resp.into_body())
-                .await
-                .map(|b| String::from_utf8_lossy(&b.to_bytes()).to_string())
-                .unwrap_or_default();
-            anyhow::bail!("MMDS PUT failed (HTTP {}): {}", status, body);
-        }
-
-        tracing::info!(vm_id = %self.vm_id, "MMDS metadata injected successfully");
+        // Instance Drop will handle process cleanup (SIGTERM + file removal)
         Ok(())
     }
 
@@ -618,7 +823,6 @@ impl MicroVm {
         let fut = if let Some(jailer_path) = &self.fc_config.jailer_path {
             let uid = self.fc_config.jailer_uid.expect("validated in config");
             let gid = self.fc_config.jailer_gid.expect("validated in config");
-            // Inside the jailer chroot, config is at just the filename
             let config_name = filename_str(&self.config_path)
                 .expect("config_path must have a valid filename");
             tracing::info!(
@@ -630,18 +834,25 @@ impl MicroVm {
                 "launching via jailer (no-api mode)"
             );
             Command::new(jailer_path)
-                .arg("--id").arg(&self.vm_id)
-                .arg("--exec-file").arg(&self.fc_config.binary_path)
-                .arg("--uid").arg(uid.to_string())
-                .arg("--gid").arg(gid.to_string())
-                .arg("--chroot-base-dir").arg(&self.fc_config.jailer_chroot_base)
+                .arg("--id")
+                .arg(&self.vm_id)
+                .arg("--exec-file")
+                .arg(&self.fc_config.binary_path)
+                .arg("--uid")
+                .arg(uid.to_string())
+                .arg("--gid")
+                .arg(gid.to_string())
+                .arg("--chroot-base-dir")
+                .arg(&self.fc_config.jailer_chroot_base)
                 .arg("--")
-                .arg("--config-file").arg(config_name)
+                .arg("--config-file")
+                .arg(config_name)
                 .arg("--no-api")
                 .status()
         } else {
             Command::new(&self.fc_config.binary_path)
-                .arg("--config-file").arg(&self.config_path)
+                .arg("--config-file")
+                .arg(&self.config_path)
                 .arg("--no-api")
                 .status()
         };
@@ -650,73 +861,6 @@ impl MicroVm {
             .await
             .context("VM execution timed out")?
             .context("spawning firecracker")?;
-        Ok(status)
-    }
-
-    /// Start Firecracker with API socket (MMDS mode).
-    /// Returns a child process handle so we can inject MMDS data before it exits.
-    async fn run_with_api(&self, env_content: &str) -> anyhow::Result<std::process::ExitStatus> {
-        let use_jailer = self.fc_config.jailer_path.is_some();
-
-        // When using jailer, the socket path inside the chroot is just the filename,
-        // but on the host it lives at <chroot_base>/firecracker/<vm_id>/root/<filename>.
-        // We pass the filename to firecracker (it runs inside chroot) and use the
-        // host-absolute path to connect from the host for MMDS injection.
-        let (fc_socket_arg, host_socket_path) = if use_jailer {
-            // Use a short socket name to stay under SUN_LEN (108 bytes)
-            let sock_name = "api.sock";
-            let host_path = self.jailer_root_dir().join(sock_name);
-            (sock_name.to_string(), host_path)
-        } else {
-            (path_str(&self.socket_path)?.to_string(), self.socket_path.clone())
-        };
-
-        let mut child = if let Some(jailer_path) = &self.fc_config.jailer_path {
-            let uid = self.fc_config.jailer_uid.expect("validated in config");
-            let gid = self.fc_config.jailer_gid.expect("validated in config");
-            let config_name = filename_str(&self.config_path)
-                .expect("config_path must have a valid filename");
-            tracing::info!(
-                vm_id = %self.vm_id,
-                jailer = %jailer_path,
-                uid, gid,
-                config = %config_name,
-                socket = %fc_socket_arg,
-                chroot_base = %self.fc_config.jailer_chroot_base,
-                "launching via jailer (MMDS mode)"
-            );
-            Command::new(jailer_path)
-                .arg("--id").arg(&self.vm_id)
-                .arg("--exec-file").arg(&self.fc_config.binary_path)
-                .arg("--uid").arg(uid.to_string())
-                .arg("--gid").arg(gid.to_string())
-                .arg("--chroot-base-dir").arg(&self.fc_config.jailer_chroot_base)
-                .arg("--")
-                .arg("--config-file").arg(config_name)
-                .arg("--api-sock").arg(&fc_socket_arg)
-                .spawn()
-                .context("spawning firecracker via jailer")?
-        } else {
-            Command::new(&self.fc_config.binary_path)
-                .arg("--config-file").arg(&self.config_path)
-                .arg("--api-sock").arg(&fc_socket_arg)
-                .spawn()
-                .context("spawning firecracker")?
-        };
-
-        // Inject MMDS metadata while the VM is booting.
-        // Use the host-accessible socket path for the connection.
-        if let Err(e) = self.put_mmds_at(&host_socket_path, env_content).await {
-            tracing::error!(vm_id = %self.vm_id, error = %e, "MMDS injection failed, killing VM");
-            let _ = child.kill().await;
-            return Err(e);
-        }
-
-        // Wait for the VM to exit
-        let status = timeout(Duration::from_secs(self.vm_timeout_secs), child.wait())
-            .await
-            .context("VM execution timed out")?
-            .context("waiting for firecracker")?;
         Ok(status)
     }
 
@@ -743,6 +887,7 @@ impl MicroVm {
         let _ = tokio::fs::remove_dir(&self.mount_point).await;
 
         // Clean up jailer chroot if jailer was used
+        // (SDK's FStack may have already cleaned some of this, but rm -rf is idempotent)
         if self.fc_config.jailer_path.is_some() {
             let chroot_dir = PathBuf::from(&self.fc_config.jailer_chroot_base)
                 .join("firecracker")
@@ -785,17 +930,6 @@ impl MicroVm {
 
         self.create_tap().await?;
 
-        if use_jailer {
-            // Set up jailer chroot with kernel, rootfs, config, and log
-            // (write_vm_config is called inside setup_jailer_chroot)
-            self.setup_jailer_chroot().await?;
-        } else {
-            self.write_vm_config().await?;
-            // Pre-create log file so Firecracker can open it
-            tokio::fs::write(&self.log_path, "").await
-                .context("creating log file")?;
-        }
-
         // Spawn VSOCK listener before VM starts (if enabled)
         let vsock_handle = if self.fc_config.vsock_enabled {
             let cid = self.vsock_cid();
@@ -808,9 +942,31 @@ impl MicroVm {
         tracing::info!(vm_id = %self.vm_id, "launching firecracker");
 
         let run_result = if mmds {
-            self.run_with_api(env_content).await
+            // MMDS mode: use SDK for process management and API calls
+            self.run_with_sdk(env_content).await
         } else {
-            self.run_no_api().await
+            // No-API mode: use config file + tokio process (SDK requires API socket)
+            if use_jailer {
+                self.setup_jailer_chroot().await?;
+            } else {
+                self.write_vm_config().await?;
+                tokio::fs::write(&self.log_path, "")
+                    .await
+                    .context("creating log file")?;
+            }
+            match self.run_no_api().await {
+                Ok(exit_status) => {
+                    if !exit_status.success() {
+                        Err(anyhow::anyhow!(
+                            "firecracker exited with status {:?}",
+                            exit_status.code()
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                }
+                Err(e) => Err(e),
+            }
         };
 
         // Abort VSOCK listener when VM exits
@@ -822,11 +978,8 @@ impl MicroVm {
         self.dump_guest_log().await;
 
         match run_result {
-            Ok(exit_status) => {
-                tracing::info!(vm_id = %self.vm_id, code = ?exit_status.code(), "VM exited");
-                if !exit_status.success() {
-                    anyhow::bail!("firecracker exited with status {:?}", exit_status.code());
-                }
+            Ok(()) => {
+                tracing::info!(vm_id = %self.vm_id, "VM completed successfully");
                 Ok(())
             }
             Err(e) => {
@@ -834,5 +987,16 @@ impl MicroVm {
                 Err(e)
             }
         }
+    }
+}
+
+/// Parse a log level string into the SDK's LogLevel enum.
+fn log_level_from_str(s: &str) -> LogLevel {
+    match s.to_lowercase().as_str() {
+        "error" => LogLevel::Error,
+        "warning" | "warn" => LogLevel::Warning,
+        "info" => LogLevel::Info,
+        "debug" => LogLevel::Debug,
+        _ => LogLevel::Warning,
     }
 }

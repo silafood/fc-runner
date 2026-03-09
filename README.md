@@ -51,7 +51,7 @@ GitHub Actions                fc-runner                    Firecracker
 | Layer | Technology |
 |-------|-----------|
 | Orchestrator | Rust + Tokio (async) |
-| Hypervisor | Firecracker v1.14.2 |
+| Hypervisor | Firecracker v1.14.2 via [firecracker-rs-sdk](https://crates.io/crates/firecracker-rs-sdk) |
 | Guest OS | Ubuntu 24.04 Noble |
 | Guest networking | virtio-net over per-VM TAP (pure Rust rtnetlink) + iptables NAT |
 | CI platform | GitHub Actions REST API |
@@ -205,7 +205,7 @@ fc-runner/
 │   ├── image.rs          # OCI image pull, layer extraction, ext4 conversion
 │   ├── config.rs         # Typed TOML config with validation
 │   ├── github.rs         # GitHub API client (PAT + App auth, repo + org level)
-│   ├── firecracker.rs    # MicroVm lifecycle: prepare → run → cleanup (MMDS + mount modes)
+│   ├── firecracker.rs    # MicroVm lifecycle via firecracker-rs-sdk (MMDS + mount modes)
 │   ├── netlink.rs        # Pure-Rust TAP device management (rtnetlink + nix ioctl)
 │   ├── orchestrator.rs   # Poll/dispatch loop with dedup (JIT, warm pool, named pools)
 │   ├── setup.rs          # KVM checks, kernel/rootfs provisioning, network
