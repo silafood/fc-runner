@@ -323,6 +323,7 @@ sudo systemctl restart fc-runner
 ## Documentation
 
 - [Architecture](docs/architecture.md) — system design, module overview, security model
+- [Host Dependencies](docs/host-dependencies.md) — required system tools and packages
 - [Setup Guide](docs/setup.md) — installation and verification
 - [Configuration Reference](docs/configuration.md) — all config options
 - [Troubleshooting](docs/troubleshooting.md) — common issues and diagnostics
