@@ -991,6 +991,12 @@ if [ -f /etc/systemd/network/20-eth.network ]; then
     fi
 fi
 
+# Diagnostic: verify network state
+echo "overlay-init: ip addr:"
+ip addr show eth0 2>&1
+echo "overlay-init: ip route:"
+ip route show 2>&1
+
 /bin/umount /sys
 /bin/umount /proc
 
