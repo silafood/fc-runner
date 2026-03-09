@@ -349,6 +349,11 @@ pivot /overlay/root /overlay/work
 mkdir -p /rom/overlay/docker /var/lib/docker
 /bin/mount --bind /rom/overlay/docker /var/lib/docker
 
+echo "overlay-init: merged view after pivot_root:"
+ls -la /etc/systemd/network/ 2>&1
+cat /etc/systemd/network/20-eth.network 2>&1
+echo "overlay-init: systemd-networkd enabled?"
+ls -la /etc/systemd/system/multi-user.target.wants/systemd-networkd* 2>&1
 echo "overlay-init: done, exec /sbin/init"
 exec /sbin/init "$@"
 "#,
