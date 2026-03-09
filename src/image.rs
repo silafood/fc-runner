@@ -256,15 +256,6 @@ async fn install_agent_if_missing(rootfs_path: &str) -> anyhow::Result<()> {
     let fstab = format!("{}/etc/fstab", mount_dir);
     tokio::fs::write(&fstab, "/dev/vda\t/\text4\tdefaults,noatime\t0\t1\n").await?;
 
-    // Configure Docker to use vfs storage driver — overlayfs-on-overlayfs not supported
-    let docker_conf_dir = format!("{}/etc/docker", mount_dir);
-    tokio::fs::create_dir_all(&docker_conf_dir).await?;
-    tokio::fs::write(
-        format!("{}/daemon.json", docker_conf_dir),
-        r#"{"storage-driver": "vfs"}"#,
-    )
-    .await?;
-
     // Mask serial-getty@ttyS0 — Firecracker has no real serial console device
     let mask_dir = format!("{}/etc/systemd/system", mount_dir);
     tokio::fs::create_dir_all(&mask_dir).await?;
@@ -336,6 +327,12 @@ fi
 
 mkdir -p /overlay/root /overlay/work
 pivot /overlay/root /overlay/work
+
+# Bind-mount raw ext4 for Docker — overlayfs-on-overlayfs is not supported,
+# so give Docker a native ext4 at /var/lib/docker via the raw overlay device
+mkdir -p /rom/overlay/docker /var/lib/docker
+/bin/mount --bind /rom/overlay/docker /var/lib/docker
+
 exec /sbin/init "$@"
 "#,
     )
