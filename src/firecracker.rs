@@ -405,10 +405,11 @@ impl MicroVm {
         let system_dir = write_base.join("etc/systemd/system");
         tokio::fs::create_dir_all(&system_dir).await?;
 
-        // Mask services that block boot or conflict with overlay-init networking
+        // Mask services/sockets that block boot or conflict with overlay-init networking
         for service in [
             "systemd-networkd-wait-online.service",
             "systemd-networkd.service",
+            "systemd-networkd.socket",
         ] {
             let link = system_dir.join(service);
             let _ = tokio::fs::remove_file(&link).await;
