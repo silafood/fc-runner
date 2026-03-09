@@ -36,6 +36,9 @@ HTTP client for CLI-to-server management API communication. Used by the `ps`, `p
 ### `agent.rs`
 Guest agent that runs inside Firecracker VMs via `fc-runner agent`. Reads MMDS V2 metadata (token acquisition via PUT, then GET `/fc-runner`), starts the GitHub Actions runner with the JIT config, sets the VM hostname, and reports state to the host via VSOCK NDJSON messages (Ready, JobStarted, JobCompleted). Optionally shuts down the VM after the runner exits. Uses conditional compilation (`#[cfg(target_os = "linux")]`) for VSOCK-dependent code.
 
+### `image.rs`
+OCI image pull and conversion module. Pulls container images from any OCI-compliant registry (Docker Hub, GHCR, etc.) using the `oci-client` crate, extracts tar.gz layers onto a loop-mounted ext4 image, and handles OCI whiteout files (`.wh.*` for deletions, `.wh..wh..opq` for opaque directory replacements). Supports digest-based caching — if the remote image digest matches the cached version, the pull is skipped. Automatically installs the fc-runner agent binary into OCI-derived rootfs images if not already present.
+
 ### `config.rs`
 Parses `/etc/fc-runner/config.toml` into typed structs using `serde` + `toml`. Validates all paths exist at load time. Redacts the GitHub token in Debug output. Supports both single `repo` and multi-repo `repos` fields (merged and deduplicated via `all_repos()`).
 
@@ -117,7 +120,8 @@ Auto-provisioning module that ensures all VM prerequisites are in place at start
 1. **preflight_kvm** — verifies `/dev/kvm` exists and is accessible
 2. **resolve_allowed_networks** — expands the `"github"` keyword into actual CIDRs from `api.github.com/meta`
 3. **ensure_kernel** — downloads the guest kernel if missing (from GitHub releases)
-4. **ensure_golden_rootfs** — builds the golden rootfs if missing:
+4. **OCI image mode** — when `firecracker.image` is set, pulls the OCI image via `image.rs` and converts layers to ext4 (skips the cloud image pipeline)
+5. **ensure_golden_rootfs** — builds the golden rootfs if missing (when `image` is not set):
    - Downloads Ubuntu 24.04 minimal cloud image (qcow2)
    - Converts qcow2 to raw via `qcow2-rs` (pure Rust)
    - Finds ext4 partition via `bootsector` crate + magic byte check (0xEF53)
@@ -223,6 +227,7 @@ ensure_vm_assets()
   ├─ preflight_kvm()           → verify /dev/kvm
   ├─ resolve_allowed_networks() → expand "github" → CIDRs
   ├─ ensure_kernel()           → download vmlinux if missing
+  ├─ (if image set)            → pull OCI image, extract to ext4
   ├─ ensure_golden_rootfs()    → build rootfs from cloud image if missing
   │   ├─ download qcow2 cloud image
   │   ├─ convert qcow2 → raw (pure Rust, qcow2-rs)

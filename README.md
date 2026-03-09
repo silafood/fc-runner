@@ -26,6 +26,7 @@ GitHub Actions                fc-runner                    Firecracker
 - **Ephemeral VMs** — clean environment for every job, no cross-contamination
 - **Fast boot** — Firecracker microVMs start in ~125 ms
 - **Auto-provisioning** — kernel download, golden rootfs build (from Ubuntu cloud image via pure Rust qcow2 conversion), per-VM TAP networking, and NAT are all set up automatically at first startup
+- **OCI image support** — define VM images as standard Dockerfiles, push to any registry (GHCR, Docker Hub), and fc-runner pulls and converts to ext4 automatically with digest-based caching
 - **JIT tokens** — single-use, short-lived tokens (no static runner registration)
 - **GitHub App auth** — authenticate as a GitHub App for higher rate limits and no PAT expiry management
 - **MMDS secret injection** — inject secrets via Firecracker's built-in metadata service (no loop-mount needed)
@@ -184,7 +185,7 @@ Full example at [`config.toml.example`](config.toml.example). Key sections:
 | Section | Key fields |
 |---------|-----------|
 | `[github]` | `token`, `owner`, `repo`/`repos`, `organization`, `labels`; or `[github.app]` for App auth |
-| `[firecracker]` | `kernel_path`, `rootfs_golden`, `vcpu_count`, `mem_size_mib`, `secret_injection`, `vsock_enabled` |
+| `[firecracker]` | `kernel_path`, `rootfs_golden`, `image`, `vcpu_count`, `mem_size_mib`, `secret_injection`, `vsock_enabled` |
 | `[runner]` | `work_dir`, `poll_interval_secs`, `max_concurrent_jobs`, `vm_timeout_secs`, `warm_pool_size` |
 | `[[pool]]` | Named pools: `name`, `repos`, `min_ready`, `max_ready`, per-pool `vcpu_count`/`mem_size_mib` |
 | `[network]` | `host_ip`, `guest_ip`, `cidr`, `dns`, `allowed_networks` |
@@ -201,6 +202,7 @@ fc-runner/
 │   ├── cli.rs            # CLI subcommand definitions (server, agent, ps, pools, etc.)
 │   ├── api_client.rs     # HTTP client for CLI→server management API calls
 │   ├── agent.rs          # Guest agent: MMDS reader, runner launcher, VSOCK reporter
+│   ├── image.rs          # OCI image pull, layer extraction, ext4 conversion
 │   ├── config.rs         # Typed TOML config with validation
 │   ├── github.rs         # GitHub API client (PAT + App auth, repo + org level)
 │   ├── firecracker.rs    # MicroVm lifecycle: prepare → run → cleanup (MMDS + mount modes)
@@ -223,6 +225,7 @@ fc-runner/
 │   └── troubleshooting.md
 ├── Cargo.toml
 ├── config.toml.example
+├── Dockerfile.runner      # Sample Dockerfile for OCI-based VM images
 ├── fc-runner.service      # systemd unit
 ├── install.sh             # Host setup script
 └── build-v611-linux.sh    # Manual golden rootfs + kernel provisioning

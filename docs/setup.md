@@ -343,3 +343,34 @@ sudo systemctl restart fc-runner
 
 fc-runner will detect the missing rootfs and rebuild it automatically.
 
+## Using OCI Images (Dockerfile-Based)
+
+Instead of the automatic cloud image build, you can define VM images as standard Dockerfiles. This gives you full control over installed packages and configuration.
+
+### 1. Build and push your image
+
+```bash
+# Use the provided sample Dockerfile (or create your own)
+docker build -t ghcr.io/your-org/fc-runner-image:latest -f Dockerfile.runner .
+docker push ghcr.io/your-org/fc-runner-image:latest
+```
+
+### 2. Configure fc-runner to use the image
+
+```toml
+[firecracker]
+image = "ghcr.io/your-org/fc-runner-image:latest"
+rootfs_golden = "/opt/fc-runner/runner-rootfs-golden.ext4"
+```
+
+### 3. Restart fc-runner
+
+```bash
+sudo rm -f /opt/fc-runner/runner-rootfs-golden.ext4  # clear old rootfs
+sudo systemctl restart fc-runner
+```
+
+fc-runner will pull the image, extract layers to ext4, and cache it. On subsequent starts, it checks the image digest and only re-pulls if the image has changed.
+
+The fc-runner agent binary is automatically installed into the image if not already present. The sample `Dockerfile.runner` includes Ubuntu 24.04, build tools, Rust, GitHub Actions runner, and systemd networking.
+

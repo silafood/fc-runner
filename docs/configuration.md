@@ -38,6 +38,7 @@ labels = ["self-hosted", "linux", "firecracker"]
 binary_path = "/usr/local/bin/firecracker"
 kernel_path = "/opt/fc-runner/vmlinux.bin"
 rootfs_golden = "/opt/fc-runner/runner-rootfs-golden.ext4"
+# image = "ghcr.io/your-org/fc-runner-image:latest"
 vcpu_count = 2
 mem_size_mib = 2048
 # boot_args = "console=ttyS0 reboot=k panic=1 pci=off fsck.mode=skip quiet loglevel=3"
@@ -145,6 +146,7 @@ private_key_path = "/etc/fc-runner/app-key.pem"
 | `binary_path` | No | `/usr/local/bin/firecracker` | Path to the Firecracker binary |
 | `kernel_path` | Yes | — | Path to the guest kernel (`vmlinux.bin`). Auto-downloaded if missing. |
 | `rootfs_golden` | Yes | — | Path to the golden ext4 rootfs image. Auto-built if missing. |
+| `image` | No | — | OCI image reference (e.g., `ghcr.io/org/image:latest`). When set, the image is pulled, converted to ext4, and cached at `rootfs_golden` path. Takes precedence over the cloud image build pipeline. |
 | `vcpu_count` | No | `2` | Number of vCPUs per VM |
 | `mem_size_mib` | No | `2048` | Memory in MiB per VM |
 | `boot_args` | No | `console=ttyS0 reboot=k panic=1 pci=off fsck.mode=skip quiet loglevel=3` | Kernel boot arguments |
@@ -176,6 +178,38 @@ private_key_path = "/etc/fc-runner/app-key.pem"
 #### VSOCK
 
 When `vsock_enabled = true`, each VM gets a virtio-vsock device. The host spawns a VSOCK listener per VM that reads NDJSON messages from the guest agent on port 1024. This enables structured host-guest communication without network overhead.
+
+#### OCI Image Mode
+
+When `image` is set, fc-runner pulls the specified OCI container image from the registry, extracts its layers onto an ext4 filesystem, and uses it as the golden rootfs. This replaces the cloud image build pipeline and lets you define VM images as standard Dockerfiles.
+
+```toml
+[firecracker]
+image = "ghcr.io/your-org/fc-runner-image:latest"
+rootfs_golden = "/opt/fc-runner/runner-rootfs-golden.ext4"
+```
+
+**How it works:**
+1. Pulls the image manifest and checks digest against cached version
+2. If changed (or first pull): creates a blank ext4 image, mounts it, extracts layers in order
+3. Handles OCI whiteout files (`.wh.*` deletions, `.wh..wh..opq` opaque directory replacements)
+4. Installs the fc-runner agent binary if not already present in the image
+5. Saves the digest for future cache checks
+
+**Building a custom image:**
+```bash
+# Build using the provided sample Dockerfile
+docker build -t ghcr.io/your-org/fc-runner-image:latest -f Dockerfile.runner .
+docker push ghcr.io/your-org/fc-runner-image:latest
+```
+
+The sample `Dockerfile.runner` includes Ubuntu 24.04, build tools, Rust, GitHub Actions runner, and systemd networking. Customize it to add your own dependencies.
+
+**Notes:**
+- The fc-runner agent binary is automatically installed if not found in the image
+- `rootfs_golden` is still required — it specifies where the converted ext4 image is cached
+- When `image` is not set, the existing cloud image pipeline is used (backward compatible)
+- Anonymous registry access is used by default (works with public images on GHCR, Docker Hub, etc.)
 
 ### `[runner]`
 
