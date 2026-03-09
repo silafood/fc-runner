@@ -282,17 +282,13 @@ impl MicroVm {
         // Write per-VM guest network config (unique IP/gateway per slot)
         self.write_network_config_to(&write_base).await?;
 
-        // In overlay mode, override fstab so systemd-remount-fs doesn't try to
-        // remount root as ext4 (root is overlayfs, not a block device)
         if self.use_overlay() {
+            // Override fstab (root is overlayfs, not ext4 block device)
             self.write_overlay_fstab(&write_base).await?;
-        }
-
-        // In overlay + mount mode, write an entrypoint with shell fallback.
-        // The agent only reads MMDS, which isn't available in --no-api mode.
-        // The overlay entrypoint overrides the squashfs one.
-        if self.use_overlay() {
+            // Write entrypoint with shell fallback (agent can't read MMDS in --no-api mode)
             self.write_mount_mode_entrypoint(&write_base).await?;
+            // Mask services that block boot — we pre-configure network in overlay-init
+            self.mask_overlay_services(&write_base).await?;
         }
 
         self.umount_with_retry().await?;
@@ -324,10 +320,9 @@ impl MicroVm {
 
         self.write_network_config_to(&write_base).await?;
 
-        // In overlay mode, override fstab so systemd-remount-fs doesn't try to
-        // remount root as ext4 (root is overlayfs, not a block device)
         if self.use_overlay() {
             self.write_overlay_fstab(&write_base).await?;
+            self.mask_overlay_services(&write_base).await?;
         }
 
         self.umount_with_retry().await?;
@@ -399,6 +394,26 @@ impl MicroVm {
              # /dev/vdb is the writable ext4 overlay (mounted by overlay-init)\n",
         )
         .await?;
+        Ok(())
+    }
+
+    /// Mask systemd services that block boot in overlay mode.
+    /// Network is pre-configured by overlay-init, so systemd-networkd-wait-online
+    /// would block for 120s waiting for systemd-networkd to report ready (it can't
+    /// read config on overlayfs). Masking prevents the boot delay.
+    async fn mask_overlay_services(&self, write_base: &std::path::Path) -> anyhow::Result<()> {
+        let system_dir = write_base.join("etc/systemd/system");
+        tokio::fs::create_dir_all(&system_dir).await?;
+
+        // Mask services that block boot or conflict with overlay-init networking
+        for service in [
+            "systemd-networkd-wait-online.service",
+            "systemd-networkd.service",
+        ] {
+            let link = system_dir.join(service);
+            let _ = tokio::fs::remove_file(&link).await;
+            tokio::fs::symlink("/dev/null", &link).await?;
+        }
         Ok(())
     }
 
