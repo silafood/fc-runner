@@ -1076,9 +1076,11 @@ fi
 
             Ok(instance)
         } else {
-            let socket_path = self.socket_path.with_file_name(sock_name);
+            // Each VM needs its own socket — use the VM-specific socket_path
+            // (with_file_name would make all VMs share "api.sock", causing collisions)
+            let socket_path = &self.socket_path;
             let mut fc_opt = FirecrackerOption::new(&self.fc_config.binary_path);
-            fc_opt.api_sock(&socket_path).id(&self.vm_id);
+            fc_opt.api_sock(socket_path).id(&self.vm_id);
 
             let instance = fc_opt
                 .build()
