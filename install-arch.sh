@@ -9,7 +9,12 @@ echo "NOTE: Network setup (TAP, NAT, IP forwarding) is handled by fc-runner at s
 # --- 1. System dependencies ---
 echo "[1/5] Installing system dependencies..."
 # Update database and install packages without prompting, skipping already installed ones
-pacman -Sy --noconfirm --needed debootstrap curl jq e2fsprogs unzip wget iptables-nft ipset iproute2 squashfs-tools
+# Skip iptables-nft if iptables is already installed (they conflict but both provide the iptables command)
+IPTABLES_PKG=""
+if ! pacman -Qi iptables-nft &>/dev/null && ! pacman -Qi iptables &>/dev/null; then
+    IPTABLES_PKG="iptables-nft"
+fi
+pacman -Sy --noconfirm --needed debootstrap curl jq e2fsprogs unzip wget $IPTABLES_PKG ipset iproute2 squashfs-tools
 
 # --- 2. Firecracker binaries ---
 echo "[2/5] Installing Firecracker v${FC_VERSION}..."
