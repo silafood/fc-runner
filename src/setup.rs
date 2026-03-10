@@ -555,6 +555,7 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
                  zip bzip2 \
                  libffi-dev zlib1g-dev \
                  net-tools dnsutils iputils-ping \
+                 file \
                  locales && \
              apt-get clean && \
              rm -rf /var/lib/apt/lists/*"])
