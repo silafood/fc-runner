@@ -38,7 +38,7 @@ labels = ["self-hosted", "linux", "firecracker"]
 binary_path = "/usr/local/bin/firecracker"
 kernel_path = "/opt/fc-runner/vmlinux.bin"
 rootfs_golden = "/opt/fc-runner/runner-rootfs-golden.ext4"
-# image = "ghcr.io/your-org/fc-runner-image:latest"
+# image = "ghcr.io/silafood/fc-runner-image:567e784"  # public base image, or use your own
 vcpu_count = 2
 mem_size_mib = 2048
 # boot_args = "console=ttyS0 reboot=k panic=1 pci=off fsck.mode=skip quiet loglevel=3"
