@@ -343,11 +343,23 @@ sudo systemctl restart fc-runner
 
 fc-runner will detect the missing rootfs and rebuild it automatically.
 
-## Using OCI Images (Dockerfile-Based)
+## Using OCI Images (Recommended)
 
-Instead of the automatic cloud image build, you can define VM images as standard Dockerfiles. This gives you full control over installed packages and configuration.
+Instead of the automatic cloud image build, you can use a pre-built OCI image. This is faster, more reproducible, and gives you full control over installed packages.
 
-### 1. Build and push your image
+### Option A: Use the public base image
+
+A ready-to-use public image is available:
+
+```toml
+[firecracker]
+image = "ghcr.io/silafood/fc-runner-image:567e784"
+rootfs_golden = "/opt/fc-runner/runner-rootfs-golden.ext4"
+```
+
+This image includes Ubuntu 24.04, build tools, Rust, GitHub Actions runner, Docker, and systemd networking. No need to build your own.
+
+### Option B: Build and push a custom image
 
 ```bash
 # Use the provided sample Dockerfile (or create your own)
@@ -355,7 +367,7 @@ docker build -t ghcr.io/your-org/fc-runner-image:latest -f Dockerfile.runner .
 docker push ghcr.io/your-org/fc-runner-image:latest
 ```
 
-### 2. Configure fc-runner to use the image
+Then configure:
 
 ```toml
 [firecracker]
@@ -363,14 +375,18 @@ image = "ghcr.io/your-org/fc-runner-image:latest"
 rootfs_golden = "/opt/fc-runner/runner-rootfs-golden.ext4"
 ```
 
-### 3. Restart fc-runner
+### Start fc-runner with OCI image
 
 ```bash
-sudo rm -f /opt/fc-runner/runner-rootfs-golden.ext4  # clear old rootfs
+sudo rm -f /opt/fc-runner/runner-rootfs-golden.ext4  # clear old rootfs if switching
 sudo systemctl restart fc-runner
 ```
 
 fc-runner will pull the image, extract layers to ext4, and cache it. On subsequent starts, it checks the image digest and only re-pulls if the image has changed.
 
-The fc-runner agent binary is automatically installed into the image if not already present. The sample `Dockerfile.runner` includes Ubuntu 24.04, build tools, Rust, GitHub Actions runner, and systemd networking.
+The fc-runner agent binary is automatically installed into the image if not already present.
+
+### Cloud image fallback
+
+When `image` is not set in the config, fc-runner falls back to building the golden rootfs from an Ubuntu 24.04 cloud image automatically. This requires more host dependencies (e2fsprogs, chroot, etc.) and takes longer on first startup.
 
