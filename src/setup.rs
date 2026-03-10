@@ -128,6 +128,7 @@ pub async fn ensure_vm_assets(config: &mut AppConfig) -> anyhow::Result<()> {
 
     // Convert golden rootfs to squashfs when overlay mode is enabled
     if config.firecracker.overlay_rootfs {
+        verify_kernel_overlay_support(&config.firecracker.kernel_path).await?;
         convert_to_squashfs(&config.firecracker.rootfs_golden).await?;
     }
 
@@ -313,6 +314,42 @@ async fn ensure_kernel(kernel_path: &str) -> anyhow::Result<()> {
     download_file(KERNEL_URL, kernel_path).await?;
 
     tracing::info!(path = kernel_path, "kernel downloaded");
+    Ok(())
+}
+
+/// Verify the kernel binary has required features for overlay mode.
+/// Checks for compiled-in driver strings (squashfs, overlay) in the binary.
+async fn verify_kernel_overlay_support(kernel_path: &str) -> anyhow::Result<()> {
+    let data = tokio::fs::read(kernel_path)
+        .await
+        .context("reading kernel binary for verification")?;
+
+    let has_squashfs = data
+        .windows(8)
+        .any(|w| w == b"squashfs");
+    let has_overlay = data
+        .windows(9)
+        .any(|w| w == b"overlayfs");
+
+    if !has_squashfs || !has_overlay {
+        let mut missing = Vec::new();
+        if !has_squashfs {
+            missing.push("CONFIG_SQUASHFS");
+        }
+        if !has_overlay {
+            missing.push("CONFIG_OVERLAY_FS");
+        }
+        anyhow::bail!(
+            "kernel at {} is missing required features for overlay mode: {}. \
+             The kernel must be compiled with CONFIG_SQUASHFS=y, CONFIG_SQUASHFS_ZSTD=y, \
+             and CONFIG_OVERLAY_FS=y. Copy a compatible kernel from a working fc-runner \
+             installation or rebuild from guest_configs/microvm-kernel-ci-x86_64-6.1.config",
+            kernel_path,
+            missing.join(", ")
+        );
+    }
+
+    tracing::info!(path = kernel_path, "kernel verified: squashfs + overlay support present");
     Ok(())
 }
 
