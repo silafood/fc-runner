@@ -1,8 +1,10 @@
 # Host Dependencies
 
-This document lists all system tools and packages required to run fc-runner on a Linux host (Ubuntu/Debian 24.04+).
+This document lists all system tools and packages required to run fc-runner on a Linux host.
 
-## Quick Install (Ubuntu/Debian)
+## Quick Install
+
+### Ubuntu/Debian
 
 ```bash
 # All required packages in one command
@@ -16,7 +18,22 @@ sudo apt-get update && sudo apt-get install -y \
     jq
 ```
 
-The `install.sh` script handles this automatically, but you can also install manually.
+The `install.sh` script handles this automatically.
+
+### Arch Linux
+
+```bash
+# All required packages in one command
+sudo pacman -Sy --noconfirm --needed \
+    curl wget \
+    e2fsprogs \
+    iptables-nft ipset iproute2 \
+    squashfs-tools \
+    debootstrap \
+    jq unzip
+```
+
+The `install-arch.sh` script handles this automatically. If `iptables` is already installed, skip `iptables-nft` (they conflict but both provide the same `iptables` command).
 
 ---
 
@@ -37,7 +54,11 @@ These are used by fc-runner during normal operation:
 | `jailer` | Bundled with Firecracker | `firecracker.rs` | Chroot + seccomp-BPF isolation for VMs (optional but recommended) |
 
 ```bash
+# Ubuntu/Debian
 sudo apt-get install -y e2fsprogs iptables ipset iproute2 mount
+
+# Arch Linux
+sudo pacman -S --needed e2fsprogs iptables-nft ipset iproute2
 ```
 
 ### OverlayFS Mode (default, recommended)
@@ -49,7 +70,11 @@ Required when `overlay_rootfs = true` (the default):
 | `mksquashfs` | `squashfs-tools` | `setup.rs` | Convert golden ext4 rootfs to compressed squashfs (zstd) |
 
 ```bash
+# Ubuntu/Debian
 sudo apt-get install -y squashfs-tools
+
+# Arch Linux
+sudo pacman -S --needed squashfs-tools
 ```
 
 fc-runner checks for `mksquashfs` at startup and gives a clear error if missing. To disable overlay mode and skip this dependency, set `overlay_rootfs = false` in your config.
@@ -67,7 +92,11 @@ Used once to build the golden rootfs from an Ubuntu cloud image. After the rootf
 | `debootstrap` | `debootstrap` | `build-rootfs.sh` | Bootstrap Ubuntu rootfs (alternative build script) |
 
 ```bash
+# Ubuntu/Debian
 sudo apt-get install -y e2fsprogs curl debootstrap
+
+# Arch Linux
+sudo pacman -S --needed e2fsprogs curl debootstrap
 ```
 
 ### Network Management
@@ -78,7 +107,11 @@ sudo apt-get install -y e2fsprogs curl debootstrap
 | `ipset` | `ipset` | `setup.rs` | IP set for network allowlisting (`allowed_networks` config) |
 
 ```bash
+# Ubuntu/Debian
 sudo apt-get install -y iptables ipset
+
+# Arch Linux
+sudo pacman -S --needed iptables-nft ipset
 ```
 
 > **Note:** TAP device creation and IP assignment use pure Rust (`nix` crate ioctl + `rtnetlink` crate) — no `ip` command needed at runtime.
@@ -98,7 +131,11 @@ Only needed if you build the golden rootfs manually instead of letting fc-runner
 | `tar` | `tar` (pre-installed) | `build-v611-linux.sh` | Extract GitHub Actions runner tarball |
 
 ```bash
+# Ubuntu/Debian
 sudo apt-get install -y qemu-utils e2fsprogs
+
+# Arch Linux
+sudo pacman -S --needed qemu-img e2fsprogs
 ```
 
 ---
@@ -210,10 +247,10 @@ fc-runner validate --config /etc/fc-runner/config.toml
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `mksquashfs not found` | `squashfs-tools` not installed | `sudo apt install squashfs-tools` |
+| `mksquashfs not found` | `squashfs-tools` not installed | `sudo apt install squashfs-tools` / `sudo pacman -S squashfs-tools` |
 | `KVM not available` | Missing kernel module | `sudo modprobe kvm_intel` (or `kvm_amd`) |
 | `Permission denied on /dev/kvm` | User not in kvm group | `sudo usermod -aG kvm $USER && newgrp kvm` |
 | `mount: /dev/loop*: failed` | Loop devices exhausted | `sudo modprobe loop max_loop=64` |
-| `mkfs.ext4: not found` | `e2fsprogs` not installed | `sudo apt install e2fsprogs` |
-| `iptables: not found` | `iptables` not installed | `sudo apt install iptables` |
-| `firecracker: not found` | Firecracker not installed | Run `sudo bash install.sh` or install manually |
+| `mkfs.ext4: not found` | `e2fsprogs` not installed | `sudo apt install e2fsprogs` / `sudo pacman -S e2fsprogs` |
+| `iptables: not found` | `iptables` not installed | `sudo apt install iptables` / `sudo pacman -S iptables-nft` |
+| `firecracker: not found` | Firecracker not installed | Run `sudo bash install.sh` (Ubuntu) or `sudo bash install-arch.sh` (Arch) |
