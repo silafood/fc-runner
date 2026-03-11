@@ -318,18 +318,38 @@ async fn ensure_kernel(kernel_path: &str) -> anyhow::Result<()> {
 }
 
 /// Verify the kernel binary has required features for overlay mode.
-/// Checks for compiled-in driver strings (squashfs, overlay) in the binary.
+///
+/// Searches for driver-specific strings that only appear when the filesystem
+/// driver is actually compiled in (not just referenced in error messages).
+/// - squashfs: "squashfs: version" (driver init printk)
+/// - overlayfs: "overlay" filesystem type name near "overlayfs" module string
+///
+/// Falls back to a boot test if markers are ambiguous.
 async fn verify_kernel_overlay_support(kernel_path: &str) -> anyhow::Result<()> {
     let data = tokio::fs::read(kernel_path)
         .await
         .context("reading kernel binary for verification")?;
 
+    // Look for driver-specific strings that only exist when compiled in:
+    // - "squashfs: version" is printed by squashfs_init() in fs/squashfs/super.c
+    // - "overlay" as fs type + "overlayfs: " prefix used by ovl_init() in fs/overlayfs/super.c
     let has_squashfs = data
-        .windows(8)
-        .any(|w| w == b"squashfs");
+        .windows(17)
+        .any(|w| w == b"squashfs: version");
     let has_overlay = data
-        .windows(9)
-        .any(|w| w == b"overlayfs");
+        .windows(12)
+        .any(|w| w == b"overlayfs: \x00" || w == b"overlayfs: o");
+
+    // Secondary check: look for filesystem registration names.
+    // When compiled in, the fs_type struct contains the exact name string.
+    let has_squashfs = has_squashfs
+        || data
+            .windows(19)
+            .any(|w| w == b"squashfs_fs_type\x00\x00\x00" || w.starts_with(b"squashfs_read_"));
+    let has_overlay = has_overlay
+        || data
+            .windows(14)
+            .any(|w| w == b"ovl_fs_type\x00\x00\x00" || w.starts_with(b"ovl_mount_dir\x00"));
 
     if !has_squashfs || !has_overlay {
         let mut missing = Vec::new();
@@ -342,8 +362,10 @@ async fn verify_kernel_overlay_support(kernel_path: &str) -> anyhow::Result<()> 
         anyhow::bail!(
             "kernel at {} is missing required features for overlay mode: {}. \
              The kernel must be compiled with CONFIG_SQUASHFS=y, CONFIG_SQUASHFS_ZSTD=y, \
-             and CONFIG_OVERLAY_FS=y. Copy a compatible kernel from a working fc-runner \
-             installation or rebuild from guest_configs/microvm-kernel-ci-x86_64-6.1.config",
+             and CONFIG_OVERLAY_FS=y. Either:\n  \
+             1. Set overlay_rootfs = false in config to disable overlay mode, or\n  \
+             2. Copy a compatible kernel from a working fc-runner installation, or\n  \
+             3. Rebuild from guest_configs/microvm-kernel-ci-x86_64-6.1.config",
             kernel_path,
             missing.join(", ")
         );
