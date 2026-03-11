@@ -24,6 +24,7 @@ The `install.sh` script handles this automatically.
 
 ```bash
 # All required packages in one command
+# Note: iptables-nft and iptables conflict — install whichever your system doesn't already have
 sudo pacman -Sy --noconfirm --needed \
     curl wget \
     e2fsprogs \
@@ -33,7 +34,7 @@ sudo pacman -Sy --noconfirm --needed \
     jq unzip
 ```
 
-The `install-arch.sh` script handles this automatically. If `iptables` is already installed, skip `iptables-nft` (they conflict but both provide the same `iptables` command).
+The `install-arch.sh` script handles this automatically.
 
 ---
 
@@ -247,10 +248,10 @@ fc-runner validate --config /etc/fc-runner/config.toml
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `mksquashfs not found` | `squashfs-tools` not installed | `sudo apt install squashfs-tools` / `sudo pacman -S squashfs-tools` |
+| `mksquashfs not found` | `squashfs-tools` not installed | Ubuntu: `sudo apt install squashfs-tools` / Arch: `sudo pacman -S squashfs-tools` |
 | `KVM not available` | Missing kernel module | `sudo modprobe kvm_intel` (or `kvm_amd`) |
 | `Permission denied on /dev/kvm` | User not in kvm group | `sudo usermod -aG kvm $USER && newgrp kvm` |
 | `mount: /dev/loop*: failed` | Loop devices exhausted | `sudo modprobe loop max_loop=64` |
-| `mkfs.ext4: not found` | `e2fsprogs` not installed | `sudo apt install e2fsprogs` / `sudo pacman -S e2fsprogs` |
-| `iptables: not found` | `iptables` not installed | `sudo apt install iptables` / `sudo pacman -S iptables-nft` |
+| `mkfs.ext4: not found` | `e2fsprogs` not installed | Ubuntu: `sudo apt install e2fsprogs` / Arch: `sudo pacman -S e2fsprogs` |
+| `iptables: not found` | `iptables` not installed | Ubuntu: `sudo apt install iptables` / Arch: `sudo pacman -S iptables-nft` |
 | `firecracker: not found` | Firecracker not installed | Run `sudo bash install.sh` (Ubuntu) or `sudo bash install-arch.sh` (Arch) |

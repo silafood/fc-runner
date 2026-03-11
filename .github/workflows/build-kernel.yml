@@ -1,0 +1,124 @@
+name: Build Kernel
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'guest_configs/microvm-kernel-ci-x86_64-6.1.config'
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: 'Kernel version (e.g. 6.1.102)'
+        required: false
+        default: '6.1.102'
+
+env:
+  KERNEL_VERSION: ${{ github.event.inputs.kernel_version || '6.1.102' }}
+  REGISTRY: ghcr.io
+  PACKAGE_NAME: ${{ github.repository_owner }}/fc-runner-kernel
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-kernel:
+    name: Build vmlinux ${{ github.event.inputs.kernel_version || '6.1.102' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential libncurses-dev bison flex \
+            libssl-dev libelf-dev bc wget
+
+      - name: Download kernel source
+        run: |
+          wget -q https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VERSION}.tar.xz
+          tar -xf linux-${KERNEL_VERSION}.tar.xz
+
+      - name: Apply Firecracker kernel config
+        working-directory: linux-${{ env.KERNEL_VERSION }}
+        run: |
+          cp $GITHUB_WORKSPACE/guest_configs/microvm-kernel-ci-x86_64-6.1.config .config
+          make olddefconfig
+
+      - name: Build vmlinux
+        working-directory: linux-${{ env.KERNEL_VERSION }}
+        run: make vmlinux -j$(nproc)
+
+      - name: Verify kernel
+        working-directory: linux-${{ env.KERNEL_VERSION }}
+        run: |
+          file vmlinux | grep -q "ELF 64-bit" || { echo "ERROR: not a valid ELF binary"; exit 1; }
+
+          # Verify required configs are compiled in
+          MISSING=""
+          grep -q "CONFIG_SQUASHFS=y" .config || MISSING="$MISSING CONFIG_SQUASHFS"
+          grep -q "CONFIG_SQUASHFS_ZSTD=y" .config || MISSING="$MISSING CONFIG_SQUASHFS_ZSTD"
+          grep -q "CONFIG_OVERLAY_FS=y" .config || MISSING="$MISSING CONFIG_OVERLAY_FS"
+          grep -q "CONFIG_VIRTIO=y" .config || MISSING="$MISSING CONFIG_VIRTIO"
+          grep -q "CONFIG_EXT4_FS=y" .config || MISSING="$MISSING CONFIG_EXT4_FS"
+
+          if [ -n "$MISSING" ]; then
+            echo "ERROR: kernel config missing required options:$MISSING"
+            exit 1
+          fi
+
+          echo "Kernel verified: all required configs present"
+          ls -lh vmlinux
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push kernel to GHCR as OCI artifact
+        run: |
+          cd linux-${KERNEL_VERSION}
+          COMMIT_SHA="${GITHUB_SHA::7}"
+          TAG="${KERNEL_VERSION}-${COMMIT_SHA}"
+
+          # Push as OCI artifact using oras
+          curl -sLO https://github.com/oras-project/oras/releases/download/v1.2.2/oras_1.2.2_linux_amd64.tar.gz
+          tar xzf oras_1.2.2_linux_amd64.tar.gz oras
+          chmod +x oras
+
+          ./oras push "${REGISTRY}/${PACKAGE_NAME}:${TAG}" \
+            --artifact-type application/vnd.fc-runner.kernel.v1 \
+            vmlinux:application/octet-stream
+
+          ./oras push "${REGISTRY}/${PACKAGE_NAME}:latest" \
+            --artifact-type application/vnd.fc-runner.kernel.v1 \
+            vmlinux:application/octet-stream
+
+          echo "Pushed ${REGISTRY}/${PACKAGE_NAME}:${TAG}"
+          echo "Pushed ${REGISTRY}/${PACKAGE_NAME}:latest"
+
+      - name: Upload kernel as release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd linux-${KERNEL_VERSION}
+          cp vmlinux vmlinux-${KERNEL_VERSION}
+
+          # Upload to latest release if one exists, otherwise just artifact
+          LATEST_RELEASE=$(gh release view --json tagName -q .tagName 2>/dev/null || echo "")
+          if [ -n "$LATEST_RELEASE" ]; then
+            # Delete old kernel asset if present, then upload new one
+            gh release delete-asset "$LATEST_RELEASE" "vmlinux-${KERNEL_VERSION}" --yes 2>/dev/null || true
+            gh release upload "$LATEST_RELEASE" "vmlinux-${KERNEL_VERSION}" --clobber
+            echo "Uploaded vmlinux-${KERNEL_VERSION} to release $LATEST_RELEASE"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vmlinux-${{ env.KERNEL_VERSION }}
+          path: linux-${{ env.KERNEL_VERSION }}/vmlinux
+          retention-days: 90

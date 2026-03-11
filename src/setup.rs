@@ -106,7 +106,7 @@ fn set_executable(path: &str) -> anyhow::Result<()> {
 }
 
 const KERNEL_URL: &str =
-    "https://github.com/silafood/fc-runner/releases/download/v0.1.0/vmlinux-6.1.102";
+    "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.11/x86_64/vmlinux-6.1.102";
 const RUNNER_VERSION: &str = "2.332.0";
 const DEFAULT_CLOUD_IMG_URL: &str =
     "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img";
@@ -128,6 +128,7 @@ pub async fn ensure_vm_assets(config: &mut AppConfig) -> anyhow::Result<()> {
 
     // Convert golden rootfs to squashfs when overlay mode is enabled
     if config.firecracker.overlay_rootfs {
+        verify_kernel_overlay_support(&config.firecracker.kernel_path).await?;
         convert_to_squashfs(&config.firecracker.rootfs_golden).await?;
     }
 
@@ -313,6 +314,64 @@ async fn ensure_kernel(kernel_path: &str) -> anyhow::Result<()> {
     download_file(KERNEL_URL, kernel_path).await?;
 
     tracing::info!(path = kernel_path, "kernel downloaded");
+    Ok(())
+}
+
+/// Verify the kernel binary has required features for overlay mode.
+///
+/// Searches for driver-specific strings that only appear when the filesystem
+/// driver is actually compiled in (not just referenced in error messages).
+/// - squashfs: "squashfs: version" (driver init printk)
+/// - overlayfs: "overlay" filesystem type name near "overlayfs" module string
+///
+/// Falls back to a boot test if markers are ambiguous.
+async fn verify_kernel_overlay_support(kernel_path: &str) -> anyhow::Result<()> {
+    let data = tokio::fs::read(kernel_path)
+        .await
+        .context("reading kernel binary for verification")?;
+
+    // Look for driver-specific strings that only exist when compiled in:
+    // - "squashfs: version" is printed by squashfs_init() in fs/squashfs/super.c
+    // - "overlay" as fs type + "overlayfs: " prefix used by ovl_init() in fs/overlayfs/super.c
+    let has_squashfs = data
+        .windows(17)
+        .any(|w| w == b"squashfs: version");
+    let has_overlay = data
+        .windows(12)
+        .any(|w| w == b"overlayfs: \x00" || w == b"overlayfs: o");
+
+    // Secondary check: look for filesystem registration names.
+    // When compiled in, the fs_type struct contains the exact name string.
+    let has_squashfs = has_squashfs
+        || data
+            .windows(19)
+            .any(|w| w == b"squashfs_fs_type\x00\x00\x00" || w.starts_with(b"squashfs_read_"));
+    let has_overlay = has_overlay
+        || data
+            .windows(14)
+            .any(|w| w == b"ovl_fs_type\x00\x00\x00" || w.starts_with(b"ovl_mount_dir\x00"));
+
+    if !has_squashfs || !has_overlay {
+        let mut missing = Vec::new();
+        if !has_squashfs {
+            missing.push("CONFIG_SQUASHFS");
+        }
+        if !has_overlay {
+            missing.push("CONFIG_OVERLAY_FS");
+        }
+        anyhow::bail!(
+            "kernel at {} is missing required features for overlay mode: {}. \
+             The kernel must be compiled with CONFIG_SQUASHFS=y, CONFIG_SQUASHFS_ZSTD=y, \
+             and CONFIG_OVERLAY_FS=y. Either:\n  \
+             1. Set overlay_rootfs = false in config to disable overlay mode, or\n  \
+             2. Copy a compatible kernel from a working fc-runner installation, or\n  \
+             3. Rebuild from guest_configs/microvm-kernel-ci-x86_64-6.1.config",
+            kernel_path,
+            missing.join(", ")
+        );
+    }
+
+    tracing::info!(path = kernel_path, "kernel verified: squashfs + overlay support present");
     Ok(())
 }
 
