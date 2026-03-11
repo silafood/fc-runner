@@ -319,16 +319,21 @@ jobs:
           MINBLOCKS=$(sudo dumpe2fs -h rootfs.ext4 2>/dev/null | grep "Block count" | awk '{print $3}')
           BLOCKSIZE=$(sudo dumpe2fs -h rootfs.ext4 2>/dev/null | grep "Block size" | awk '{print $3}')
           MINBYTES=$((MINBLOCKS * BLOCKSIZE))
-          FINALBYTES=$((MINBYTES + 512 * 1024 * 1024))
+          FINALBYTES=$((MINBYTES + 256 * 1024 * 1024))
           sudo resize2fs rootfs.ext4 "$((FINALBYTES / BLOCKSIZE))" 2>/dev/null || true
           sudo truncate -s "$FINALBYTES" rootfs.ext4
           ls -lh rootfs.ext4
+
+      - name: Compress rootfs
+        run: |
+          zstd -T0 -9 rootfs.ext4 -o rootfs.ext4.zst
+          ls -lh rootfs.ext4 rootfs.ext4.zst
 
       - name: Upload rootfs artifact
         uses: actions/upload-artifact@v4
         with:
           name: runner-rootfs-golden
-          path: rootfs.ext4
+          path: rootfs.ext4.zst
           retention-days: 90
 
   release:
@@ -360,7 +365,7 @@ jobs:
         run: |
           chmod +x artifacts/fc-runner
           mv artifacts/vmlinux artifacts/vmlinux-${KERNEL_VERSION}
-          mv artifacts/rootfs.ext4 artifacts/runner-rootfs-golden.ext4
+          mv artifacts/rootfs.ext4.zst artifacts/runner-rootfs-golden.ext4.zst
 
       - name: Create release
         env:
@@ -371,7 +376,7 @@ jobs:
             --generate-notes \
             artifacts/fc-runner \
             artifacts/vmlinux-${KERNEL_VERSION} \
-            artifacts/runner-rootfs-golden.ext4 \
+            artifacts/runner-rootfs-golden.ext4.zst \
             config.toml.example \
             fc-runner.service \
             install.sh \
