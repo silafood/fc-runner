@@ -18,12 +18,12 @@ sudo apt-get update && sudo apt-get install -y \
     jq
 ```
 
-The `install.sh` script handles this automatically, but you can also install manually.
+The `install.sh` script handles this automatically.
 
 ### Arch Linux
 
 ```bash
-# Install all required packages
+# All required packages in one command
 # Note: iptables-nft and iptables conflict — install whichever your system doesn't already have
 sudo pacman -Sy --noconfirm --needed \
     curl wget \
@@ -254,4 +254,4 @@ fc-runner validate --config /etc/fc-runner/config.toml
 | `mount: /dev/loop*: failed` | Loop devices exhausted | `sudo modprobe loop max_loop=64` |
 | `mkfs.ext4: not found` | `e2fsprogs` not installed | Ubuntu: `sudo apt install e2fsprogs` / Arch: `sudo pacman -S e2fsprogs` |
 | `iptables: not found` | `iptables` not installed | Ubuntu: `sudo apt install iptables` / Arch: `sudo pacman -S iptables-nft` |
-| `firecracker: not found` | Firecracker not installed | Run `sudo bash install.sh` (or `install-arch.sh` on Arch) |
+| `firecracker: not found` | Firecracker not installed | Run `sudo bash install.sh` (Ubuntu) or `sudo bash install-arch.sh` (Arch) |
