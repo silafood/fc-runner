@@ -164,7 +164,7 @@ impl Orchestrator {
             tokio::select! {
                 _ = self.cancel.cancelled() => {
                     tracing::info!("shutdown signal received, waiting for in-flight jobs...");
-                    self.wait_for_active_jobs(Duration::from_secs(300)).await;
+                    self.wait_for_active_jobs(Duration::from_secs(10)).await;
                     break;
                 }
                 _ = ticker.tick() => {
@@ -240,6 +240,7 @@ impl Orchestrator {
         let active_jobs = self.active_jobs.clone();
         let slot_pool = self.slot_pool.clone();
         let server_state = self.server_state.clone();
+        let cancel = self.cancel.clone();
 
         tokio::spawn(async move {
             let _permit = match semaphore.acquire().await {
@@ -274,7 +275,7 @@ impl Orchestrator {
             }).await;
 
             let timer = metrics::VM_BOOT_DURATION.with_label_values(&[&repo]).start_timer();
-            let result = run_jit_job(config.clone(), github.clone(), job_id, &repo, slot).await;
+            let result = run_jit_job(config.clone(), github.clone(), job_id, &repo, slot, cancel).await;
             timer.observe_duration();
 
             server_state.unregister_vm(&vm_id).await;
@@ -352,7 +353,7 @@ impl Orchestrator {
             tokio::select! {
                 _ = self.cancel.cancelled() => {
                     tracing::info!("shutdown signal, waiting for warm pool VMs...");
-                    self.wait_for_active_jobs(Duration::from_secs(300)).await;
+                    self.wait_for_active_jobs(Duration::from_secs(10)).await;
                     break;
                 }
                 Some((slot, repo)) = done_rx.recv() => {
@@ -390,6 +391,7 @@ impl Orchestrator {
         let config = self.config.clone();
         let github = self.github.clone();
         let active_jobs = self.active_jobs.clone();
+        let cancel = self.cancel.clone();
 
         tokio::spawn(async move {
             *active_jobs.lock().await += 1;
@@ -398,7 +400,7 @@ impl Orchestrator {
             tracing::info!(slot, repo = %repo, "starting warm pool VM");
 
             let timer = metrics::VM_BOOT_DURATION.with_label_values(&[&repo]).start_timer();
-            let result = run_warm_vm(config, github.clone(), slot, &repo).await;
+            let result = run_warm_vm(config, github.clone(), slot, &repo, cancel).await;
             timer.observe_duration();
 
             // Clean up offline runners left by this VM
@@ -455,6 +457,7 @@ async fn run_jit_job(
     job_id: u64,
     repo: &str,
     slot: usize,
+    cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     tracing::info!(job_id, repo = %repo, slot, "requesting JIT token");
     let jit_token = github.generate_jit_config(repo, job_id).await?;
@@ -471,6 +474,7 @@ async fn run_jit_job(
         &config.runner.work_dir,
         config.runner.vm_timeout_secs,
         slot,
+        cancel,
     );
     let env_content = format!(
         "RUNNER_MODE=jit\nRUNNER_TOKEN={}\nREPO_URL={}\nVM_ID={}\nRUNNER_JIT_CONFIG={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\n",
@@ -484,6 +488,7 @@ async fn run_warm_vm(
     github: Arc<GitHubClient>,
     slot: usize,
     repo: &str,
+    cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let is_org = github.is_org_mode();
 
@@ -514,10 +519,11 @@ async fn run_warm_vm(
         &config.runner.work_dir,
         config.runner.vm_timeout_secs,
         slot,
+        cancel,
     );
     let env_content = format!(
-        "RUNNER_MODE=register\nRUNNER_TOKEN={}\nREPO_URL={}\nRUNNER_NAME={}\nVM_ID={}\n",
-        reg_token, registration_url, runner_name, vm.vm_id
+        "RUNNER_MODE=register\nRUNNER_TOKEN={}\nREPO_URL={}\nRUNNER_NAME={}\nVM_ID={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\n",
+        reg_token, registration_url, runner_name, vm.vm_id, vm.vm_id
     );
     vm.execute(&env_content).await
 }

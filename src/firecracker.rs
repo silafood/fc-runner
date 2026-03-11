@@ -5,8 +5,11 @@ use firecracker_rs_sdk::firecracker::FirecrackerOption;
 use firecracker_rs_sdk::instance::Instance;
 use firecracker_rs_sdk::jailer::JailerOption;
 use firecracker_rs_sdk::models::*;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::config::{FirecrackerConfig, NetworkConfig};
@@ -88,6 +91,57 @@ fn is_process_alive(pid: u32) -> bool {
     }
 }
 
+/// Kill a process by PID (SIGKILL for immediate termination).
+fn kill_process(pid: u32) {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status();
+    }
+}
+
+/// Send MMDS metadata directly via raw HTTP on the Firecracker API socket.
+///
+/// The SDK's `put_mmds()` double-serializes: `MmdsContentsObject` is a `String`,
+/// and `serde_json::to_vec(&string)` wraps it in JSON quotes, so Firecracker
+/// receives `"{\"fc-runner\":...}"` instead of `{"fc-runner":...}`.
+async fn put_mmds_raw(socket_path: &std::path::Path, json_body: &str) -> anyhow::Result<()> {
+    let mut stream = UnixStream::connect(socket_path)
+        .await
+        .with_context(|| format!("connecting to API socket: {}", socket_path.display()))?;
+
+    let request = format!(
+        "PUT /mmds HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        json_body.len(),
+        json_body
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .context("writing MMDS PUT request")?;
+
+    let mut response = vec![0u8; 1024];
+    let n = stream
+        .read(&mut response)
+        .await
+        .context("reading MMDS PUT response")?;
+    let response_str = String::from_utf8_lossy(&response[..n]);
+
+    if !response_str.contains("204") && !response_str.contains("200") {
+        anyhow::bail!("MMDS PUT failed: {}", response_str.lines().next().unwrap_or(""));
+    }
+
+    Ok(())
+}
+
 pub struct MicroVm {
     pub vm_id: String,
     pub job_id: u64,
@@ -101,6 +155,7 @@ pub struct MicroVm {
     overlay_path: PathBuf,
     fc_config: FirecrackerConfig,
     vm_timeout_secs: u64,
+    cancel: CancellationToken,
     // Per-VM networking
     tap_name: String,
     host_ip: String,
@@ -131,6 +186,7 @@ impl MicroVm {
         work_dir: &str,
         vm_timeout_secs: u64,
         slot: usize,
+        cancel: CancellationToken,
     ) -> Self {
         let vm_id = format!("fc-{}-{}", job_id, Uuid::new_v4().simple());
         let base = PathBuf::from(work_dir);
@@ -145,6 +201,7 @@ impl MicroVm {
             vm_id,
             fc_config: fc_config.clone(),
             vm_timeout_secs,
+            cancel,
             slot,
             tap_name: format!("tap-fc{}", slot),
             host_ip: format!("172.16.{}.1", slot),
@@ -608,6 +665,15 @@ fi
             .join("root")
     }
 
+    /// Resolve the Firecracker API socket path (differs between jailer and bare mode).
+    fn api_socket_path(&self) -> PathBuf {
+        if self.fc_config.jailer_path.is_some() {
+            self.jailer_root_dir().join("api.sock")
+        } else {
+            self.socket_path.clone()
+        }
+    }
+
     /// Build a Firecracker VM config as a JSON value (for --config-file / no-api mode).
     /// Uses SDK model types for type safety.
     fn build_vm_config(&self, use_jailer: bool) -> anyhow::Result<serde_json::Value> {
@@ -986,11 +1052,13 @@ fi
                 .await
                 .map_err(|e| anyhow::anyhow!("put_mmds_config failed: {}", e))?;
 
+            // Send MMDS metadata via raw HTTP on the API socket.
+            // The SDK's put_mmds() double-serializes the JSON (wraps it in quotes)
+            // because MmdsContentsObject is a String alias and serde_json::to_vec
+            // re-encodes it as a JSON string literal.
             let mmds_json = self.build_mmds_payload(env_content)?;
-            instance
-                .put_mmds(&mmds_json)
-                .await
-                .map_err(|e| anyhow::anyhow!("put_mmds failed: {}", e))?;
+            let socket_path = self.api_socket_path();
+            put_mmds_raw(&socket_path, &mmds_json).await?;
 
             tracing::info!(vm_id = %self.vm_id, "MMDS metadata injected via SDK");
         }
@@ -1097,6 +1165,7 @@ fi
     }
 
     /// Wait for the firecracker process to exit by polling the PID.
+    /// Kills the process immediately if the cancellation token fires (graceful shutdown).
     async fn wait_for_exit(&self, instance: &Instance) -> anyhow::Result<()> {
         let pid = instance.firecracker_pid().ok_or_else(|| {
             anyhow::anyhow!("no firecracker PID available")
@@ -1113,11 +1182,21 @@ fi
             }
         };
 
-        timeout(Duration::from_secs(self.vm_timeout_secs), wait_fut)
-            .await
-            .context("VM execution timed out")?;
-
-        tracing::info!(vm_id = %self.vm_id, pid, "firecracker process exited");
+        tokio::select! {
+            result = timeout(Duration::from_secs(self.vm_timeout_secs), wait_fut) => {
+                result.context("VM execution timed out")?;
+                tracing::info!(vm_id = %self.vm_id, pid, "firecracker process exited");
+            }
+            _ = self.cancel.cancelled() => {
+                tracing::info!(vm_id = %self.vm_id, pid, "shutdown signal, killing firecracker process");
+                kill_process(pid);
+                // Give it a moment to die
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                if is_process_alive(pid) {
+                    tracing::warn!(vm_id = %self.vm_id, pid, "SIGKILL after SIGTERM failed to kill process");
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1159,8 +1238,9 @@ fi
     }
 
     /// Start Firecracker in --no-api mode (legacy mount injection).
+    /// Kills the child process on shutdown signal for fast restart.
     async fn run_no_api(&self) -> anyhow::Result<std::process::ExitStatus> {
-        let fut = if let Some(jailer_path) = &self.fc_config.jailer_path {
+        let mut child = if let Some(jailer_path) = &self.fc_config.jailer_path {
             let uid = self.fc_config.jailer_uid.expect("validated in config");
             let gid = self.fc_config.jailer_gid.expect("validated in config");
             let config_name = filename_str(&self.config_path)
@@ -1188,20 +1268,33 @@ fi
                 .arg("--config-file")
                 .arg(config_name)
                 .arg("--no-api")
-                .status()
+                .spawn()
+                .context("spawning jailer")?
         } else {
             Command::new(&self.fc_config.binary_path)
                 .arg("--config-file")
                 .arg(&self.config_path)
                 .arg("--no-api")
-                .status()
+                .spawn()
+                .context("spawning firecracker")?
         };
 
-        let status = timeout(Duration::from_secs(self.vm_timeout_secs), fut)
-            .await
-            .context("VM execution timed out")?
-            .context("spawning firecracker")?;
-        Ok(status)
+        let wait_fut = child.wait();
+
+        tokio::select! {
+            result = timeout(Duration::from_secs(self.vm_timeout_secs), wait_fut) => {
+                let status = result
+                    .context("VM execution timed out")?
+                    .context("waiting for firecracker")?;
+                Ok(status)
+            }
+            _ = self.cancel.cancelled() => {
+                tracing::info!(vm_id = %self.vm_id, "shutdown signal, killing firecracker child");
+                let _ = child.kill().await;
+                let status = child.wait().await.context("waiting after kill")?;
+                Ok(status)
+            }
+        }
     }
 
     async fn cleanup(&self) {
@@ -1400,7 +1493,7 @@ mod tests {
     fn create_test_vm(overlay: bool) -> MicroVm {
         let fc_config = test_fc_config(overlay);
         let network = test_network_config();
-        MicroVm::new(12345, &fc_config, &network, "/tmp/fc-test", 3600, 0)
+        MicroVm::new(12345, &fc_config, &network, "/tmp/fc-test", 3600, 0, CancellationToken::new())
     }
 
     #[test]
