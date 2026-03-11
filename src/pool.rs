@@ -210,6 +210,7 @@ impl PoolManager {
         let pool_name = self.pool_config.name.clone();
         let vcpu_override = self.pool_config.vcpu_count;
         let mem_override = self.pool_config.mem_size_mib;
+        let cancel = self.cancel.clone();
 
         tokio::spawn(async move {
             active_count.fetch_add(1, Ordering::Relaxed);
@@ -222,6 +223,7 @@ impl PoolManager {
                 &repo,
                 vcpu_override,
                 mem_override,
+                cancel,
             )
             .await;
 
@@ -275,6 +277,7 @@ async fn run_pool_vm(
     repo: &str,
     vcpu_override: Option<u32>,
     mem_override: Option<u32>,
+    cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let is_org = github.is_org_mode();
 
@@ -312,6 +315,7 @@ async fn run_pool_vm(
         &config.runner.work_dir,
         config.runner.vm_timeout_secs,
         slot,
+        cancel,
     );
     let env_content = format!(
         "RUNNER_MODE=register\nRUNNER_TOKEN={}\nREPO_URL={}\nRUNNER_NAME={}\nVM_ID={}\n",
