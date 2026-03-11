@@ -13,6 +13,10 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 
+#[cfg(unix)]
+#[allow(unused_imports)]
+use std::os::unix::process::CommandExt;
+
 /// MMDS V2 base URL (Firecracker metadata service).
 const MMDS_BASE: &str = "http://169.254.169.254";
 /// MMDS token TTL in seconds.
@@ -230,6 +234,30 @@ fn runner_env() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
+/// Look up the UID and GID for the runner user.
+/// Falls back to 1000:1000 if the user doesn't exist.
+fn runner_uid_gid() -> (u32, u32) {
+    // Read /etc/passwd to find the runner user's UID/GID
+    if let Ok(contents) = std::fs::read_to_string("/etc/passwd") {
+        for line in contents.lines() {
+            let fields: Vec<&str> = line.split(':').collect();
+            if fields.len() >= 4 && fields[0] == RUNNER_USER {
+                let uid = fields[2].parse().unwrap_or(1000);
+                let gid = fields[3].parse().unwrap_or(1000);
+                return (uid, gid);
+            }
+        }
+    }
+    (1000, 1000)
+}
+
+/// Apply runner user credentials to a command (drop privileges from root).
+#[cfg(unix)]
+fn as_runner_user(cmd: &mut tokio::process::Command) {
+    let (uid, gid) = runner_uid_gid();
+    cmd.uid(uid).gid(gid);
+}
+
 /// Run the GitHub Actions runner and return its exit code.
 ///
 /// Supports both JIT mode (runner_jit_config) and registration mode (runner_token).
@@ -257,15 +285,17 @@ async fn run_runner_jit(metadata: &Metadata) -> i32 {
     let run_sh = format!("{}/run.sh", RUNNER_DIR);
     tracing::info!("starting runner (JIT mode)");
 
-    let mut child = match tokio::process::Command::new(&run_sh)
-        .arg("--jitconfig")
+    let mut cmd = tokio::process::Command::new(&run_sh);
+    cmd.arg("--jitconfig")
         .arg(jit_config)
         .current_dir(RUNNER_DIR)
         .env_clear()
         .envs(runner_env())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
+        .stderr(Stdio::inherit());
+    #[cfg(unix)]
+    as_runner_user(&mut cmd);
+    let mut child = match cmd.spawn()
     {
         Ok(c) => c,
         Err(e) => {
@@ -306,8 +336,8 @@ async fn run_runner_registered(metadata: &Metadata) -> i32 {
     let config_sh = format!("{}/config.sh", RUNNER_DIR);
     tracing::info!(runner_name, repo_url = %repo_url, "registering runner");
 
-    let status = match tokio::process::Command::new(&config_sh)
-        .args([
+    let mut cmd = tokio::process::Command::new(&config_sh);
+    cmd.args([
             "--url", repo_url,
             "--token", token,
             "--name", runner_name,
@@ -321,9 +351,10 @@ async fn run_runner_registered(metadata: &Metadata) -> i32 {
         .env_clear()
         .envs(runner_env())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await
+        .stderr(Stdio::inherit());
+    #[cfg(unix)]
+    as_runner_user(&mut cmd);
+    let status = match cmd.status().await
     {
         Ok(s) => s,
         Err(e) => {
@@ -340,14 +371,15 @@ async fn run_runner_registered(metadata: &Metadata) -> i32 {
     let run_sh = format!("{}/run.sh", RUNNER_DIR);
     tracing::info!("starting runner (registered mode)");
 
-    let mut child = match tokio::process::Command::new(&run_sh)
-        .current_dir(RUNNER_DIR)
+    let mut cmd = tokio::process::Command::new(&run_sh);
+    cmd.current_dir(RUNNER_DIR)
         .env_clear()
         .envs(runner_env())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-    {
+        .stderr(Stdio::inherit());
+    #[cfg(unix)]
+    as_runner_user(&mut cmd);
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "failed to start run.sh");
