@@ -87,7 +87,21 @@ jobs:
         working-directory: linux-${{ env.KERNEL_VERSION }}
         run: |
           ls -lh vmlinux
-          file vmlinux | grep -q "ELF 64-bit" || (echo "ERROR: vmlinux is not a valid ELF binary" && exit 1)
+          file vmlinux | grep -q "ELF 64-bit" || { echo "ERROR: not a valid ELF binary"; exit 1; }
+
+          # Verify required configs are compiled in
+          MISSING=""
+          grep -q "CONFIG_SQUASHFS=y" .config || MISSING="$MISSING CONFIG_SQUASHFS"
+          grep -q "CONFIG_SQUASHFS_ZSTD=y" .config || MISSING="$MISSING CONFIG_SQUASHFS_ZSTD"
+          grep -q "CONFIG_OVERLAY_FS=y" .config || MISSING="$MISSING CONFIG_OVERLAY_FS"
+          grep -q "CONFIG_VIRTIO=y" .config || MISSING="$MISSING CONFIG_VIRTIO"
+          grep -q "CONFIG_EXT4_FS=y" .config || MISSING="$MISSING CONFIG_EXT4_FS"
+
+          if [ -n "$MISSING" ]; then
+            echo "ERROR: kernel config missing required options:$MISSING"
+            exit 1
+          fi
+          echo "Kernel verified: all required configs present"
 
       - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
