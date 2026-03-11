@@ -219,10 +219,10 @@ jobs:
 
           # Install GitHub Actions runner
           echo "Installing GitHub Actions runner v${RUNNER_VERSION}..."
-          curl -fsSL -o "$MNT/home/runner/actions-runner.tar.gz" \
+          curl -fsSL -o /tmp/actions-runner.tar.gz \
             "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
-          sudo tar xzf "$MNT/home/runner/actions-runner.tar.gz" -C "$MNT/home/runner/"
-          rm "$MNT/home/runner/actions-runner.tar.gz"
+          sudo tar xzf /tmp/actions-runner.tar.gz -C "$MNT/home/runner/"
+          rm /tmp/actions-runner.tar.gz
           sudo chroot "$MNT" chown -R runner:runner /home/runner
 
           # Write entrypoint
