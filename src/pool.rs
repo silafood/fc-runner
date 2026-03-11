@@ -318,8 +318,8 @@ async fn run_pool_vm(
         cancel,
     );
     let env_content = format!(
-        "RUNNER_MODE=register\nRUNNER_TOKEN={}\nREPO_URL={}\nRUNNER_NAME={}\nVM_ID={}\n",
-        reg_token, registration_url, runner_name, vm.vm_id
+        "RUNNER_MODE=register\nRUNNER_TOKEN={}\nREPO_URL={}\nRUNNER_NAME={}\nVM_ID={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\n",
+        reg_token, registration_url, runner_name, vm.vm_id, vm.vm_id
     );
     vm.execute(&env_content).await
 }

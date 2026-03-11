@@ -5,6 +5,8 @@ use firecracker_rs_sdk::firecracker::FirecrackerOption;
 use firecracker_rs_sdk::instance::Instance;
 use firecracker_rs_sdk::jailer::JailerOption;
 use firecracker_rs_sdk::models::*;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 use tokio_util::sync::CancellationToken;
@@ -104,6 +106,40 @@ fn kill_process(pid: u32) {
             .args(["-9", &pid.to_string()])
             .status();
     }
+}
+
+/// Send MMDS metadata directly via raw HTTP on the Firecracker API socket.
+///
+/// The SDK's `put_mmds()` double-serializes: `MmdsContentsObject` is a `String`,
+/// and `serde_json::to_vec(&string)` wraps it in JSON quotes, so Firecracker
+/// receives `"{\"fc-runner\":...}"` instead of `{"fc-runner":...}`.
+async fn put_mmds_raw(socket_path: &std::path::Path, json_body: &str) -> anyhow::Result<()> {
+    let mut stream = UnixStream::connect(socket_path)
+        .await
+        .with_context(|| format!("connecting to API socket: {}", socket_path.display()))?;
+
+    let request = format!(
+        "PUT /mmds HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        json_body.len(),
+        json_body
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .context("writing MMDS PUT request")?;
+
+    let mut response = vec![0u8; 1024];
+    let n = stream
+        .read(&mut response)
+        .await
+        .context("reading MMDS PUT response")?;
+    let response_str = String::from_utf8_lossy(&response[..n]);
+
+    if !response_str.contains("204") && !response_str.contains("200") {
+        anyhow::bail!("MMDS PUT failed: {}", response_str.lines().next().unwrap_or(""));
+    }
+
+    Ok(())
 }
 
 pub struct MicroVm {
@@ -629,6 +665,15 @@ fi
             .join("root")
     }
 
+    /// Resolve the Firecracker API socket path (differs between jailer and bare mode).
+    fn api_socket_path(&self) -> PathBuf {
+        if self.fc_config.jailer_path.is_some() {
+            self.jailer_root_dir().join("api.sock")
+        } else {
+            self.socket_path.clone()
+        }
+    }
+
     /// Build a Firecracker VM config as a JSON value (for --config-file / no-api mode).
     /// Uses SDK model types for type safety.
     fn build_vm_config(&self, use_jailer: bool) -> anyhow::Result<serde_json::Value> {
@@ -1007,11 +1052,13 @@ fi
                 .await
                 .map_err(|e| anyhow::anyhow!("put_mmds_config failed: {}", e))?;
 
+            // Send MMDS metadata via raw HTTP on the API socket.
+            // The SDK's put_mmds() double-serializes the JSON (wraps it in quotes)
+            // because MmdsContentsObject is a String alias and serde_json::to_vec
+            // re-encodes it as a JSON string literal.
             let mmds_json = self.build_mmds_payload(env_content)?;
-            instance
-                .put_mmds(&mmds_json)
-                .await
-                .map_err(|e| anyhow::anyhow!("put_mmds failed: {}", e))?;
+            let socket_path = self.api_socket_path();
+            put_mmds_raw(&socket_path, &mmds_json).await?;
 
             tracing::info!(vm_id = %self.vm_id, "MMDS metadata injected via SDK");
         }
