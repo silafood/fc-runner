@@ -106,7 +106,7 @@ fn set_executable(path: &str) -> anyhow::Result<()> {
 }
 
 const KERNEL_URL: &str =
-    "https://github.com/silafood/fc-runner/releases/latest/download/vmlinux-6.1.102";
+    "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.11/x86_64/vmlinux-6.1.102";
 const RUNNER_VERSION: &str = "2.332.0";
 const DEFAULT_CLOUD_IMG_URL: &str =
     "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img";
