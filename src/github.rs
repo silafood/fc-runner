@@ -190,6 +190,9 @@ pub struct Runner {
     pub id: u64,
     pub name: String,
     pub status: String,
+    /// Whether the runner is currently executing a job.
+    #[serde(default)]
+    pub busy: bool,
 }
 
 // ── Client ─────────────────────────────────────────────────────────────
@@ -512,6 +515,26 @@ impl GitHubClient {
     }
 
     /// Remove offline runners at the org level.
+    /// List all self-hosted runners for the organization.
+    pub async fn list_org_runners(&self) -> anyhow::Result<Vec<Runner>> {
+        let org_url = self.org_url()
+            .context("organization not configured")?;
+        let url = format!("{}/actions/runners", org_url);
+        metrics::GITHUB_API_CALLS.with_label_values(&["list_org_runners"]).inc();
+        let resp = self
+            .request(reqwest::Method::GET, &url)
+            .await?
+            .send()
+            .await?;
+        self.check_rate_limit(&resp).await;
+        let data = resp
+            .error_for_status()
+            .context("listing org runners")?
+            .json::<RunnersResponse>()
+            .await?;
+        Ok(data.runners)
+    }
+
     pub async fn remove_org_offline_runners(&self) {
         let org_url = match self.org_url() {
             Some(url) => url,
