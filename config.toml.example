@@ -76,6 +76,11 @@ vm_timeout_secs = 3600
 # When a runner finishes a job, a replacement VM is spawned automatically.
 # Set to 0 (default) for reactive JIT mode (VMs created on-demand per job).
 # warm_pool_size = 2
+# Ephemeral runners (default: true). When true, runners accept one job then exit
+# and a replacement VM is spawned. When false, runners stay alive and accept
+# multiple jobs without being replaced — faster job pickup but no isolation
+# between jobs. Only applies to warm pool and named pool modes.
+# ephemeral = true
 
 # Named VM pools (alternative to warm_pool_size).
 # Each pool maintains its own set of pre-registered runners with independent

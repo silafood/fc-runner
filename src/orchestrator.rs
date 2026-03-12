@@ -476,9 +476,10 @@ async fn run_jit_job(
         slot,
         cancel,
     );
+    let ephemeral = config.runner.ephemeral;
     let env_content = format!(
-        "RUNNER_MODE=jit\nRUNNER_TOKEN={}\nREPO_URL={}\nVM_ID={}\nRUNNER_JIT_CONFIG={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\n",
-        jit_token, repo_url, vm.vm_id, jit_token, vm.vm_id
+        "RUNNER_MODE=jit\nRUNNER_TOKEN={}\nREPO_URL={}\nVM_ID={}\nRUNNER_JIT_CONFIG={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\nEPHEMERAL={}\n",
+        jit_token, repo_url, vm.vm_id, jit_token, vm.vm_id, ephemeral
     );
     vm.execute(&env_content).await
 }
@@ -521,9 +522,10 @@ async fn run_warm_vm(
         slot,
         cancel,
     );
+    let ephemeral = config.runner.ephemeral;
     let env_content = format!(
-        "RUNNER_MODE=register\nRUNNER_TOKEN={}\nREPO_URL={}\nRUNNER_NAME={}\nVM_ID={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\n",
-        reg_token, registration_url, runner_name, vm.vm_id, vm.vm_id
+        "RUNNER_MODE=register\nRUNNER_TOKEN={}\nREPO_URL={}\nRUNNER_NAME={}\nVM_ID={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\nEPHEMERAL={}\n",
+        reg_token, registration_url, runner_name, vm.vm_id, vm.vm_id, ephemeral
     );
     vm.execute(&env_content).await
 }

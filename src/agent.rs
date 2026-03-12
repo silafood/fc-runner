@@ -49,6 +49,12 @@ struct Metadata {
     hostname: String,
     #[serde(default)]
     shutdown_on_exit: bool,
+    #[serde(default = "default_ephemeral")]
+    ephemeral: bool,
+}
+
+fn default_ephemeral() -> bool {
+    true
 }
 
 /// Messages sent from agent to host via VSOCK.
@@ -336,17 +342,21 @@ async fn run_runner_registered(metadata: &Metadata) -> i32 {
     let config_sh = format!("{}/config.sh", RUNNER_DIR);
     tracing::info!(runner_name, repo_url = %repo_url, "registering runner");
 
+    let work_dir = format!("{}/_work", RUNNER_DIR);
     let mut cmd = tokio::process::Command::new(&config_sh);
-    cmd.args([
-            "--url", repo_url,
-            "--token", token,
-            "--name", runner_name,
-            "--labels", labels,
-            "--ephemeral",
-            "--unattended",
-            "--disableupdate",
-            "--work", &format!("{}/_work", RUNNER_DIR),
-        ])
+    let mut args = vec![
+        "--url", repo_url,
+        "--token", token,
+        "--name", runner_name,
+        "--labels", labels,
+        "--unattended",
+        "--disableupdate",
+        "--work", &work_dir,
+    ];
+    if metadata.ephemeral {
+        args.push("--ephemeral");
+    }
+    cmd.args(&args)
         .current_dir(RUNNER_DIR)
         .env_clear()
         .envs(runner_env())

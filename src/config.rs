@@ -215,6 +215,11 @@ pub struct RunnerConfig {
     /// for GitHub to assign jobs. Replaced as they finish. Default: 0 (JIT mode).
     #[serde(default)]
     pub warm_pool_size: usize,
+    /// When true (default), runners are ephemeral — they accept one job then exit.
+    /// When false, runners stay alive and accept multiple jobs without being replaced.
+    /// Non-ephemeral runners sacrifice isolation between jobs for faster job pickup.
+    #[serde(default = "default_ephemeral")]
+    pub ephemeral: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -290,6 +295,10 @@ fn default_max_concurrent_jobs() -> usize {
 
 fn default_vm_timeout_secs() -> u64 {
     3600
+}
+
+fn default_ephemeral() -> bool {
+    true
 }
 
 fn default_host_ip() -> String {
