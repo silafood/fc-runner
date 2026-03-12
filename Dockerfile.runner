@@ -35,9 +35,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN locale-gen en_US.UTF-8
 ENV LANG=en_US.UTF-8
 
-# Runner user
+# Runner user (with docker group access for services: support)
 RUN useradd -m -s /bin/bash runner && \
-    echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner
+    echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner && \
+    usermod -aG docker runner
 
 # GitHub Actions runner
 ARG RUNNER_VERSION=2.332.0
@@ -54,11 +55,15 @@ RUN su - runner -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh
     ln -sf /home/runner/.cargo/bin/rustc /usr/local/bin/rustc && \
     ln -sf /home/runner/.cargo/bin/rustup /usr/local/bin/rustup
 
-# Networking (systemd-networkd + resolved)
-RUN systemctl enable systemd-networkd systemd-resolved && \
+# Networking + Docker (systemd-networkd + resolved + docker)
+RUN systemctl enable systemd-networkd systemd-resolved docker containerd && \
     systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true && \
     systemctl disable motd-news.timer 2>/dev/null || true && \
     systemctl mask systemd-timesyncd.service 2>/dev/null || true
+
+# Docker daemon config: use vfs storage driver (safe on any backing fs)
+# and configure DNS to match the VM's network setup
+RUN mkdir -p /etc/docker && printf '{\n  "storage-driver": "overlay2",\n  "dns": ["8.8.8.8", "1.1.1.1"]\n}\n' > /etc/docker/daemon.json
 
 # fstab for Firecracker (/dev/vda)
 RUN printf '/dev/vda\t/\text4\tdefaults,noatime\t0\t1\n' > /etc/fstab
