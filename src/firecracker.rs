@@ -519,13 +519,17 @@ if [ -f /etc/fc-runner-env ]; then
         echo "Starting runner (JIT mode)..."
         sudo -E -u runner ./run.sh --jitconfig "${RUNNER_TOKEN}"
     else
-        echo "Registering runner..."
+        EPHEMERAL_FLAG=""
+        if [ "${EPHEMERAL:-true}" = "true" ]; then
+            EPHEMERAL_FLAG="--ephemeral"
+        fi
+        echo "Registering runner (ephemeral=${EPHEMERAL:-true})..."
         sudo -E -u runner ./config.sh \
             --url "${REPO_URL}" \
             --token "${RUNNER_TOKEN}" \
             --name "${RUNNER_NAME:-fc-$(hostname)}" \
             --labels "firecracker,linux,x64" \
-            --ephemeral \
+            $EPHEMERAL_FLAG \
             --unattended \
             --disableupdate \
             --work /home/runner/_work

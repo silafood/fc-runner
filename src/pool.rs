@@ -317,9 +317,10 @@ async fn run_pool_vm(
         slot,
         cancel,
     );
+    let ephemeral = config.runner.ephemeral;
     let env_content = format!(
-        "RUNNER_MODE=register\nRUNNER_TOKEN={}\nREPO_URL={}\nRUNNER_NAME={}\nVM_ID={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\n",
-        reg_token, registration_url, runner_name, vm.vm_id, vm.vm_id
+        "RUNNER_MODE=register\nRUNNER_TOKEN={}\nREPO_URL={}\nRUNNER_NAME={}\nVM_ID={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\nEPHEMERAL={}\n",
+        reg_token, registration_url, runner_name, vm.vm_id, vm.vm_id, ephemeral
     );
     vm.execute(&env_content).await
 }
