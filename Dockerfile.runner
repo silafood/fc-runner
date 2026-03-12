@@ -61,8 +61,7 @@ RUN systemctl enable systemd-networkd systemd-resolved docker containerd && \
     systemctl disable motd-news.timer 2>/dev/null || true && \
     systemctl mask systemd-timesyncd.service 2>/dev/null || true
 
-# Docker daemon config: use vfs storage driver (safe on any backing fs)
-# and configure DNS to match the VM's network setup
+# Docker daemon config: use overlay2 storage driver (backed by ext4 via overlay-init bind mount)
 RUN mkdir -p /etc/docker && printf '{\n  "storage-driver": "overlay2",\n  "dns": ["8.8.8.8", "1.1.1.1"]\n}\n' > /etc/docker/daemon.json
 
 # fstab for Firecracker (/dev/vda)

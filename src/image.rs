@@ -263,6 +263,39 @@ async fn install_agent_if_missing(rootfs_path: &str) -> anyhow::Result<()> {
     let _ = tokio::fs::remove_file(&mask_link).await;
     tokio::fs::symlink("/dev/null", &mask_link).await?;
 
+    // Ensure runner user is in docker group (for services: support)
+    // Read /etc/group directly since chroot may not be available
+    let group_file = format!("{}/etc/group", mount_dir);
+    if let Ok(contents) = tokio::fs::read_to_string(&group_file).await {
+        let updated = contents.lines().map(|line| {
+            if line.starts_with("docker:") && !line.contains("runner") {
+                format!("{}{}", line, if line.ends_with(':') { "runner" } else { ",runner" })
+            } else {
+                line.to_string()
+            }
+        }).collect::<Vec<_>>().join("\n") + "\n";
+        tokio::fs::write(&group_file, updated).await?;
+    }
+
+    // Docker daemon config: overlay2 storage driver + DNS
+    let docker_dir = format!("{}/etc/docker", mount_dir);
+    tokio::fs::create_dir_all(&docker_dir).await?;
+    tokio::fs::write(
+        format!("{}/daemon.json", docker_dir),
+        "{\n  \"storage-driver\": \"overlay2\",\n  \"dns\": [\"8.8.8.8\", \"1.1.1.1\"]\n}\n",
+    ).await?;
+
+    // Enable docker and containerd systemd services
+    let wants_dir = format!("{}/etc/systemd/system/multi-user.target.wants", mask_dir);
+    tokio::fs::create_dir_all(&wants_dir).await?;
+    for svc in ["docker", "containerd"] {
+        let symlink = format!("{}/{}.service", wants_dir, svc);
+        let target = format!("/lib/systemd/system/{}.service", svc);
+        if !Path::new(&symlink).exists() {
+            let _ = tokio::fs::symlink(&target, &symlink).await;
+        }
+    }
+
     // Install overlay-init script and directories for OverlayFS COW mode
     install_overlay_init_into(&mount_dir).await?;
 
