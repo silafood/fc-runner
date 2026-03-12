@@ -310,6 +310,8 @@ impl Orchestrator {
     async fn run_warm_pool(&self) -> anyhow::Result<()> {
         self.server_state.set_mode("warm_pool").await;
         let pool_size = self.config.runner.warm_pool_size;
+        let ephemeral = self.config.runner.ephemeral;
+        let max_vms = self.config.runner.max_concurrent_jobs;
         let repos = self.github.repos();
         let is_org = self.github.is_org_mode();
         if repos.is_empty() && !is_org {
@@ -320,23 +322,24 @@ impl Orchestrator {
             let org = self.config.github.organization.as_deref().unwrap_or("unknown");
             tracing::info!(
                 pool_size,
+                ephemeral,
                 organization = org,
                 "orchestrator starting (warm pool mode, org-level runners)"
             );
         } else {
             tracing::info!(
                 pool_size,
+                ephemeral,
                 repos = ?repos,
                 "orchestrator starting (warm pool mode)"
             );
         }
 
-        // Channel for VMs to signal slot return
-        let (done_tx, mut done_rx) = mpsc::channel::<(usize, String)>(pool_size * 2);
+        // Channel for VMs to signal slot return (crash recovery + ephemeral replacement)
+        let (done_tx, mut done_rx) = mpsc::channel::<(usize, String)>(max_vms * 2);
 
         // Spawn initial pool
         for i in 0..pool_size {
-            // In org mode, repo is empty — runners register at org level
             let repo = if is_org {
                 String::new()
             } else {
@@ -349,6 +352,21 @@ impl Orchestrator {
             self.spawn_warm_vm(slot, repo, done_tx.clone());
         }
 
+        if ephemeral {
+            // Ephemeral mode: VMs exit after one job, spawn replacements
+            self.run_warm_pool_ephemeral(done_tx, &mut done_rx).await
+        } else {
+            // Non-ephemeral mode: VMs stay alive, auto-scale standbys when runners are busy
+            self.run_warm_pool_autoscale(done_tx, &mut done_rx).await
+        }
+    }
+
+    /// Ephemeral warm pool: wait for VMs to exit and spawn replacements.
+    async fn run_warm_pool_ephemeral(
+        &self,
+        done_tx: mpsc::Sender<(usize, String)>,
+        done_rx: &mut mpsc::Receiver<(usize, String)>,
+    ) -> anyhow::Result<()> {
         loop {
             tokio::select! {
                 _ = self.cancel.cancelled() => {
@@ -357,17 +375,13 @@ impl Orchestrator {
                     break;
                 }
                 Some((slot, repo)) = done_rx.recv() => {
-                    // Return slot to pool
                     self.slot_pool.lock().await.push(slot);
-
-                    // Brief delay before spawning replacement
                     tokio::time::sleep(Duration::from_secs(3)).await;
 
                     if self.cancel.is_cancelled() {
                         break;
                     }
 
-                    // Get a new slot for the replacement
                     let new_slot = {
                         let mut pool = self.slot_pool.lock().await;
                         match pool.pop() {
@@ -384,6 +398,130 @@ impl Orchestrator {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Non-ephemeral warm pool: runners stay alive across jobs.
+    /// Periodically polls GitHub API to count idle vs busy runners.
+    /// Spawns standby VMs when idle runners drop below warm_pool_size
+    /// and total VMs are under max_concurrent_jobs.
+    async fn run_warm_pool_autoscale(
+        &self,
+        done_tx: mpsc::Sender<(usize, String)>,
+        done_rx: &mut mpsc::Receiver<(usize, String)>,
+    ) -> anyhow::Result<()> {
+        let pool_size = self.config.runner.warm_pool_size;
+        let max_vms = self.config.runner.max_concurrent_jobs;
+        let repos = self.github.repos();
+        let is_org = self.github.is_org_mode();
+        let check_interval = Duration::from_secs(self.config.runner.poll_interval_secs);
+
+        let mut ticker = interval(check_interval);
+
+        loop {
+            tokio::select! {
+                _ = self.cancel.cancelled() => {
+                    tracing::info!("shutdown signal, waiting for warm pool VMs...");
+                    self.wait_for_active_jobs(Duration::from_secs(10)).await;
+                    break;
+                }
+                // Handle crashed/exited VMs — spawn replacement
+                Some((slot, repo)) = done_rx.recv() => {
+                    self.slot_pool.lock().await.push(slot);
+                    tracing::info!(slot, repo = %repo, "non-ephemeral VM exited, spawning replacement");
+
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    if self.cancel.is_cancelled() { break; }
+
+                    let new_slot = {
+                        let mut pool = self.slot_pool.lock().await;
+                        match pool.pop() {
+                            Some(s) => s,
+                            None => {
+                                tracing::warn!("no slots available for replacement");
+                                continue;
+                            }
+                        }
+                    };
+                    let repo = if is_org { String::new() } else { repo };
+                    self.spawn_warm_vm(new_slot, repo, done_tx.clone());
+                }
+                // Periodically check runner status and scale up if needed
+                _ = ticker.tick() => {
+                    if let Err(e) = self.autoscale_check(pool_size, max_vms, &repos, is_org, &done_tx).await {
+                        tracing::debug!(error = %e, "autoscale check failed");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Check GitHub API for runner status and spawn standbys if idle < warm_pool_size.
+    async fn autoscale_check(
+        &self,
+        target_idle: usize,
+        max_vms: usize,
+        repos: &[String],
+        is_org: bool,
+        done_tx: &mpsc::Sender<(usize, String)>,
+    ) -> anyhow::Result<()> {
+        // Get fc-runner managed runners from GitHub API
+        let runners = if is_org {
+            self.github.list_org_runners().await?
+        } else if let Some(repo) = repos.first() {
+            self.github.list_runners(repo).await?
+        } else {
+            return Ok(());
+        };
+
+        // Count only our runners (fc- prefix, online)
+        let our_runners: Vec<_> = runners.iter()
+            .filter(|r| r.name.starts_with("fc-") && r.status == "online")
+            .collect();
+
+        let total = our_runners.len();
+        let busy = our_runners.iter().filter(|r| r.busy).count();
+        let idle = total - busy;
+
+        tracing::debug!(total, busy, idle, target_idle, max_vms, "autoscale check");
+
+        // Spawn standbys if idle runners are below target and we have capacity
+        if idle < target_idle {
+            let active_vms = *self.active_jobs.lock().await;
+            let to_spawn = (target_idle - idle).min(max_vms.saturating_sub(active_vms));
+
+            if to_spawn == 0 {
+                tracing::debug!(active_vms, max_vms, "at capacity, cannot spawn standbys");
+                return Ok(());
+            }
+
+            tracing::info!(
+                idle, busy, target_idle, spawning = to_spawn,
+                "idle runners below target, spawning standbys"
+            );
+
+            for i in 0..to_spawn {
+                let slot = {
+                    let mut pool = self.slot_pool.lock().await;
+                    match pool.pop() {
+                        Some(s) => s,
+                        None => {
+                            tracing::debug!("no more slots for standby");
+                            break;
+                        }
+                    }
+                };
+                let repo = if is_org {
+                    String::new()
+                } else {
+                    repos[i % repos.len()].clone()
+                };
+                tracing::info!(slot, repo = %repo, "spawning standby runner");
+                self.spawn_warm_vm(slot, repo, done_tx.clone());
+            }
+        }
+
         Ok(())
     }
 
