@@ -672,14 +672,14 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
     )
     .await?;
 
-    let _ = chroot_command(mount_dir, "systemctl", &["enable", "systemd-networkd", "systemd-resolved"])
+    let _ = chroot_command(mount_dir, "systemctl", &["enable", "systemd-networkd", "systemd-resolved", "docker", "containerd"])
         .status()
         .await;
 
     // Belt-and-suspenders: create symlinks manually in case chroot systemctl fails
     let wants_dir = format!("{}/etc/systemd/system/multi-user.target.wants", mount_dir);
     tokio::fs::create_dir_all(&wants_dir).await?;
-    for svc in ["systemd-networkd", "systemd-resolved"] {
+    for svc in ["systemd-networkd", "systemd-resolved", "docker", "containerd"] {
         let symlink = format!("{}/{}.service", wants_dir, svc);
         let target = format!("/lib/systemd/system/{}.service", svc);
         if !Path::new(&symlink).exists() {
@@ -712,9 +712,24 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
         .status()
         .await;
 
+    // Add runner to docker group (required for services: support in workflows)
+    let _ = chroot_command(mount_dir, "usermod", &["-aG", "docker", "runner"])
+        .status()
+        .await;
+
     tokio::fs::write(
         format!("{}/etc/sudoers.d/runner", mount_dir),
         "runner ALL=(ALL) NOPASSWD:ALL\n",
+    )
+    .await?;
+
+    // Docker daemon config: use vfs storage driver (overlay2 doesn't work on overlayfs-on-overlayfs)
+    // and configure DNS for container networking
+    let docker_dir = format!("{}/etc/docker", mount_dir);
+    tokio::fs::create_dir_all(&docker_dir).await?;
+    tokio::fs::write(
+        format!("{}/daemon.json", docker_dir),
+        "{\n  \"storage-driver\": \"overlay2\",\n  \"dns\": [\"8.8.8.8\", \"1.1.1.1\"]\n}\n",
     )
     .await?;
 
