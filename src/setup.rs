@@ -1196,9 +1196,11 @@ if [ -n "$cache_dev" ] && [ -b "/dev/$cache_dev" ]; then
     mkdir -p /cache
     /bin/mount -t ext4 -o noatime "/dev/$cache_dev" /cache
 
-    # Create cache directory structure
+    # Create cache directory structure and make it writable by the runner user
     mkdir -p /cache/cargo/registry /cache/cargo/git /cache/cargo/bin
+    mkdir -p /cache/cargo/target
     mkdir -p /cache/tool-cache
+    chown -R runner:runner /cache
 
     # Symlink common cache paths for the runner user
     RUNNER_HOME="/home/runner"
