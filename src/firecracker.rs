@@ -161,6 +161,8 @@ pub struct MicroVm {
     mount_point: PathBuf,
     /// Per-VM overlay ext4 file (used only when overlay_rootfs = true).
     overlay_path: PathBuf,
+    /// Per-slot persistent cache ext4 image (used only when cache_enabled = true).
+    cache_path: Option<PathBuf>,
     fc_config: FirecrackerConfig,
     vm_timeout_secs: u64,
     cancel: CancellationToken,
@@ -198,6 +200,11 @@ impl MicroVm {
     ) -> Self {
         let vm_id = format!("fc-{}-{}", job_id, Uuid::new_v4().simple());
         let base = PathBuf::from(work_dir);
+        let cache_path = if fc_config.cache_enabled {
+            Some(PathBuf::from(&fc_config.cache_dir).join(format!("slot-{}.ext4", slot)))
+        } else {
+            None
+        };
         Self {
             rootfs_path: base.join(format!("{}.ext4", vm_id)),
             config_path: base.join(format!("{}.json", vm_id)),
@@ -205,6 +212,7 @@ impl MicroVm {
             log_path: base.join(format!("{}.log", vm_id)),
             mount_point: base.join(format!("{}.mnt", vm_id)),
             overlay_path: base.join(format!("{}.overlay.ext4", vm_id)),
+            cache_path,
             job_id,
             vm_id,
             fc_config: fc_config.clone(),
@@ -232,6 +240,17 @@ impl MicroVm {
         self.fc_config.rootfs_golden.replace(".ext4", ".squashfs")
     }
 
+    /// Guest device name for the cache volume.
+    /// In overlay mode: vda=squashfs, vdb=overlay, vdc=cache
+    /// In legacy mode: vda=rootfs, vdb=cache
+    fn cache_device_name(&self) -> &str {
+        if self.use_overlay() {
+            "vdc"
+        } else {
+            "vdb"
+        }
+    }
+
     /// Create a per-VM sparse overlay ext4 file for OverlayFS COW mode.
     async fn create_overlay(&self) -> anyhow::Result<()> {
         let size_bytes = self.fc_config.overlay_size_mib as u64 * 1024 * 1024;
@@ -255,6 +274,52 @@ impl MicroVm {
             .await
             .context("running mkfs.ext4 on overlay")?;
         ensure!(status.success(), "mkfs.ext4 overlay failed");
+        Ok(())
+    }
+
+    /// Ensure the per-slot persistent cache ext4 image exists.
+    /// Creates a sparse file + formats it if missing. This is NOT per-VM — it
+    /// persists across VM lifecycles for the same slot.
+    async fn ensure_cache_image(&self) -> anyhow::Result<()> {
+        let cache_path = match &self.cache_path {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        if cache_path.exists() {
+            tracing::debug!(
+                vm_id = %self.vm_id,
+                slot = self.slot,
+                cache = %cache_path.display(),
+                "cache image already exists"
+            );
+            return Ok(());
+        }
+        let cache_dir = cache_path.parent().unwrap();
+        tokio::fs::create_dir_all(cache_dir)
+            .await
+            .with_context(|| format!("creating cache directory: {}", cache_dir.display()))?;
+
+        let size_bytes = self.fc_config.cache_size_mib as u64 * 1024 * 1024;
+        let cache_str = path_str(cache_path)?;
+
+        tracing::info!(
+            vm_id = %self.vm_id,
+            slot = self.slot,
+            size_mib = self.fc_config.cache_size_mib,
+            path = cache_str,
+            "creating persistent cache image (sparse ext4)"
+        );
+
+        let f = std::fs::File::create(cache_str).context("creating cache file")?;
+        f.set_len(size_bytes).context("setting cache file size")?;
+        drop(f);
+
+        let status = Command::new("mkfs.ext4")
+            .args(["-F", "-q", "-L", "fc-cache", cache_str])
+            .status()
+            .await
+            .context("running mkfs.ext4 on cache image")?;
+        ensure!(status.success(), "mkfs.ext4 cache image failed");
         Ok(())
     }
 
@@ -704,7 +769,7 @@ fi
         };
 
         // Build boot args — append overlay init params when in overlay mode
-        let boot_args = if self.use_overlay() {
+        let mut boot_args = if self.use_overlay() {
             format!(
                 "{} init=/sbin/overlay-init overlay_root=vdb",
                 self.fc_config.boot_args
@@ -713,8 +778,13 @@ fi
             self.fc_config.boot_args.clone()
         };
 
-        // Build drives array — overlay mode uses two drives
-        let drives = if self.use_overlay() {
+        // Append cache device param when cache is enabled
+        if self.cache_path.is_some() {
+            boot_args = format!("{} cache_dev={}", boot_args, self.cache_device_name());
+        }
+
+        // Build drives array — overlay mode uses two drives, cache adds a third
+        let mut drives_vec: Vec<serde_json::Value> = if self.use_overlay() {
             let squashfs = if use_jailer {
                 filename_str(&self.rootfs_path)?.replace(".ext4", "-rootfs.squashfs")
             } else {
@@ -725,28 +795,45 @@ fi
             } else {
                 path_str(&self.overlay_path)?.to_string()
             };
-            serde_json::json!([
-                {
+            vec![
+                serde_json::json!({
                     "drive_id": "rootfs",
                     "path_on_host": squashfs,
                     "is_root_device": true,
                     "is_read_only": true
-                },
-                {
+                }),
+                serde_json::json!({
                     "drive_id": "overlay",
                     "path_on_host": overlay,
                     "is_root_device": false,
                     "is_read_only": false
-                }
-            ])
+                }),
+            ]
         } else {
-            serde_json::json!([{
+            vec![serde_json::json!({
                 "drive_id": "rootfs",
                 "path_on_host": rootfs_path,
                 "is_root_device": true,
                 "is_read_only": false
-            }])
+            })]
         };
+
+        // Add cache drive when enabled
+        if let Some(cache_path) = &self.cache_path {
+            let cache_host_path = if use_jailer {
+                format!("slot-{}-cache.ext4", self.slot)
+            } else {
+                path_str(cache_path)?.to_string()
+            };
+            drives_vec.push(serde_json::json!({
+                "drive_id": "cache",
+                "path_on_host": cache_host_path,
+                "is_root_device": false,
+                "is_read_only": false
+            }));
+        }
+
+        let drives = serde_json::Value::Array(drives_vec);
 
         let mut config = serde_json::json!({
             "boot-source": {
@@ -887,6 +974,20 @@ fi
             }
         }
 
+        // Link cache image into chroot (persistent, not per-VM)
+        if let Some(cache_path) = &self.cache_path {
+            let cache_name = format!("slot-{}-cache.ext4", self.slot);
+            let chroot_cache = root_dir.join(&cache_name);
+            if tokio::fs::hard_link(cache_path, &chroot_cache)
+                .await
+                .is_err()
+            {
+                tokio::fs::copy(cache_path, &chroot_cache)
+                    .await
+                    .context("copying cache image into chroot")?;
+            }
+        }
+
         // Create log file in chroot
         let log_name = filename_str(&self.log_path)?;
         tokio::fs::write(root_dir.join(log_name), "")
@@ -1019,6 +1120,30 @@ fi
                 })
                 .await
                 .map_err(|e| anyhow::anyhow!("put_guest_drive_by_id failed: {}", e))?;
+        }
+
+        // Cache drive (persistent per-slot)
+        if let Some(cache_path) = &self.cache_path {
+            instance
+                .put_guest_drive_by_id(&Drive {
+                    drive_id: "cache".to_string(),
+                    path_on_host: cache_path.clone(),
+                    is_root_device: false,
+                    is_read_only: false,
+                    partuuid: None,
+                    cache_type: None,
+                    rate_limiter: None,
+                    io_engine: None,
+                    socket: None,
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("put_guest_drive_by_id (cache) failed: {}", e))?;
+            tracing::info!(
+                vm_id = %self.vm_id,
+                cache_dev = self.cache_device_name(),
+                path = %cache_path.display(),
+                "cache drive configured"
+            );
         }
 
         // Network interface
@@ -1377,6 +1502,9 @@ fi
             self.copy_rootfs().await?;
         }
 
+        // Ensure persistent cache image exists (creates once per slot, reused across VMs)
+        self.ensure_cache_image().await?;
+
         if mmds {
             // MMDS mode: only inject network config to disk, secrets via MMDS
             self.inject_network_config().await?;
@@ -1494,6 +1622,9 @@ mod tests {
             vsock_cid_base: 3,
             overlay_rootfs: overlay,
             overlay_size_mib: 512,
+            cache_enabled: false,
+            cache_size_mib: 2048,
+            cache_dir: "/var/lib/fc-runner/cache".to_string(),
         }
     }
 
@@ -1610,6 +1741,90 @@ mod tests {
         let boot_args = config["boot-source"]["boot_args"].as_str().unwrap();
         assert!(!boot_args.contains("overlay-init"));
         assert!(!boot_args.contains("overlay_root"));
+    }
+
+    fn create_test_vm_with_cache(overlay: bool) -> MicroVm {
+        let mut config = test_fc_config(overlay);
+        config.cache_enabled = true;
+        config.cache_dir = "/var/lib/fc-runner/cache".to_string();
+        MicroVm::new(
+            12345,
+            &config,
+            &test_network_config(),
+            "/tmp/fc-test",
+            3600,
+            0,
+            CancellationToken::new(),
+        )
+    }
+
+    #[test]
+    fn cache_path_set_when_enabled() {
+        let vm = create_test_vm_with_cache(true);
+        assert!(vm.cache_path.is_some());
+        assert!(vm.cache_path.unwrap().to_string_lossy().contains("slot-0.ext4"));
+    }
+
+    #[test]
+    fn cache_path_none_when_disabled() {
+        let vm = create_test_vm(true);
+        assert!(vm.cache_path.is_none());
+    }
+
+    #[test]
+    fn cache_device_name_overlay_mode() {
+        let vm = create_test_vm_with_cache(true);
+        assert_eq!(vm.cache_device_name(), "vdc");
+    }
+
+    #[test]
+    fn cache_device_name_legacy_mode() {
+        let vm = create_test_vm_with_cache(false);
+        assert_eq!(vm.cache_device_name(), "vdb");
+    }
+
+    #[test]
+    fn build_vm_config_overlay_with_cache_three_drives() {
+        let vm = create_test_vm_with_cache(true);
+        let config = vm.build_vm_config(false).unwrap();
+        let drives = config["drives"].as_array().unwrap();
+        assert_eq!(drives.len(), 3);
+        assert_eq!(drives[0]["drive_id"], "rootfs");
+        assert_eq!(drives[1]["drive_id"], "overlay");
+        assert_eq!(drives[2]["drive_id"], "cache");
+        assert_eq!(drives[2]["is_read_only"], false);
+        assert!(
+            drives[2]["path_on_host"]
+                .as_str()
+                .unwrap()
+                .contains("slot-0.ext4")
+        );
+    }
+
+    #[test]
+    fn build_vm_config_legacy_with_cache_two_drives() {
+        let vm = create_test_vm_with_cache(false);
+        let config = vm.build_vm_config(false).unwrap();
+        let drives = config["drives"].as_array().unwrap();
+        assert_eq!(drives.len(), 2);
+        assert_eq!(drives[0]["drive_id"], "rootfs");
+        assert_eq!(drives[1]["drive_id"], "cache");
+    }
+
+    #[test]
+    fn build_vm_config_cache_boot_args() {
+        let vm = create_test_vm_with_cache(true);
+        let config = vm.build_vm_config(false).unwrap();
+        let boot_args = config["boot-source"]["boot_args"].as_str().unwrap();
+        assert!(boot_args.contains("cache_dev=vdc"));
+    }
+
+    #[test]
+    fn build_vm_config_no_cache_boot_args_when_disabled() {
+        let vm = create_test_vm(true);
+        let config = vm.build_vm_config(false).unwrap();
+        let boot_args = config["boot-source"]["boot_args"].as_str().unwrap();
+        assert!(!boot_args.contains("cache_dev"));
     }
 
     #[test]
