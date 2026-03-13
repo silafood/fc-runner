@@ -1291,6 +1291,8 @@ fi
             jailer_opt
                 .chroot_base_dir(Some(&self.fc_config.jailer_chroot_base))
                 .firecracker_option(Some(&fc_opt))
+                .stdout("/dev/null")
+                .stderr("/dev/null")
                 .remove_jailer_workspace_dir();
 
             let instance = jailer_opt
@@ -1311,7 +1313,11 @@ fi
             // (with_file_name would make all VMs share "api.sock", causing collisions)
             let socket_path = &self.socket_path;
             let mut fc_opt = FirecrackerOption::new(&self.fc_config.binary_path);
-            fc_opt.api_sock(socket_path).id(&self.vm_id);
+            fc_opt
+                .api_sock(socket_path)
+                .id(&self.vm_id)
+                .stdout("/dev/null")
+                .stderr("/dev/null");
 
             let instance = fc_opt
                 .build()
