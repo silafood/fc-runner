@@ -676,7 +676,7 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
                  gcc g++ make cmake \
                  python3 python3-pip python3-venv \
                  nodejs npm \
-                 podman buildah crun netavark aardvark-dns \
+                 podman buildah crun netavark aardvark-dns iptables \
                  wget tar gzip xz-utils \
                  zip bzip2 \
                  libffi-dev zlib1g-dev \
