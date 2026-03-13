@@ -13,10 +13,6 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 
-#[cfg(unix)]
-#[allow(unused_imports)]
-use std::os::unix::process::CommandExt;
-
 /// MMDS V2 base URL (Firecracker metadata service).
 const MMDS_BASE: &str = "http://169.254.169.254";
 /// MMDS token TTL in seconds.
@@ -240,28 +236,75 @@ fn runner_env() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// Look up the UID and GID for the runner user.
-/// Falls back to 1000:1000 if the user doesn't exist.
-fn runner_uid_gid() -> (u32, u32) {
+/// Look up the UID, primary GID, and supplementary group GIDs for the runner user.
+/// Falls back to 1000:1000 with no supplementary groups if the user doesn't exist.
+fn runner_credentials() -> (u32, u32, Vec<u32>) {
+    let mut uid = 1000u32;
+    let mut primary_gid = 1000u32;
+
     // Read /etc/passwd to find the runner user's UID/GID
     if let Ok(contents) = std::fs::read_to_string("/etc/passwd") {
         for line in contents.lines() {
             let fields: Vec<&str> = line.split(':').collect();
             if fields.len() >= 4 && fields[0] == RUNNER_USER {
-                let uid = fields[2].parse().unwrap_or(1000);
-                let gid = fields[3].parse().unwrap_or(1000);
-                return (uid, gid);
+                uid = fields[2].parse().unwrap_or(1000);
+                primary_gid = fields[3].parse().unwrap_or(1000);
+                break;
             }
         }
     }
-    (1000, 1000)
+
+    // Read /etc/group to find supplementary groups (e.g., docker)
+    let mut groups = vec![primary_gid];
+    if let Ok(contents) = std::fs::read_to_string("/etc/group") {
+        for line in contents.lines() {
+            let fields: Vec<&str> = line.split(':').collect();
+            if fields.len() >= 4 {
+                let gid: u32 = fields[2].parse().unwrap_or(0);
+                if gid == primary_gid {
+                    continue;
+                }
+                // Check if runner is in this group's member list
+                let members: Vec<&str> = fields[3].split(',').collect();
+                if members.iter().any(|m| m.trim() == RUNNER_USER) {
+                    groups.push(gid);
+                }
+            }
+        }
+    }
+
+    (uid, primary_gid, groups)
 }
 
 /// Apply runner user credentials to a command (drop privileges from root).
+/// Sets UID, GID, and supplementary groups (e.g., docker) so the runner
+/// can access resources like /var/run/docker.sock.
 #[cfg(unix)]
 fn as_runner_user(cmd: &mut tokio::process::Command) {
-    let (uid, gid) = runner_uid_gid();
-    cmd.uid(uid).gid(gid);
+    let (uid, gid, groups) = runner_credentials();
+    // SAFETY: setgroups/setgid/setuid are async-signal-safe per POSIX.
+    // Must call setgroups before setgid/setuid (can't set groups after dropping root).
+    unsafe {
+        cmd.pre_exec(move || {
+            let c_groups: Vec<u32> = groups.clone();
+            if !c_groups.is_empty() {
+                let ret = libc::setgroups(
+                    c_groups.len() as libc::c_int,
+                    c_groups.as_ptr() as *const libc::gid_t,
+                );
+                if ret != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            if libc::setgid(gid as libc::gid_t) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::setuid(uid as libc::uid_t) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
 }
 
 /// Run the GitHub Actions runner and return its exit code.
