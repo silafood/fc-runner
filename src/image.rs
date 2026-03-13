@@ -263,38 +263,23 @@ async fn install_agent_if_missing(rootfs_path: &str) -> anyhow::Result<()> {
     let _ = tokio::fs::remove_file(&mask_link).await;
     tokio::fs::symlink("/dev/null", &mask_link).await?;
 
-    // Ensure runner user is in docker group (for services: support)
-    // Read /etc/group directly since chroot may not be available
-    let group_file = format!("{}/etc/group", mount_dir);
-    if let Ok(contents) = tokio::fs::read_to_string(&group_file).await {
-        let updated = contents.lines().map(|line| {
-            if line.starts_with("docker:") && !line.contains("runner") {
-                format!("{}{}", line, if line.ends_with(':') { "runner" } else { ",runner" })
-            } else {
-                line.to_string()
-            }
-        }).collect::<Vec<_>>().join("\n") + "\n";
-        tokio::fs::write(&group_file, updated).await?;
-    }
+    // Podman: symlink docker → podman so GitHub Actions runner uses podman transparently
+    let docker_link = format!("{}/usr/local/bin/docker", mount_dir);
+    tokio::fs::create_dir_all(format!("{}/usr/local/bin", mount_dir)).await?;
+    let _ = tokio::fs::remove_file(&docker_link).await;
+    tokio::fs::symlink("/usr/bin/podman", &docker_link).await?;
 
-    // Docker daemon config: overlay2 storage driver + DNS
-    let docker_dir = format!("{}/etc/docker", mount_dir);
-    tokio::fs::create_dir_all(&docker_dir).await?;
+    // Podman containers.conf: configure DNS for container networking
+    let containers_dir = format!("{}/etc/containers", mount_dir);
+    tokio::fs::create_dir_all(&containers_dir).await?;
     tokio::fs::write(
-        format!("{}/daemon.json", docker_dir),
-        "{\n  \"storage-driver\": \"overlay2\",\n  \"dns\": [\"8.8.8.8\", \"1.1.1.1\"]\n}\n",
+        format!("{}/containers.conf", containers_dir),
+        "[containers]\n\
+         dns_servers = [\"8.8.8.8\", \"1.1.1.1\"]\n\
+         \n\
+         [engine]\n\
+         runtime = \"crun\"\n",
     ).await?;
-
-    // Enable docker and containerd systemd services
-    let wants_dir = format!("{}/etc/systemd/system/multi-user.target.wants", mask_dir);
-    tokio::fs::create_dir_all(&wants_dir).await?;
-    for svc in ["docker", "containerd"] {
-        let symlink = format!("{}/{}.service", wants_dir, svc);
-        let target = format!("/lib/systemd/system/{}.service", svc);
-        if !Path::new(&symlink).exists() {
-            let _ = tokio::fs::symlink(&target, &symlink).await;
-        }
-    }
 
     // Install overlay-init script and directories for OverlayFS COW mode
     install_overlay_init_into(&mount_dir).await?;
@@ -373,12 +358,21 @@ pivot /overlay/root /overlay/work
 # Mount devtmpfs so we have access to /dev/vdb in the new root
 /bin/mount -t devtmpfs devtmpfs /dev
 
-# Mount overlay ext4 at a persistent path (not under /rom which systemd cleans up)
-# Docker needs a real ext4 backing store — overlayfs-on-overlayfs is not supported
+# Mount overlay ext4 at a persistent path for container storage
+# Podman/containers need writable storage not on overlayfs
 mkdir -p /overlay-data
 /bin/mount -t ext4 -o noatime /dev/vdb /overlay-data
-mkdir -p /overlay-data/docker /var/lib/docker
-/bin/mount --bind /overlay-data/docker /var/lib/docker
+mkdir -p /overlay-data/containers
+# Point Podman graphroot to real ext4 so fuse-overlayfs works
+mkdir -p /etc/containers
+cat > /etc/containers/storage.conf <<STOR
+[storage]
+driver = "overlay"
+graphroot = "/overlay-data/containers"
+
+[storage.options.overlay]
+mount_program = "/usr/bin/fuse-overlayfs"
+STOR
 
 # Write /etc/hosts to fix "unable to resolve host" warnings
 cat > /etc/hosts <<HOSTS
