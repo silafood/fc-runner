@@ -266,6 +266,15 @@ async fn install_agent_if_missing(rootfs_path: &str) -> anyhow::Result<()> {
     let _ = tokio::fs::remove_file(&docker_bin).await;
     tokio::fs::symlink("/usr/bin/podman", &docker_bin).await?;
 
+    // Podman rootless: subordinate UID/GID ranges for user namespace mapping
+    for file in ["subuid", "subgid"] {
+        let path = format!("{}/etc/{}", mount_dir, file);
+        let existing = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+        if !existing.contains("runner:") {
+            tokio::fs::write(&path, format!("{}runner:100000:65536\n", existing)).await?;
+        }
+    }
+
     // Podman containers.conf: configure DNS for container networking
     let containers_dir = format!("{}/etc/containers", mount_dir);
     tokio::fs::create_dir_all(&containers_dir).await?;
