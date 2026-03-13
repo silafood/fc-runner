@@ -1336,12 +1336,28 @@ fi
     }
 
     pub async fn execute(self, env_content: &str) -> anyhow::Result<()> {
-        let result = self.prepare_and_run(env_content).await;
+        self.execute_with_notify(env_content, None).await
+    }
+
+    /// Execute the VM with an optional VSOCK job-completion notification channel.
+    /// When provided, the channel receives a notification as soon as the guest agent
+    /// reports `JobCompleted`, allowing the orchestrator to begin replacement before
+    /// the VM fully shuts down.
+    pub async fn execute_with_notify(
+        self,
+        env_content: &str,
+        vsock_notify: Option<tokio::sync::mpsc::Sender<vsock::JobDoneNotification>>,
+    ) -> anyhow::Result<()> {
+        let result = self.prepare_and_run(env_content, vsock_notify).await;
         self.cleanup().await;
         result
     }
 
-    async fn prepare_and_run(&self, env_content: &str) -> anyhow::Result<()> {
+    async fn prepare_and_run(
+        &self,
+        env_content: &str,
+        vsock_notify: Option<tokio::sync::mpsc::Sender<vsock::JobDoneNotification>>,
+    ) -> anyhow::Result<()> {
         let mmds = self.use_mmds();
         let use_jailer = self.fc_config.jailer_path.is_some();
         tracing::info!(
@@ -1375,7 +1391,7 @@ fi
         let vsock_handle = if self.fc_config.vsock_enabled {
             let cid = self.vsock_cid();
             tracing::info!(vm_id = %self.vm_id, cid, "spawning VSOCK listener");
-            Some(vsock::spawn_listener(self.vm_id.clone(), cid))
+            Some(vsock::spawn_listener(self.vm_id.clone(), cid, vsock_notify))
         } else {
             None
         };

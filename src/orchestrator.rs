@@ -548,7 +548,12 @@ impl Orchestrator {
         Ok(())
     }
 
-    fn spawn_warm_vm(&self, slot: usize, repo: String, done_tx: mpsc::Sender<(usize, String)>) {
+    fn spawn_warm_vm(
+        &self,
+        slot: usize,
+        repo: String,
+        done_tx: mpsc::Sender<(usize, String)>,
+    ) {
         let config = self.config.clone();
         let github = self.github.clone();
         let active_jobs = self.active_jobs.clone();
@@ -563,8 +568,45 @@ impl Orchestrator {
             let timer = metrics::VM_BOOT_DURATION
                 .with_label_values(&[&repo])
                 .start_timer();
-            let result = run_warm_vm(config, github.clone(), slot, &repo, cancel).await;
+
+            // Create a VSOCK notification channel so the orchestrator can start
+            // a replacement as soon as the guest agent reports job completion,
+            // before the VM fully shuts down.
+            let (vsock_tx, mut vsock_rx) = mpsc::channel::<crate::vsock::JobDoneNotification>(1);
+            let early_done_tx = done_tx.clone();
+            let early_repo = repo.clone();
+            let early_slot = slot;
+
+            // Listen for early completion signal from VSOCK
+            let early_handle = tokio::spawn(async move {
+                if let Some(notification) = vsock_rx.recv().await {
+                    tracing::info!(
+                        slot = early_slot,
+                        vm_id = %notification.vm_id,
+                        exit_code = notification.exit_code,
+                        "VSOCK: job completed, signaling early replacement"
+                    );
+                    // Signal the warm pool to start creating a replacement immediately
+                    let _ = early_done_tx.send((early_slot, early_repo)).await;
+                    true
+                } else {
+                    false
+                }
+            });
+
+            let result = run_warm_vm(
+                config,
+                github.clone(),
+                slot,
+                &repo,
+                cancel,
+                Some(vsock_tx),
+            )
+            .await;
             timer.observe_duration();
+
+            // Check if VSOCK already sent the early replacement signal
+            let early_signaled = early_handle.await.unwrap_or(false);
 
             // Clean up offline runners left by this VM
             if github.is_org_mode() {
@@ -588,8 +630,10 @@ impl Orchestrator {
             metrics::JOBS_ACTIVE.dec();
             metrics::POOL_SLOTS_AVAILABLE.inc();
 
-            // Signal that this slot is done and needs replacement
-            let _ = done_tx.send((slot, repo)).await;
+            // Only signal done_tx if VSOCK didn't already send an early signal
+            if !early_signaled {
+                let _ = done_tx.send((slot, repo)).await;
+            }
         });
     }
 
@@ -653,6 +697,7 @@ async fn run_warm_vm(
     slot: usize,
     repo: &str,
     cancel: CancellationToken,
+    vsock_notify: Option<mpsc::Sender<crate::vsock::JobDoneNotification>>,
 ) -> anyhow::Result<()> {
     let is_org = github.is_org_mode();
 
@@ -694,5 +739,5 @@ async fn run_warm_vm(
         "RUNNER_MODE=register\nRUNNER_TOKEN={}\nREPO_URL={}\nRUNNER_NAME={}\nVM_ID={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\nEPHEMERAL={}\n",
         reg_token, registration_url, runner_name, vm.vm_id, vm.vm_id, ephemeral
     );
-    vm.execute(&env_content).await
+    vm.execute_with_notify(&env_content, vsock_notify).await
 }
