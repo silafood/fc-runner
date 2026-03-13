@@ -96,6 +96,8 @@ jobs:
           grep -q "CONFIG_OVERLAY_FS=y" .config || MISSING="$MISSING CONFIG_OVERLAY_FS"
           grep -q "CONFIG_VIRTIO=y" .config || MISSING="$MISSING CONFIG_VIRTIO"
           grep -q "CONFIG_EXT4_FS=y" .config || MISSING="$MISSING CONFIG_EXT4_FS"
+          grep -q "CONFIG_NETFILTER_XT_MATCH_COMMENT=y" .config || MISSING="$MISSING CONFIG_NETFILTER_XT_MATCH_COMMENT"
+          grep -q "CONFIG_NETFILTER_XT_MATCH_MULTIPORT=y" .config || MISSING="$MISSING CONFIG_NETFILTER_XT_MATCH_MULTIPORT"
 
           if [ -n "$MISSING" ]; then
             echo "ERROR: kernel config missing required options:$MISSING"
