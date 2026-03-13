@@ -701,24 +701,6 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
     .context("installing packages in chroot")?;
     ensure!(status.success(), "apt-get install failed");
 
-    // Switch to iptables-legacy — netavark's rust-iptables library cannot parse
-    // the version string from iptables-nft (Ubuntu 24.04 default), causing
-    // "netavark: invalid version number" on container start.
-    let _ = chroot_command(
-        mount_dir,
-        "update-alternatives",
-        &["--set", "iptables", "/usr/sbin/iptables-legacy"],
-    )
-    .status()
-    .await;
-    let _ = chroot_command(
-        mount_dir,
-        "update-alternatives",
-        &["--set", "ip6tables", "/usr/sbin/ip6tables-legacy"],
-    )
-    .status()
-    .await;
-
     // ── Install Rust toolchain ──────────────────────────────────────
     tracing::info!("installing Rust toolchain...");
     let status = chroot_command(mount_dir, "bash", &["-c",
