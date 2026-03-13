@@ -301,15 +301,17 @@ impl Orchestrator {
                 github.remove_offline_runners(&repo).await;
             }
 
+            // Always remove from seen_jobs so the job ID doesn't block retries
+            seen_jobs.lock().await.remove(&job_id);
+
             match result {
                 Ok(()) => {
-                    seen_jobs.lock().await.remove(&job_id);
                     metrics::JOBS_COMPLETED.with_label_values(&[&repo]).inc();
                     tracing::info!(job_id, repo = %repo, slot, "job completed successfully");
                 }
                 Err(e) => {
                     metrics::JOBS_FAILED.with_label_values(&[&repo]).inc();
-                    tracing::error!(job_id, repo = %repo, slot, error = ?e, "job failed (will not retry)");
+                    tracing::error!(job_id, repo = %repo, slot, error = ?e, "job failed");
                 }
             }
         });
