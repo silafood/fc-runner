@@ -35,9 +35,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN locale-gen en_US.UTF-8
 ENV LANG=en_US.UTF-8
 
-# Runner user
+# Runner user with subordinate UID/GID ranges for Podman rootless
 RUN useradd -m -s /bin/bash runner && \
-    echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner
+    echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner && \
+    echo 'runner:100000:65536' >> /etc/subuid && \
+    echo 'runner:100000:65536' >> /etc/subgid
 
 # GitHub Actions runner
 ARG RUNNER_VERSION=2.332.0
