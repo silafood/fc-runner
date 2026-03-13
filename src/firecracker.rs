@@ -1465,7 +1465,7 @@ mod tests {
             image: None,
             vcpu_count: 2,
             mem_size_mib: 2048,
-            boot_args: "console=ttyS0 reboot=k panic=1 pci=off".to_string(),
+            boot_args: "console=ttyS0 reboot=k panic=1".to_string(),
             log_level: "Warning".to_string(),
             jailer_path: None,
             jailer_uid: None,
