@@ -35,11 +35,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN locale-gen en_US.UTF-8
 ENV LANG=en_US.UTF-8
 
-# Runner user with subordinate UID/GID ranges for Podman rootless
+# Runner user
 RUN useradd -m -s /bin/bash runner && \
-    echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner && \
-    echo 'runner:100000:65536' >> /etc/subuid && \
-    echo 'runner:100000:65536' >> /etc/subgid
+    echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner
 
 # GitHub Actions runner
 ARG RUNNER_VERSION=2.332.0
@@ -62,8 +60,8 @@ RUN systemctl enable systemd-networkd systemd-resolved && \
     systemctl disable motd-news.timer 2>/dev/null || true && \
     systemctl mask systemd-timesyncd.service 2>/dev/null || true
 
-# Podman: symlink docker → podman for GitHub Actions runner compatibility
-RUN ln -sf /usr/bin/podman /usr/bin/docker
+# Podman: wrapper script at /usr/bin/docker runs podman as root (avoids rootless user namespace issues)
+RUN printf '#!/bin/sh\nexec sudo /usr/bin/podman "$@"\n' > /usr/bin/docker && chmod +x /usr/bin/docker
 
 # Podman config: DNS, cgroup manager, runtime, and Docker Hub registry
 RUN mkdir -p /etc/containers && \

@@ -804,31 +804,18 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
     )
     .await?;
 
-    // Podman rootless: subordinate UID/GID ranges for user namespace mapping.
-    // Without these, pulling images with different UIDs (e.g. postgres runs as
-    // uid 999) fails with "lchown: invalid argument".
-    let subuid = format!("{}/etc/subuid", mount_dir);
-    let subgid = format!("{}/etc/subgid", mount_dir);
-    // Append runner entry (file may already have root entry)
-    let runner_sub = "runner:100000:65536\n";
-    let append = |path: &str, entry: &str| {
-        let existing = std::fs::read_to_string(path).unwrap_or_default();
-        if !existing.contains("runner:") {
-            std::fs::write(path, format!("{}{}", existing, entry)).ok();
-        }
-    };
-    append(&subuid, runner_sub);
-    append(&subgid, runner_sub);
-
-    // Podman: replace /usr/bin/docker with symlink to podman.
+    // Podman: create a wrapper at /usr/bin/docker that runs podman as root.
     // GitHub Actions runner calls /usr/bin/docker by full path.
-    let _ = chroot_command(
-        mount_dir,
-        "ln",
-        &["-sf", "/usr/bin/podman", "/usr/bin/docker"],
+    // Running rootful avoids user namespace issues inside Firecracker VMs
+    // (subuid/subgid + newuidmap complexity). VMs are ephemeral so rootful is fine.
+    let docker_wrapper = format!("{}/usr/bin/docker", mount_dir);
+    let _ = tokio::fs::remove_file(&docker_wrapper).await;
+    tokio::fs::write(
+        &docker_wrapper,
+        "#!/bin/sh\nexec sudo /usr/bin/podman \"$@\"\n",
     )
-    .status()
-    .await;
+    .await?;
+    set_executable(&docker_wrapper)?;
 
     // Podman configuration for container networking and Docker Hub compatibility
     let containers_dir = format!("{}/etc/containers", mount_dir);
