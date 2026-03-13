@@ -1159,10 +1159,9 @@ cat > /etc/containers/storage.conf <<STOR
 [storage]
 driver = "overlay"
 graphroot = "/overlay-data/containers"
-
-[storage.options.overlay]
-mount_program = "/usr/bin/fuse-overlayfs"
+runroot = "/run/containers/storage"
 STOR
+mkdir -p /run/containers/storage
 
 # Write /etc/hosts to fix "unable to resolve host" warnings
 cat > /etc/hosts <<HOSTS
