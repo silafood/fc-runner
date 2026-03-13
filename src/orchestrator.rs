@@ -608,21 +608,31 @@ impl Orchestrator {
             // Check if VSOCK already sent the early replacement signal
             let early_signaled = early_handle.await.unwrap_or(false);
 
-            // Clean up offline runners left by this VM
-            if github.is_org_mode() {
-                github.remove_org_offline_runners().await;
-            } else {
-                github.remove_offline_runners(&repo).await;
-            }
-
+            // Delete this specific runner from GitHub (targeted, not a full scan)
             match &result {
-                Ok(()) => {
+                Ok(vm_result) => {
                     metrics::JOBS_COMPLETED.with_label_values(&[&repo]).inc();
-                    tracing::info!(slot, repo = %repo, "warm pool VM completed job successfully");
+                    tracing::info!(
+                        slot,
+                        repo = %repo,
+                        runner_name = %vm_result.runner_name,
+                        "warm pool VM completed, deleting runner"
+                    );
+                    if github.is_org_mode() {
+                        github.delete_org_runner_by_name(&vm_result.runner_name).await;
+                    } else {
+                        github.delete_runner_by_name(&repo, &vm_result.runner_name).await;
+                    }
                 }
                 Err(e) => {
                     metrics::JOBS_FAILED.with_label_values(&[&repo]).inc();
                     tracing::error!(slot, repo = %repo, error = ?e, "warm pool VM failed");
+                    // Fall back to scanning for offline runners since we don't have the name
+                    if github.is_org_mode() {
+                        github.remove_org_offline_runners().await;
+                    } else {
+                        github.remove_offline_runners(&repo).await;
+                    }
                 }
             }
 
@@ -691,6 +701,11 @@ async fn run_jit_job(
     vm.execute(&env_content).await
 }
 
+/// Result of running a warm pool VM: the runner name registered on GitHub.
+struct WarmVmResult {
+    runner_name: String,
+}
+
 async fn run_warm_vm(
     config: Arc<AppConfig>,
     github: Arc<GitHubClient>,
@@ -698,7 +713,7 @@ async fn run_warm_vm(
     repo: &str,
     cancel: CancellationToken,
     vsock_notify: Option<mpsc::Sender<crate::vsock::JobDoneNotification>>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<WarmVmResult> {
     let is_org = github.is_org_mode();
 
     let (reg_token, registration_url) = if is_org {
@@ -739,5 +754,6 @@ async fn run_warm_vm(
         "RUNNER_MODE=register\nRUNNER_TOKEN={}\nREPO_URL={}\nRUNNER_NAME={}\nVM_ID={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\nEPHEMERAL={}\n",
         reg_token, registration_url, runner_name, vm.vm_id, vm.vm_id, ephemeral
     );
-    vm.execute_with_notify(&env_content, vsock_notify).await
+    vm.execute_with_notify(&env_content, vsock_notify).await?;
+    Ok(WarmVmResult { runner_name })
 }
