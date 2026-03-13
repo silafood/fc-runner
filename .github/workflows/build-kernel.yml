@@ -7,13 +7,13 @@ on:
       - 'guest_configs/microvm-kernel-ci-x86_64-6.1.config'
   workflow_dispatch:
     inputs:
-      kernel_version:
-        description: 'Kernel version (e.g. 6.1.102)'
+      kernel_tag:
+        description: 'Amazon Linux microVM kernel tag (e.g. microvm-kernel-6.1.164-23.303.amzn2023)'
         required: false
-        default: '6.1.102'
+        default: 'microvm-kernel-6.1.164-23.303.amzn2023'
 
 env:
-  KERNEL_VERSION: ${{ github.event.inputs.kernel_version || '6.1.102' }}
+  KERNEL_TAG: ${{ github.event.inputs.kernel_tag || 'microvm-kernel-6.1.164-23.303.amzn2023' }}
   REGISTRY: ghcr.io
   PACKAGE_NAME: ${{ github.repository_owner }}/fc-runner-kernel
 
@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   build-kernel:
-    name: Build vmlinux ${{ github.event.inputs.kernel_version || '6.1.102' }}
+    name: Build vmlinux from Amazon Linux kernel
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -33,26 +33,30 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential libncurses-dev bison flex \
-            libssl-dev libelf-dev bc wget
+            libssl-dev libelf-dev bc git
 
-      - name: Download kernel source
+      - name: Clone Amazon Linux kernel source
         run: |
-          wget -q https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VERSION}.tar.xz
-          tar -xf linux-${KERNEL_VERSION}.tar.xz
+          git clone --depth 1 --branch ${KERNEL_TAG} \
+            https://github.com/amazonlinux/linux.git linux-amzn
 
       - name: Apply Firecracker kernel config
-        working-directory: linux-${{ env.KERNEL_VERSION }}
+        working-directory: linux-amzn
         run: |
           cp $GITHUB_WORKSPACE/guest_configs/microvm-kernel-ci-x86_64-6.1.config .config
+          cp .config .config.orig
           make olddefconfig
+          # Show any configs that changed (helps debug CI vs local differences)
+          diff .config.orig .config || true
 
       - name: Build vmlinux
-        working-directory: linux-${{ env.KERNEL_VERSION }}
+        working-directory: linux-amzn
         run: make vmlinux -j$(nproc)
 
       - name: Verify kernel
-        working-directory: linux-${{ env.KERNEL_VERSION }}
+        working-directory: linux-amzn
         run: |
+          ls -lh vmlinux
           file vmlinux | grep -q "ELF 64-bit" || { echo "ERROR: not a valid ELF binary"; exit 1; }
 
           # Verify required configs are compiled in
@@ -61,15 +65,25 @@ jobs:
           grep -q "CONFIG_SQUASHFS_ZSTD=y" .config || MISSING="$MISSING CONFIG_SQUASHFS_ZSTD"
           grep -q "CONFIG_OVERLAY_FS=y" .config || MISSING="$MISSING CONFIG_OVERLAY_FS"
           grep -q "CONFIG_VIRTIO=y" .config || MISSING="$MISSING CONFIG_VIRTIO"
+          grep -q "CONFIG_VIRTIO_BLK=y" .config || MISSING="$MISSING CONFIG_VIRTIO_BLK"
+          grep -q "CONFIG_VIRTIO_MMIO=y" .config || MISSING="$MISSING CONFIG_VIRTIO_MMIO"
+          grep -q "CONFIG_VIRTIO_NET=y" .config || MISSING="$MISSING CONFIG_VIRTIO_NET"
           grep -q "CONFIG_EXT4_FS=y" .config || MISSING="$MISSING CONFIG_EXT4_FS"
+          grep -q "CONFIG_VETH=y" .config || MISSING="$MISSING CONFIG_VETH"
+          grep -q "CONFIG_BRIDGE=y" .config || MISSING="$MISSING CONFIG_BRIDGE"
+          grep -q "CONFIG_IP_NF_IPTABLES=y" .config || MISSING="$MISSING CONFIG_IP_NF_IPTABLES"
+          grep -q "CONFIG_IP_NF_NAT=y" .config || MISSING="$MISSING CONFIG_IP_NF_NAT"
+          grep -q "CONFIG_ACPI=y" .config || MISSING="$MISSING CONFIG_ACPI"
+          grep -q "CONFIG_NETFILTER_XT_MATCH_COMMENT=y" .config || MISSING="$MISSING CONFIG_NETFILTER_XT_MATCH_COMMENT"
+          grep -q "CONFIG_NETFILTER_XT_MATCH_MULTIPORT=y" .config || MISSING="$MISSING CONFIG_NETFILTER_XT_MATCH_MULTIPORT"
+          grep -q "CONFIG_NETFILTER_XT_MARK=y" .config || MISSING="$MISSING CONFIG_NETFILTER_XT_MARK"
+          grep -q "CONFIG_NETFILTER_XT_TARGET_MARK=y" .config || MISSING="$MISSING CONFIG_NETFILTER_XT_TARGET_MARK"
 
           if [ -n "$MISSING" ]; then
             echo "ERROR: kernel config missing required options:$MISSING"
             exit 1
           fi
-
           echo "Kernel verified: all required configs present"
-          ls -lh vmlinux
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -80,9 +94,11 @@ jobs:
 
       - name: Push kernel to GHCR as OCI artifact
         run: |
-          cd linux-${KERNEL_VERSION}
+          cd linux-amzn
           COMMIT_SHA="${GITHUB_SHA::7}"
-          TAG="${KERNEL_VERSION}-${COMMIT_SHA}"
+          # Extract kernel version from Amazon tag (e.g. microvm-kernel-6.1.164-23.303.amzn2023 → 6.1.164)
+          KVER=$(echo "${KERNEL_TAG}" | sed 's/microvm-kernel-//' | cut -d- -f1)
+          TAG="${KVER}-${COMMIT_SHA}"
 
           # Push as OCI artifact using oras
           curl -sLO https://github.com/oras-project/oras/releases/download/v1.2.2/oras_1.2.2_linux_amd64.tar.gz
@@ -104,21 +120,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cd linux-${KERNEL_VERSION}
-          cp vmlinux vmlinux-${KERNEL_VERSION}
+          cd linux-amzn
+          KVER=$(echo "${KERNEL_TAG}" | sed 's/microvm-kernel-//' | cut -d- -f1)
+          cp vmlinux "vmlinux-${KVER}"
 
           # Upload to latest release if one exists, otherwise just artifact
           LATEST_RELEASE=$(gh release view --json tagName -q .tagName 2>/dev/null || echo "")
           if [ -n "$LATEST_RELEASE" ]; then
             # Delete old kernel asset if present, then upload new one
-            gh release delete-asset "$LATEST_RELEASE" "vmlinux-${KERNEL_VERSION}" --yes 2>/dev/null || true
-            gh release upload "$LATEST_RELEASE" "vmlinux-${KERNEL_VERSION}" --clobber
-            echo "Uploaded vmlinux-${KERNEL_VERSION} to release $LATEST_RELEASE"
+            gh release delete-asset "$LATEST_RELEASE" "vmlinux-${KVER}" --yes 2>/dev/null || true
+            gh release upload "$LATEST_RELEASE" "vmlinux-${KVER}" --clobber
+            echo "Uploaded vmlinux-${KVER} to release $LATEST_RELEASE"
           fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vmlinux-${{ env.KERNEL_VERSION }}
-          path: linux-${{ env.KERNEL_VERSION }}/vmlinux
+          name: vmlinux
+          path: linux-amzn/vmlinux
           retention-days: 90
