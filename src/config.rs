@@ -185,6 +185,18 @@ pub struct FirecrackerConfig {
     /// Only used when overlay_rootfs = true.
     #[serde(default = "default_overlay_size_mib")]
     pub overlay_size_mib: u32,
+    /// Enable a persistent cache volume per VM slot.
+    /// Each slot gets a dedicated ext4 image that persists across VM lifecycles,
+    /// mounted at /cache in the guest. Useful for cargo registry, tool caches, etc.
+    #[serde(default)]
+    pub cache_enabled: bool,
+    /// Size of the per-slot cache image in MiB (default: 2048 = 2 GiB).
+    /// Created as sparse files — actual disk usage grows as data is written.
+    #[serde(default = "default_cache_size_mib")]
+    pub cache_size_mib: u32,
+    /// Directory to store persistent cache images (default: /var/lib/fc-runner/cache).
+    #[serde(default = "default_cache_dir")]
+    pub cache_dir: String,
 }
 
 fn default_secret_injection() -> String {
@@ -201,6 +213,14 @@ fn default_overlay_rootfs() -> bool {
 
 fn default_overlay_size_mib() -> u32 {
     512
+}
+
+fn default_cache_size_mib() -> u32 {
+    2048
+}
+
+fn default_cache_dir() -> String {
+    "/var/lib/fc-runner/cache".into()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -739,6 +759,40 @@ work_dir = "/tmp/fc-runner-test"
 "#;
         let config = AppConfig::from_str(toml).unwrap();
         assert_eq!(config.firecracker.overlay_size_mib, 2048);
+    }
+
+    #[test]
+    fn parse_cache_config() {
+        let toml = r#"
+[github]
+token = "ghp_test1234567890abcdefghijklmnopqrs"
+owner = "test-org"
+repo = "r"
+
+[firecracker]
+binary_path = "/usr/local/bin/firecracker"
+kernel_path = "/opt/fc-runner/vmlinux.bin"
+rootfs_golden = "/opt/fc-runner/rootfs.ext4"
+cache_enabled = true
+cache_size_mib = 4096
+cache_dir = "/mnt/fast-ssd/cache"
+
+[runner]
+work_dir = "/tmp/fc-runner-test"
+"#;
+        let config = AppConfig::from_str(toml).unwrap();
+        assert!(config.firecracker.cache_enabled);
+        assert_eq!(config.firecracker.cache_size_mib, 4096);
+        assert_eq!(config.firecracker.cache_dir, "/mnt/fast-ssd/cache");
+    }
+
+    #[test]
+    fn cache_defaults() {
+        let toml = minimal_config(r#"repo = "r""#);
+        let config = AppConfig::from_str(&toml).unwrap();
+        assert!(!config.firecracker.cache_enabled);
+        assert_eq!(config.firecracker.cache_size_mib, 2048);
+        assert_eq!(config.firecracker.cache_dir, "/var/lib/fc-runner/cache");
     }
 
     #[test]

@@ -1182,6 +1182,50 @@ runroot = "/run/containers/storage"
 STOR
 mkdir -p /run/containers/storage
 
+# Mount persistent cache volume if cache_dev is set in kernel cmdline
+for arg in $(cat /rom/proc/cmdline 2>/dev/null) $(cat /proc/cmdline 2>/dev/null); do
+    key="${arg%%=*}"
+    val="${arg#*=}"
+    case "$key" in
+        cache_dev) cache_dev="$val" ;;
+    esac
+done
+
+if [ -n "$cache_dev" ] && [ -b "/dev/$cache_dev" ]; then
+    echo "overlay-init: mounting cache volume /dev/$cache_dev at /cache"
+    mkdir -p /cache
+    /bin/mount -t ext4 -o noatime "/dev/$cache_dev" /cache
+
+    # Create cache directory structure
+    mkdir -p /cache/cargo/registry /cache/cargo/git /cache/cargo/bin
+    mkdir -p /cache/tool-cache
+
+    # Symlink common cache paths for the runner user
+    RUNNER_HOME="/home/runner"
+    if [ -d "$RUNNER_HOME" ]; then
+        mkdir -p "$RUNNER_HOME/.cargo"
+        # Only create symlinks if targets don't exist yet (first boot after overlay wipe)
+        for dir in registry git bin; do
+            if [ ! -L "$RUNNER_HOME/.cargo/$dir" ]; then
+                rm -rf "$RUNNER_HOME/.cargo/$dir"
+                ln -s "/cache/cargo/$dir" "$RUNNER_HOME/.cargo/$dir"
+            fi
+        done
+        chown -h runner:runner "$RUNNER_HOME/.cargo" "$RUNNER_HOME/.cargo/registry" \
+            "$RUNNER_HOME/.cargo/git" "$RUNNER_HOME/.cargo/bin" 2>/dev/null
+    fi
+
+    # Set RUNNER_TOOL_CACHE to persistent cache
+    mkdir -p /cache/tool-cache
+    echo "RUNNER_TOOL_CACHE=/cache/tool-cache" >> /etc/environment
+
+    echo "overlay-init: cache volume mounted at /cache"
+else
+    if [ -n "$cache_dev" ]; then
+        echo "overlay-init: WARNING: cache device /dev/$cache_dev not found"
+    fi
+fi
+
 # Write /etc/hosts to fix "unable to resolve host" warnings
 cat > /etc/hosts <<HOSTS
 127.0.0.1 localhost localhost.localdomain

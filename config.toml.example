@@ -66,6 +66,16 @@ mem_size_mib = 2048
 # Set to false to fall back to cp --reflink (legacy mode).
 # overlay_rootfs = true
 # overlay_size_mib = 512  # Per-VM overlay device size in MiB
+# Persistent cache volume: each VM slot gets a dedicated ext4 image that
+# survives VM restarts. Mounted at /cache in the guest with symlinks for:
+#   ~/.cargo/registry  → /cache/cargo/registry
+#   ~/.cargo/git       → /cache/cargo/git
+#   ~/.cargo/bin       → /cache/cargo/bin
+#   $RUNNER_TOOL_CACHE → /cache/tool-cache
+# Images are sparse (2 GiB virtual, ~1 MiB actual on disk until data is written).
+# cache_enabled = true
+# cache_size_mib = 2048   # Per-slot cache image size in MiB
+# cache_dir = "/var/lib/fc-runner/cache"
 
 [runner]
 work_dir = "/var/lib/fc-runner/vms"
