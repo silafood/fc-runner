@@ -150,6 +150,40 @@ async fn put_mmds_raw(socket_path: &std::path::Path, json_body: &str) -> anyhow:
     Ok(())
 }
 
+/// Configure VSOCK via raw HTTP API, bypassing the SDK which incorrectly
+/// deserializes Firecracker's `{}` response as a unit struct.
+async fn put_vsock_raw(socket_path: &std::path::Path, json_body: &str) -> anyhow::Result<()> {
+    let mut stream = UnixStream::connect(socket_path)
+        .await
+        .with_context(|| format!("connecting to API socket: {}", socket_path.display()))?;
+
+    let request = format!(
+        "PUT /vsock HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        json_body.len(),
+        json_body
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .context("writing VSOCK PUT request")?;
+
+    let mut response = vec![0u8; 1024];
+    let n = stream
+        .read(&mut response)
+        .await
+        .context("reading VSOCK PUT response")?;
+    let response_str = String::from_utf8_lossy(&response[..n]);
+
+    if !response_str.contains("204") && !response_str.contains("200") {
+        anyhow::bail!(
+            "VSOCK PUT failed: {}",
+            response_str.lines().next().unwrap_or("")
+        );
+    }
+
+    Ok(())
+}
+
 pub struct MicroVm {
     pub vm_id: String,
     pub job_id: u64,
@@ -1192,19 +1226,18 @@ fi
             tracing::info!(vm_id = %self.vm_id, "MMDS metadata injected via SDK");
         }
 
-        // VSOCK device
+        // VSOCK device — use raw HTTP API instead of SDK because the SDK
+        // incorrectly deserializes Firecracker's `{}` response as unit struct.
         if self.fc_config.vsock_enabled {
             let cid = self.vsock_cid();
-            instance
-                .put_guest_vsock(&Vsock {
-                    guest_cid: cid,
-                    uds_path: PathBuf::from("vsock.sock"),
-                    vsock_id: None,
-                })
-                .await
-                .map_err(|e| anyhow::anyhow!("put_guest_vsock failed: {}", e))?;
-
-            tracing::info!(vm_id = %self.vm_id, cid, "VSOCK device configured via SDK");
+            let socket_path = self.api_socket_path();
+            let vsock_json = serde_json::json!({
+                "guest_cid": cid,
+                "uds_path": "vsock.sock"
+            })
+            .to_string();
+            put_vsock_raw(&socket_path, &vsock_json).await?;
+            tracing::info!(vm_id = %self.vm_id, cid, "VSOCK device configured");
         }
 
         Ok(())
