@@ -24,12 +24,16 @@ mod inner {
         const IFF_NO_PI: libc::c_short = 0x1000;
         const TUNSETIFF: libc::c_ulong = 0x400454ca;
 
-        let fd = open(c"/dev/net/tun", OFlag::O_RDWR, Mode::empty())
-            .context("opening /dev/net/tun")?;
+        let fd =
+            open(c"/dev/net/tun", OFlag::O_RDWR, Mode::empty()).context("opening /dev/net/tun")?;
 
         let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
         let name_bytes = name.as_bytes();
-        ensure!(name_bytes.len() < libc::IFNAMSIZ, "TAP name too long: {}", name);
+        ensure!(
+            name_bytes.len() < libc::IFNAMSIZ,
+            "TAP name too long: {}",
+            name
+        );
         unsafe {
             std::ptr::copy_nonoverlapping(
                 name_bytes.as_ptr(),
@@ -39,9 +43,14 @@ mod inner {
             ifr.ifr_ifru.ifru_flags = IFF_TAP | IFF_NO_PI;
         }
 
-        let ret = unsafe { libc::ioctl(fd.as_raw_fd(), TUNSETIFF as _, &ifr as *const libc::ifreq) };
+        let ret =
+            unsafe { libc::ioctl(fd.as_raw_fd(), TUNSETIFF as _, &ifr as *const libc::ifreq) };
         if ret < 0 {
-            anyhow::bail!("ioctl TUNSETIFF failed for {}: {}", name, std::io::Error::last_os_error());
+            anyhow::bail!(
+                "ioctl TUNSETIFF failed for {}: {}",
+                name,
+                std::io::Error::last_os_error()
+            );
         }
 
         // We must also set IFF_PERSIST so the TAP survives closing the fd.
@@ -49,7 +58,11 @@ mod inner {
         const TUNSETPERSIST: libc::c_ulong = 0x400454cb;
         let ret = unsafe { libc::ioctl(fd.as_raw_fd(), TUNSETPERSIST as _, 1 as libc::c_int) };
         if ret < 0 {
-            anyhow::bail!("ioctl TUNSETPERSIST failed for {}: {}", name, std::io::Error::last_os_error());
+            anyhow::bail!(
+                "ioctl TUNSETPERSIST failed for {}: {}",
+                name,
+                std::io::Error::last_os_error()
+            );
         }
 
         // Close fd — the TAP persists due to TUNSETPERSIST.
@@ -181,7 +194,13 @@ mod inner {
 
     pub async fn add_address_v4(name: &str, addr: Ipv4Addr, prefix_len: u8) -> anyhow::Result<()> {
         let status = Command::new("ip")
-            .args(["addr", "add", &format!("{}/{}", addr, prefix_len), "dev", name])
+            .args([
+                "addr",
+                "add",
+                &format!("{}/{}", addr, prefix_len),
+                "dev",
+                name,
+            ])
             .status()
             .await?;
         ensure!(status.success(), "ip addr add failed for {}", name);

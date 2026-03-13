@@ -1,4 +1,4 @@
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use std::os::unix::fs::MetadataExt;
@@ -249,11 +249,7 @@ fn default_runner_group_id() -> u64 {
 }
 
 fn default_labels() -> Vec<String> {
-    vec![
-        "self-hosted".into(),
-        "linux".into(),
-        "firecracker".into(),
-    ]
+    vec!["self-hosted".into(), "linux".into(), "firecracker".into()]
 }
 
 fn default_binary_path() -> String {
@@ -279,7 +275,6 @@ fn default_log_level() -> String {
 fn default_jailer_chroot_base() -> String {
     "/var/lib/fc-runner/jailer".into()
 }
-
 
 fn default_work_dir() -> String {
     "/var/lib/fc-runner/vms".into()
@@ -335,11 +330,7 @@ fn reject_symlink(label: &str, path: &Path) -> anyhow::Result<()> {
     if let Ok(meta) = std::fs::symlink_metadata(path)
         && meta.file_type().is_symlink()
     {
-        bail!(
-            "{} is a symlink (security risk): {}",
-            label,
-            path.display()
-        );
+        bail!("{} is a symlink (security risk): {}", label, path.display());
     }
     Ok(())
 }
@@ -348,8 +339,7 @@ impl AppConfig {
     /// Parse config from a TOML string (for testing).
     #[cfg(test)]
     pub fn from_str(content: &str) -> anyhow::Result<Self> {
-        let config: AppConfig =
-            toml::from_str(content).with_context(|| "parsing config TOML")?;
+        let config: AppConfig = toml::from_str(content).with_context(|| "parsing config TOML")?;
         Ok(config)
     }
 
@@ -364,15 +354,15 @@ impl AppConfig {
                 bail!(
                     "config file is world-readable (mode {:o}) — contains secrets!\n\
                      Fix with: chmod 600 {}",
-                    mode, path
+                    mode,
+                    path
                 );
             }
         }
 
         let content =
             std::fs::read_to_string(path).with_context(|| format!("reading config: {}", path))?;
-        let config: AppConfig =
-            toml::from_str(&content).with_context(|| "parsing config TOML")?;
+        let config: AppConfig = toml::from_str(&content).with_context(|| "parsing config TOML")?;
         config.validate()?;
         Ok(config)
     }
@@ -386,9 +376,7 @@ impl AppConfig {
             .unwrap_or(false);
         let has_app = self.github.app.is_some();
         if !has_token && !has_app {
-            bail!(
-                "either github.token or [github.app] must be configured"
-            );
+            bail!("either github.token or [github.app] must be configured");
         }
         if let Some(app) = &self.github.app {
             let key_path = Path::new(&app.private_key_path);
@@ -404,7 +392,9 @@ impl AppConfig {
             bail!("github.owner must not be empty");
         }
         if self.github.all_repos().is_empty() && self.github.organization.is_none() {
-            bail!("at least one repo must be configured (set github.repo or github.repos), or set github.organization for org-level runners");
+            bail!(
+                "at least one repo must be configured (set github.repo or github.repos), or set github.organization for org-level runners"
+            );
         }
         if self.firecracker.vcpu_count == 0 {
             bail!("firecracker.vcpu_count must be > 0");
@@ -417,9 +407,7 @@ impl AppConfig {
         }
 
         // kernel_path and rootfs_golden are auto-provisioned by setup::ensure_vm_assets
-        let required_paths = [
-            ("firecracker.binary_path", &self.firecracker.binary_path),
-        ];
+        let required_paths = [("firecracker.binary_path", &self.firecracker.binary_path)];
         for (name, path) in required_paths {
             let p = Path::new(path);
             reject_symlink(name, p)?;
@@ -507,7 +495,10 @@ work_dir = "/tmp/fc-runner-test"
     fn parse_multi_repo() {
         let toml = minimal_config(r#"repos = ["repo-a", "repo-b", "repo-c"]"#);
         let config = AppConfig::from_str(&toml).unwrap();
-        assert_eq!(config.github.all_repos(), vec!["repo-a", "repo-b", "repo-c"]);
+        assert_eq!(
+            config.github.all_repos(),
+            vec!["repo-a", "repo-b", "repo-c"]
+        );
     }
 
     #[test]
@@ -551,10 +542,12 @@ repos = ["repo-a", "repo-b"]
 
     #[test]
     fn custom_labels() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
 repo = "r"
 labels = ["self-hosted", "arm64"]
-"#);
+"#,
+        );
         let config = AppConfig::from_str(&toml).unwrap();
         assert_eq!(config.github.labels, vec!["self-hosted", "arm64"]);
     }
@@ -823,10 +816,12 @@ work_dir = "/tmp/fc-runner-test"
         let config = AppConfig::from_str(toml).unwrap();
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("github.token or [github.app]"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("github.token or [github.app]")
+        );
     }
 
     #[test]
@@ -916,10 +911,12 @@ max_concurrent_jobs = 0
         let config = AppConfig::from_str(toml).unwrap();
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("max_concurrent_jobs"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("max_concurrent_jobs")
+        );
     }
 
     #[test]

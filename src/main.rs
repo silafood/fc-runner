@@ -104,7 +104,10 @@ fn run_validate(config_path: &str) -> anyhow::Result<()> {
                 "  max_concurrent_jobs: {}",
                 config.runner.max_concurrent_jobs
             );
-            println!("  vcpu: {}, mem: {} MiB", config.firecracker.vcpu_count, config.firecracker.mem_size_mib);
+            println!(
+                "  vcpu: {}, mem: {} MiB",
+                config.firecracker.vcpu_count, config.firecracker.mem_size_mib
+            );
             if !config.pool.is_empty() {
                 println!("  pools:");
                 for p in &config.pool {
@@ -212,7 +215,7 @@ async fn run_logs(endpoint: &str, vm_id: &str, follow: bool) -> anyhow::Result<(
 }
 
 async fn shutdown_signal() {
-    use tokio::signal::unix::{signal, SignalKind};
+    use tokio::signal::unix::{SignalKind, signal};
 
     let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
     let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
