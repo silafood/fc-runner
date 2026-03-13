@@ -5,6 +5,7 @@ fc-runner is a Rust-based orchestrator that polls GitHub for queued workflow job
 ## Table of Contents
 
 - [Architecture](architecture.md)
+- [Guest Kernel Configuration](guest-kernel-config.md)
 - [Setup Guide](setup.md)
 - [Configuration Reference](configuration.md)
 - [Troubleshooting](troubleshooting.md)

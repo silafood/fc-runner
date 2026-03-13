@@ -65,12 +65,15 @@ fc-runner/
 │   ├── fetch-mmds-env.sh            # Guest-side MMDS metadata fetch script
 │   └── microvm-kernel-ci-*.config   # Firecracker kernel configs
 ├── docs/
-│   ├── architecture.md   # System design and module overview
-│   ├── setup.md          # Installation guide
-│   ├── configuration.md  # Config reference
+│   ├── architecture.md          # System design and module overview
+│   ├── guest-kernel-config.md   # Guest kernel configuration reference
+│   ├── setup.md                 # Installation guide
+│   ├── configuration.md         # Config reference
 │   └── troubleshooting.md
 ├── .github/workflows/
-│   └── release.yml       # CI: build binary + kernel + rootfs, publish release
+│   ├── release.yml       # CI: build binary + kernel + rootfs, publish release
+│   ├── build-kernel.yml  # CI: build kernel from Amazon Linux source, push to GHCR
+│   └── docker-image.yml  # CI: build runner OCI image, push to GHCR
 ├── Cargo.toml
 ├── config.toml.example   # Annotated config — copy to /etc/fc-runner/config.toml
 ├── fc-runner.service     # systemd unit
@@ -138,7 +141,7 @@ setup.rs (automatic at first startup)
   └─ Converts qcow2 → raw via qcow2-rs (pure Rust)
   └─ Finds ext4 partition via bootsector crate + magic check (0xEF53)
   └─ Extracts + expands ext4 image
-  └─ Mounts, installs packages via chroot: git, curl, jq, actions-runner v2.332.0
+  └─ Mounts, installs packages via chroot: git, curl, jq, podman, actions-runner v2.332.0
   └─ Creates runner user, entrypoint, systemd units
   └─ Shrinks to min + headroom via e2fsck + resize2fs
   └─ Produces runner-rootfs-golden.ext4
@@ -168,12 +171,28 @@ Each VM gets its own TAP device (`tap-fc0` through `tap-fc<N>`) created via
 (`--clamp-mss-to-pmtu`) prevents PMTU black holes for large downloads.
 
 ### Guest kernel
-Linux 6.1.102, compiled from source using Firecracker's minimal config
-(`guest_configs/microvm-kernel-ci-x86_64-6.1.config`). Required configs:
-`CONFIG_VIRTIO=y`, `CONFIG_EXT4_FS=y`, `CONFIG_KVM_GUEST=y`. Do not replace it
-with a distribution kernel — it will not boot in Firecracker without recompilation.
+Linux 6.1.164, built from [Amazon Linux kernel source](https://github.com/amazonlinux/linux)
+(tag `microvm-kernel-6.1.164-23.303.amzn2023`) using Firecracker's minimal config
+(`guest_configs/microvm-kernel-ci-x86_64-6.1.config`). The Amazon Linux kernel has
+ACPI/VirtIO patches that allow booting without `CONFIG_PCI` (mainline kernels
+require PCI for ACPI initialization).
 
-Boot args: `console=ttyS0 reboot=k panic=1 pci=off fsck.mode=skip quiet loglevel=3`
+Key config groups:
+- **Base Firecracker**: `CONFIG_VIRTIO=y`, `CONFIG_EXT4_FS=y`, `CONFIG_KVM_GUEST=y`,
+  `CONFIG_ACPI=y`
+- **Container networking (nf_tables)**: `CONFIG_NF_TABLES=y` + 19 NFT modules
+  (`NFT_NAT`, `NFT_MASQ`, `NFT_CT`, `NFT_COMPAT`, `NFT_FIB_*`, `NFT_REJECT_*`, etc.)
+  Required because Ubuntu 24.04 defaults to `iptables-nft`, which needs kernel
+  nf_tables support for netavark (Podman's network backend) to function.
+- **xtables extensions**: `NETFILTER_XT_MARK`, `NETFILTER_XT_TARGET_MARK`,
+  `NETFILTER_XT_MATCH_COMMENT`, `NETFILTER_XT_MATCH_MULTIPORT`
+
+See `docs/guest-kernel-config.md` for the full kernel configuration reference.
+
+Do not replace the kernel with a distribution kernel — it will not boot in
+Firecracker without recompilation.
+
+Boot args: `console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda fsck.mode=skip quiet loglevel=3`
 
 ### Security: jailer
 `jailer` chroots the VMM process, applies seccomp-BPF, and drops to a non-root
