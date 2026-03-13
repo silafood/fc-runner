@@ -64,6 +64,10 @@ RUN systemctl enable systemd-networkd systemd-resolved && \
     systemctl mask podman-auto-update.timer 2>/dev/null || true && \
     systemctl mask podman-clean-transient.service 2>/dev/null || true
 
+# Switch to iptables-legacy — netavark cannot parse iptables-nft version string
+RUN update-alternatives --set iptables /usr/sbin/iptables-legacy && \
+    update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+
 # Podman: wrapper script at /usr/bin/docker runs podman as root (avoids rootless user namespace issues)
 RUN printf '#!/bin/sh\nexec sudo /usr/bin/podman "$@"\n' > /usr/bin/docker && chmod +x /usr/bin/docker
 
