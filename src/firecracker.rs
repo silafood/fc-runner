@@ -1471,6 +1471,7 @@ mod tests {
             jailer_uid: None,
             jailer_gid: None,
             jailer_chroot_base: "/var/lib/fc-runner/jailer".to_string(),
+            kernel_url: None,
             cloud_img_url: None,
             secret_injection: "mmds".to_string(),
             vsock_enabled: false,
