@@ -422,6 +422,91 @@ impl GitHubClient {
         Ok(())
     }
 
+    /// Delete a specific runner by name. Finds the runner in the list and deletes it.
+    /// Used after a VM shuts down to clean up its specific runner registration.
+    pub async fn delete_runner_by_name(&self, repo: &str, runner_name: &str) {
+        match self.list_runners(repo).await {
+            Ok(runners) => {
+                for runner in runners {
+                    if runner.name == runner_name {
+                        tracing::info!(
+                            runner_id = runner.id,
+                            runner_name = %runner.name,
+                            repo = %repo,
+                            "deleting runner by name"
+                        );
+                        if let Err(e) = self.delete_runner(repo, runner.id).await {
+                            tracing::warn!(
+                                runner_name = %runner_name,
+                                error = %e,
+                                "failed to delete runner by name"
+                            );
+                        }
+                        return;
+                    }
+                }
+                tracing::debug!(runner_name = %runner_name, repo = %repo, "runner not found for deletion (may already be removed)");
+            }
+            Err(e) => {
+                tracing::warn!(repo = %repo, error = %e, "failed to list runners for targeted cleanup");
+            }
+        }
+    }
+
+    /// Delete a specific org-level runner by name.
+    pub async fn delete_org_runner_by_name(&self, runner_name: &str) {
+        match self.list_org_runners().await {
+            Ok(runners) => {
+                for runner in runners {
+                    if runner.name == runner_name {
+                        let org_url = match self.org_url() {
+                            Some(url) => url,
+                            None => return,
+                        };
+                        let org = self.config.organization.as_deref().unwrap_or("unknown");
+                        tracing::info!(
+                            runner_id = runner.id,
+                            runner_name = %runner.name,
+                            org = %org,
+                            "deleting org runner by name"
+                        );
+                        let del_url = format!("{}/actions/runners/{}", org_url, runner.id);
+                        metrics::GITHUB_API_CALLS
+                            .with_label_values(&["delete_org_runner"])
+                            .inc();
+                        match self.request(reqwest::Method::DELETE, &del_url).await {
+                            Ok(req) => match req.send().await {
+                                Ok(resp) => {
+                                    if !resp.status().is_success() {
+                                        let status = resp.status();
+                                        let body = resp.text().await.unwrap_or_default();
+                                        tracing::warn!(
+                                            runner_name = %runner_name,
+                                            status = %status,
+                                            body = %body,
+                                            "failed to delete org runner by name (HTTP error)"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(runner_name = %runner_name, error = %e, "failed to send delete request");
+                                }
+                            },
+                            Err(e) => {
+                                tracing::warn!(runner_name = %runner_name, error = %e, "failed to build delete request");
+                            }
+                        }
+                        return;
+                    }
+                }
+                tracing::debug!(runner_name = %runner_name, "org runner not found for deletion (may already be removed)");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to list org runners for targeted cleanup");
+            }
+        }
+    }
+
     /// Remove offline runners whose names start with "fc-" (left over from completed/crashed VMs).
     pub async fn remove_offline_runners(&self, repo: &str) {
         match self.list_runners(repo).await {
