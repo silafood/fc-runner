@@ -814,7 +814,7 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
     .status()
     .await;
 
-    // Podman containers.conf: configure DNS for container networking
+    // Podman configuration for container networking and Docker Hub compatibility
     let containers_dir = format!("{}/etc/containers", mount_dir);
     tokio::fs::create_dir_all(&containers_dir).await?;
     tokio::fs::write(
@@ -823,7 +823,14 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
          dns_servers = [\"8.8.8.8\", \"1.1.1.1\"]\n\
          \n\
          [engine]\n\
+         cgroup_manager = \"cgroupfs\"\n\
          runtime = \"crun\"\n",
+    )
+    .await?;
+    // Allow short image names like "postgres:16" to resolve to Docker Hub
+    tokio::fs::write(
+        format!("{}/registries.conf", containers_dir),
+        "unqualified-search-registries = [\"docker.io\"]\n",
     )
     .await?;
 
