@@ -111,6 +111,11 @@ jobs:
           grep -q "CONFIG_NETFILTER_XT_MATCH_MULTIPORT=y" .config || MISSING="$MISSING CONFIG_NETFILTER_XT_MATCH_MULTIPORT"
           grep -q "CONFIG_NETFILTER_XT_MARK=y" .config || MISSING="$MISSING CONFIG_NETFILTER_XT_MARK"
           grep -q "CONFIG_NETFILTER_XT_TARGET_MARK=y" .config || MISSING="$MISSING CONFIG_NETFILTER_XT_TARGET_MARK"
+          grep -q "CONFIG_NF_TABLES=y" .config || MISSING="$MISSING CONFIG_NF_TABLES"
+          grep -q "CONFIG_NFT_NAT=y" .config || MISSING="$MISSING CONFIG_NFT_NAT"
+          grep -q "CONFIG_NFT_MASQ=y" .config || MISSING="$MISSING CONFIG_NFT_MASQ"
+          grep -q "CONFIG_NFT_CT=y" .config || MISSING="$MISSING CONFIG_NFT_CT"
+          grep -q "CONFIG_NFT_COMPAT=y" .config || MISSING="$MISSING CONFIG_NFT_COMPAT"
 
           if [ -n "$MISSING" ]; then
             echo "ERROR: kernel config missing required options:$MISSING"

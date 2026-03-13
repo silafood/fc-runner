@@ -85,7 +85,35 @@ required by fc-runner for in-guest container networking with Podman/netavark.
 GitHub Actions workflows use `services:` (e.g., `postgres:16`) which require
 functional container port mapping inside the VM.
 
-### Netfilter / iptables
+### nf_tables (required for iptables-nft / netavark)
+
+Ubuntu 24.04 defaults to `iptables-nft`, which requires the nf_tables kernel
+subsystem. Without it, netavark fails with `netavark: invalid version number`.
+
+| Config | Purpose |
+|--------|---------|
+| `CONFIG_NF_TABLES=y` | nf_tables engine — **fc-runner addition** |
+| `CONFIG_NF_TABLES_INET=y` | inet family (combined IPv4/IPv6) — **fc-runner addition** |
+| `CONFIG_NF_TABLES_IPV4=y` | IPv4 hooks — **fc-runner addition** |
+| `CONFIG_NF_TABLES_IPV6=y` | IPv6 hooks — **fc-runner addition** |
+| `CONFIG_NF_CT_NETLINK=y` | Conntrack netlink (nft userspace) — **fc-runner addition** |
+| `CONFIG_NFT_CT=y` | Connection tracking match — **fc-runner addition** |
+| `CONFIG_NFT_NAT=y` | NAT (dnat/snat for port mapping) — **fc-runner addition** |
+| `CONFIG_NFT_MASQ=y` | Masquerade (outbound traffic) — **fc-runner addition** |
+| `CONFIG_NFT_FIB=y` | FIB routing lookup — **fc-runner addition** |
+| `CONFIG_NFT_FIB_IPV4=y` | IPv4 FIB — **fc-runner addition** |
+| `CONFIG_NFT_FIB_IPV6=y` | IPv6 FIB — **fc-runner addition** |
+| `CONFIG_NFT_FIB_INET=y` | inet FIB delegation — **fc-runner addition** |
+| `CONFIG_NFT_REJECT=y` | Reject expression — **fc-runner addition** |
+| `CONFIG_NFT_REJECT_IPV4=y` | IPv4 reject — **fc-runner addition** |
+| `CONFIG_NFT_REJECT_IPV6=y` | IPv6 reject — **fc-runner addition** |
+| `CONFIG_NFT_REJECT_INET=y` | inet reject — **fc-runner addition** |
+| `CONFIG_NFT_COMPAT=y` | xtables compatibility layer — **fc-runner addition** |
+| `CONFIG_NFT_COUNTER=y` | Packet/byte counters — **fc-runner addition** |
+| `CONFIG_NFT_LOG=y` | Logging expression — **fc-runner addition** |
+| `CONFIG_NFT_LIMIT=y` | Rate limiting — **fc-runner addition** |
+
+### Netfilter / iptables (xtables)
 
 | Config | Purpose |
 |--------|---------|
@@ -96,16 +124,17 @@ functional container port mapping inside the VM.
 | `CONFIG_NF_NAT_MASQUERADE=y` | Masquerade helper (in official config) |
 | `CONFIG_NF_NAT_REDIRECT=y` | Port redirect (in official config) |
 | `CONFIG_NETFILTER_XT_MARK=y` | Packet mark matching — **fc-runner addition** |
-| `CONFIG_NETFILTER_XT_TARGET_MARK=y` | MARK target (`-j MARK --set-xmark`) — **fc-runner addition** |
-| `CONFIG_NETFILTER_XT_MATCH_COMMENT=y` | Rule comments (`-m comment`) — **fc-runner addition** |
+| `CONFIG_NETFILTER_XT_TARGET_MARK=y` | MARK target — **fc-runner addition** |
+| `CONFIG_NETFILTER_XT_MATCH_COMMENT=y` | Rule comments — **fc-runner addition** |
 | `CONFIG_NETFILTER_XT_MATCH_MULTIPORT=y` | Multi-port matching — **fc-runner addition** |
 | `CONFIG_BRIDGE_NETFILTER=y` | Bridge netfilter (in official config) |
 
-> **Why these are needed:** Podman's network backend (netavark) uses
-> `iptables-nft` with `--set-xmark`, `-m comment`, and `-m multiport` for
-> container port mapping and network isolation. Without these kernel modules,
-> `podman run -p 5432:5432 postgres:16` fails with
-> `Extension MARK revision 0 not supported`.
+> **Why nf_tables is needed:** Ubuntu 24.04's `iptables` defaults to
+> `iptables-nft`, which requires `CONFIG_NF_TABLES` in the kernel. Without it,
+> `iptables-nft` cannot initialize and netavark fails with
+> `netavark: invalid version number`. The xtables MARK/COMMENT/MULTIPORT
+> modules are still needed because `NFT_COMPAT` translates xtables rules
+> through the nf_tables engine.
 
 ### Container Infrastructure
 
@@ -236,21 +265,27 @@ differs from the original):
 - `CONFIG_ACPI=y`
 - `CONFIG_NETFILTER_XT_MATCH_COMMENT=y`, `CONFIG_NETFILTER_XT_MATCH_MULTIPORT=y`
 - `CONFIG_NETFILTER_XT_MARK=y`, `CONFIG_NETFILTER_XT_TARGET_MARK=y`
+- `CONFIG_NF_TABLES=y`, `CONFIG_NFT_NAT=y`, `CONFIG_NFT_MASQ=y`
+- `CONFIG_NFT_CT=y`, `CONFIG_NFT_COMPAT=y`
 
 ---
 
 ## Differences from Official Firecracker Config
 
-Our kernel config is identical to the
+Our kernel config is based on the
 [official Firecracker 6.1 x86_64 config](https://github.com/firecracker-microvm/firecracker/blob/main/resources/guest_configs/microvm-kernel-ci-x86_64-6.1.config)
-except for **4 additions** in the netfilter section:
+with **24 additions** for container networking:
 
-| Config | Official | fc-runner | Reason |
-|--------|----------|-----------|--------|
-| `CONFIG_NETFILTER_XT_MARK` | not set | `=y` | netavark `--set-xmark` |
-| `CONFIG_NETFILTER_XT_TARGET_MARK` | not set | `=y` | netavark MARK target |
-| `CONFIG_NETFILTER_XT_MATCH_COMMENT` | not set | `=y` | netavark rule comments |
-| `CONFIG_NETFILTER_XT_MATCH_MULTIPORT` | not set | `=y` | netavark multi-port rules |
+**nf_tables (20 configs):** `CONFIG_NF_TABLES`, `NF_TABLES_INET`, `NF_TABLES_IPV4`,
+`NF_TABLES_IPV6`, `NF_CT_NETLINK`, `NFT_CT`, `NFT_NAT`, `NFT_MASQ`, `NFT_FIB`,
+`NFT_FIB_IPV4`, `NFT_FIB_IPV6`, `NFT_FIB_INET`, `NFT_REJECT`, `NFT_REJECT_IPV4`,
+`NFT_REJECT_IPV6`, `NFT_REJECT_INET`, `NFT_COMPAT`, `NFT_COUNTER`, `NFT_LOG`,
+`NFT_LIMIT`
 
-These are safe, additive changes that enable container networking inside the VM
-without affecting any other Firecracker functionality.
+**xtables (4 configs):** `NETFILTER_XT_MARK`, `NETFILTER_XT_TARGET_MARK`,
+`NETFILTER_XT_MATCH_COMMENT`, `NETFILTER_XT_MATCH_MULTIPORT`
+
+These are safe, additive changes that enable container networking (Podman/netavark)
+inside the VM. The nf_tables subsystem is required because Ubuntu 24.04 defaults to
+`iptables-nft`, which needs kernel nf_tables support to initialize. Without it,
+netavark fails with `netavark: invalid version number`.
