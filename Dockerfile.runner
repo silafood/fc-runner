@@ -13,6 +13,11 @@
 
 FROM ubuntu:24.04
 
+LABEL org.opencontainers.image.title="fc-runner-image" \
+      org.opencontainers.image.description="Ubuntu 24.04 rootfs for Firecracker microVMs running GitHub Actions jobs. Includes GitHub Actions runner, Podman (Docker-compatible), Rust, Python, Node.js, and build essentials." \
+      org.opencontainers.image.source="https://github.com/silafood/fc-runner" \
+      org.opencontainers.image.licenses="MIT"
+
 ENV DEBIAN_FRONTEND=noninteractive
 
 # System packages + CI dependencies
