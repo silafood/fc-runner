@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, Mutex, Semaphore};
-use tokio::time::{interval, Duration};
+use tokio::sync::{Mutex, Semaphore, mpsc};
+use tokio::time::{Duration, interval};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::AppConfig;
@@ -25,7 +25,11 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
-    pub fn new(config: Arc<AppConfig>, cancel: CancellationToken, server_state: Arc<ServerState>) -> anyhow::Result<Self> {
+    pub fn new(
+        config: Arc<AppConfig>,
+        cancel: CancellationToken,
+        server_state: Arc<ServerState>,
+    ) -> anyhow::Result<Self> {
         let github = Arc::new(GitHubClient::new(config.github.clone())?);
         let max_jobs = config.runner.max_concurrent_jobs;
         let repos = github.repos();
@@ -253,7 +257,8 @@ impl Orchestrator {
 
             let slot = {
                 let mut pool = slot_pool.lock().await;
-                pool.pop().expect("semaphore guarantees a slot is available")
+                pool.pop()
+                    .expect("semaphore guarantees a slot is available")
             };
 
             *active_jobs.lock().await += 1;
@@ -262,20 +267,25 @@ impl Orchestrator {
             tracing::info!(job_id, repo = %repo, slot, "job started (permit acquired, slot assigned)");
 
             let vm_id = format!("fc-{}-slot{}", job_id, slot);
-            server_state.register_vm(crate::server::VmInfo {
-                vm_id: vm_id.clone(),
-                job_id,
-                repo: repo.clone(),
-                slot,
-                started_at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-                    .to_string(),
-            }).await;
+            server_state
+                .register_vm(crate::server::VmInfo {
+                    vm_id: vm_id.clone(),
+                    job_id,
+                    repo: repo.clone(),
+                    slot,
+                    started_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs()
+                        .to_string(),
+                })
+                .await;
 
-            let timer = metrics::VM_BOOT_DURATION.with_label_values(&[&repo]).start_timer();
-            let result = run_jit_job(config.clone(), github.clone(), job_id, &repo, slot, cancel).await;
+            let timer = metrics::VM_BOOT_DURATION
+                .with_label_values(&[&repo])
+                .start_timer();
+            let result =
+                run_jit_job(config.clone(), github.clone(), job_id, &repo, slot, cancel).await;
             timer.observe_duration();
 
             server_state.unregister_vm(&vm_id).await;
@@ -315,11 +325,18 @@ impl Orchestrator {
         let repos = self.github.repos();
         let is_org = self.github.is_org_mode();
         if repos.is_empty() && !is_org {
-            anyhow::bail!("no repos configured for warm pool (set github.repo/repos or github.organization)");
+            anyhow::bail!(
+                "no repos configured for warm pool (set github.repo/repos or github.organization)"
+            );
         }
 
         if is_org {
-            let org = self.config.github.organization.as_deref().unwrap_or("unknown");
+            let org = self
+                .config
+                .github
+                .organization
+                .as_deref()
+                .unwrap_or("unknown");
             tracing::info!(
                 pool_size,
                 ephemeral,
@@ -476,7 +493,8 @@ impl Orchestrator {
         };
 
         // Count only our runners (fc- prefix, online)
-        let our_runners: Vec<_> = runners.iter()
+        let our_runners: Vec<_> = runners
+            .iter()
             .filter(|r| r.name.starts_with("fc-") && r.status == "online")
             .collect();
 
@@ -497,7 +515,10 @@ impl Orchestrator {
             }
 
             tracing::info!(
-                idle, busy, target_idle, spawning = to_spawn,
+                idle,
+                busy,
+                target_idle,
+                spawning = to_spawn,
                 "idle runners below target, spawning standbys"
             );
 
@@ -537,7 +558,9 @@ impl Orchestrator {
             metrics::POOL_SLOTS_AVAILABLE.dec();
             tracing::info!(slot, repo = %repo, "starting warm pool VM");
 
-            let timer = metrics::VM_BOOT_DURATION.with_label_values(&[&repo]).start_timer();
+            let timer = metrics::VM_BOOT_DURATION
+                .with_label_values(&[&repo])
+                .start_timer();
             let result = run_warm_vm(config, github.clone(), slot, &repo, cancel).await;
             timer.observe_duration();
 
@@ -578,7 +601,10 @@ impl Orchestrator {
                 break;
             }
             if tokio::time::Instant::now() >= deadline {
-                tracing::warn!(remaining = count, "shutdown timeout, some jobs still running");
+                tracing::warn!(
+                    remaining = count,
+                    "shutdown timeout, some jobs still running"
+                );
                 break;
             }
             tracing::info!(remaining = count, "waiting for in-flight jobs...");
@@ -601,10 +627,7 @@ async fn run_jit_job(
     let jit_token = github.generate_jit_config(repo, job_id).await?;
     tracing::info!(job_id, repo = %repo, "JIT token acquired");
 
-    let repo_url = format!(
-        "https://github.com/{}/{}",
-        config.github.owner, repo
-    );
+    let repo_url = format!("https://github.com/{}/{}", config.github.owner, repo);
     let vm = MicroVm::new(
         job_id,
         &config.firecracker,
@@ -633,7 +656,11 @@ async fn run_warm_vm(
 
     let (reg_token, registration_url) = if is_org {
         let org = config.github.organization.as_deref().unwrap_or("unknown");
-        tracing::info!(slot, organization = org, "requesting org registration token");
+        tracing::info!(
+            slot,
+            organization = org,
+            "requesting org registration token"
+        );
         let token = github.generate_org_registration_token().await?;
         let url = format!("https://github.com/{}", org);
         tracing::info!(slot, organization = org, "org registration token acquired");

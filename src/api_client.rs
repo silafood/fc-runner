@@ -1,4 +1,4 @@
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 
 pub struct ApiClient {
@@ -119,7 +119,10 @@ impl ApiClient {
         let resp = self
             .client
             .post(format!("{}/api/v1/pools/{}/scale", self.base_url, name))
-            .json(&ScaleRequest { min_ready, max_ready })
+            .json(&ScaleRequest {
+                min_ready,
+                max_ready,
+            })
             .send()
             .await
             .context("failed to connect to server")?;
@@ -180,7 +183,8 @@ mod tests {
 
     #[test]
     fn vm_info_deserialize() {
-        let json = r#"{"vm_id":"fc-1-slot0","job_id":1,"repo":"test","slot":0,"started_at":"12345"}"#;
+        let json =
+            r#"{"vm_id":"fc-1-slot0","job_id":1,"repo":"test","slot":0,"started_at":"12345"}"#;
         let info: VmInfo = serde_json::from_str(json).unwrap();
         assert_eq!(info.vm_id, "fc-1-slot0");
         assert_eq!(info.job_id, 1);

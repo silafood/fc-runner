@@ -13,7 +13,11 @@ pub enum Commands {
     /// Start the fc-runner server (orchestrator + management API)
     Server {
         /// Path to the configuration file
-        #[arg(short = 'f', long = "config", default_value = "/etc/fc-runner/config.toml")]
+        #[arg(
+            short = 'f',
+            long = "config",
+            default_value = "/etc/fc-runner/config.toml"
+        )]
         config: String,
     },
 
@@ -27,7 +31,11 @@ pub enum Commands {
     /// Validate a configuration file without starting the server
     Validate {
         /// Path to the configuration file
-        #[arg(short = 'f', long = "config", default_value = "/etc/fc-runner/config.toml")]
+        #[arg(
+            short = 'f',
+            long = "config",
+            default_value = "/etc/fc-runner/config.toml"
+        )]
         config: String,
     },
 
@@ -288,16 +296,12 @@ mod tests {
 
     #[test]
     fn cli_parse_logs() {
-        let cli = Cli::parse_from([
-            "fc-runner",
-            "logs",
-            "--vm-id",
-            "fc-123-slot0",
-            "--follow",
-        ]);
+        let cli = Cli::parse_from(["fc-runner", "logs", "--vm-id", "fc-123-slot0", "--follow"]);
         match cli.command {
             Commands::Logs {
-                vm_id, follow, endpoint,
+                vm_id,
+                follow,
+                endpoint,
             } => {
                 assert_eq!(vm_id, "fc-123-slot0");
                 assert!(follow);

@@ -14,7 +14,10 @@ pub static JOBS_DISPATCHED: Lazy<IntCounterVec> = Lazy::new(|| {
 });
 
 pub static JOBS_COMPLETED: Lazy<IntCounterVec> = Lazy::new(|| {
-    let opts = Opts::new("fc_jobs_completed_total", "Total jobs completed successfully");
+    let opts = Opts::new(
+        "fc_jobs_completed_total",
+        "Total jobs completed successfully",
+    );
     let counter = IntCounterVec::new(opts, &["repo"]).unwrap();
     REGISTRY.register(Box::new(counter.clone())).unwrap();
     counter
@@ -38,7 +41,9 @@ pub static VM_BOOT_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
         "fc_vm_boot_duration_seconds",
         "VM boot + job execution duration in seconds",
     )
-    .buckets(vec![1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0]);
+    .buckets(vec![
+        1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0,
+    ]);
     let hist = HistogramVec::new(opts, &["repo"]).unwrap();
     REGISTRY.register(Box::new(hist.clone())).unwrap();
     hist
@@ -105,9 +110,7 @@ mod tests {
     #[test]
     fn jobs_dispatched_counter() {
         JOBS_DISPATCHED.with_label_values(&["test-repo"]).inc();
-        let val = JOBS_DISPATCHED
-            .with_label_values(&["test-repo"])
-            .get();
+        let val = JOBS_DISPATCHED.with_label_values(&["test-repo"]).get();
         assert!(val >= 1);
     }
 

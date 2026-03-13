@@ -33,10 +33,7 @@ pub const AGENT_PORT: u32 = 1024;
 /// Spawn a VSOCK listener for a given VM.
 /// Returns a JoinHandle that reads messages until the guest disconnects.
 #[cfg(target_os = "linux")]
-pub fn spawn_listener(
-    vm_id: String,
-    cid: u32,
-) -> tokio::task::JoinHandle<()> {
+pub fn spawn_listener(vm_id: String, cid: u32) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         if let Err(e) = listen_loop(&vm_id, cid).await {
             tracing::warn!(vm_id = %vm_id, cid, error = %e, "VSOCK listener ended");
@@ -56,7 +53,9 @@ async fn listen_loop(vm_id: &str, cid: u32) -> anyhow::Result<()> {
     tracing::info!(vm_id = %vm_id, cid, port = AGENT_PORT, "VSOCK listener started");
 
     // Accept one connection (the guest agent)
-    let (stream, _addr) = listener.accept().await
+    let (stream, _addr) = listener
+        .accept()
+        .await
         .map_err(|e| anyhow::anyhow!("VSOCK accept: {}", e))?;
 
     tracing::info!(vm_id = %vm_id, cid, "guest agent connected via VSOCK");
@@ -117,10 +116,7 @@ fn handle_message(vm_id: &str, msg: &AgentMessage) {
 
 /// Stub for non-Linux platforms.
 #[cfg(not(target_os = "linux"))]
-pub fn spawn_listener(
-    vm_id: String,
-    _cid: u32,
-) -> tokio::task::JoinHandle<()> {
+pub fn spawn_listener(vm_id: String, _cid: u32) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         tracing::warn!(vm_id = %vm_id, "VSOCK not supported on this platform");
     })

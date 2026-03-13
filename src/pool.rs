@@ -1,8 +1,8 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use serde::Serialize;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -128,9 +128,8 @@ impl PoolManager {
             "starting pool manager"
         );
 
-        let (done_tx, mut done_rx) = mpsc::channel::<(usize, String)>(
-            self.max_ready.load(Ordering::Relaxed) * 2,
-        );
+        let (done_tx, mut done_rx) =
+            mpsc::channel::<(usize, String)>(self.max_ready.load(Ordering::Relaxed) * 2);
 
         // Spawn initial pool — distribute across repos round-robin
         for i in 0..min_ready {
@@ -283,7 +282,11 @@ async fn run_pool_vm(
 
     let (reg_token, registration_url) = if is_org {
         let org = config.github.organization.as_deref().unwrap_or("unknown");
-        tracing::info!(slot, organization = org, "requesting org registration token for pool VM");
+        tracing::info!(
+            slot,
+            organization = org,
+            "requesting org registration token for pool VM"
+        );
         let token = github.generate_org_registration_token().await?;
         let url = format!("https://github.com/{}", org);
         (token, url)
