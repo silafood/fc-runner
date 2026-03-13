@@ -609,7 +609,7 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
                  gcc g++ make cmake \
                  python3 python3-pip python3-venv \
                  nodejs npm \
-                 docker.io containerd \
+                 podman buildah slirp4netns fuse-overlayfs uidmap \
                  wget tar gzip xz-utils \
                  zip bzip2 \
                  libffi-dev zlib1g-dev \
@@ -672,14 +672,14 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
     )
     .await?;
 
-    let _ = chroot_command(mount_dir, "systemctl", &["enable", "systemd-networkd", "systemd-resolved", "docker", "containerd"])
+    let _ = chroot_command(mount_dir, "systemctl", &["enable", "systemd-networkd", "systemd-resolved"])
         .status()
         .await;
 
     // Belt-and-suspenders: create symlinks manually in case chroot systemctl fails
     let wants_dir = format!("{}/etc/systemd/system/multi-user.target.wants", mount_dir);
     tokio::fs::create_dir_all(&wants_dir).await?;
-    for svc in ["systemd-networkd", "systemd-resolved", "docker", "containerd"] {
+    for svc in ["systemd-networkd", "systemd-resolved"] {
         let symlink = format!("{}/{}.service", wants_dir, svc);
         let target = format!("/lib/systemd/system/{}.service", svc);
         if !Path::new(&symlink).exists() {
@@ -712,24 +712,27 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
         .status()
         .await;
 
-    // Add runner to docker group (required for services: support in workflows)
-    let _ = chroot_command(mount_dir, "usermod", &["-aG", "docker", "runner"])
-        .status()
-        .await;
-
     tokio::fs::write(
         format!("{}/etc/sudoers.d/runner", mount_dir),
         "runner ALL=(ALL) NOPASSWD:ALL\n",
     )
     .await?;
 
-    // Docker daemon config: use vfs storage driver (overlay2 doesn't work on overlayfs-on-overlayfs)
-    // and configure DNS for container networking
-    let docker_dir = format!("{}/etc/docker", mount_dir);
-    tokio::fs::create_dir_all(&docker_dir).await?;
+    // Podman: symlink docker → podman so GitHub Actions runner uses podman transparently
+    let _ = chroot_command(mount_dir, "ln", &["-sf", "/usr/bin/podman", "/usr/local/bin/docker"])
+        .status()
+        .await;
+
+    // Podman containers.conf: configure DNS for container networking
+    let containers_dir = format!("{}/etc/containers", mount_dir);
+    tokio::fs::create_dir_all(&containers_dir).await?;
     tokio::fs::write(
-        format!("{}/daemon.json", docker_dir),
-        "{\n  \"storage-driver\": \"overlay2\",\n  \"dns\": [\"8.8.8.8\", \"1.1.1.1\"]\n}\n",
+        format!("{}/containers.conf", containers_dir),
+        "[containers]\n\
+         dns_servers = [\"8.8.8.8\", \"1.1.1.1\"]\n\
+         \n\
+         [engine]\n\
+         runtime = \"crun\"\n",
     )
     .await?;
 
@@ -1048,12 +1051,21 @@ pivot /overlay/root /overlay/work
 # Mount devtmpfs so we have access to /dev/vdb in the new root
 /bin/mount -t devtmpfs devtmpfs /dev
 
-# Mount overlay ext4 at a persistent path (not under /rom which systemd cleans up)
-# Docker needs a real ext4 backing store — overlayfs-on-overlayfs is not supported
+# Mount overlay ext4 at a persistent path for container storage
+# Podman/containers need writable storage not on overlayfs
 mkdir -p /overlay-data
 /bin/mount -t ext4 -o noatime /dev/vdb /overlay-data
-mkdir -p /overlay-data/docker /var/lib/docker
-/bin/mount --bind /overlay-data/docker /var/lib/docker
+mkdir -p /overlay-data/containers
+# Point Podman graphroot to real ext4 so fuse-overlayfs works
+mkdir -p /etc/containers
+cat > /etc/containers/storage.conf <<STOR
+[storage]
+driver = "overlay"
+graphroot = "/overlay-data/containers"
+
+[storage.options.overlay]
+mount_program = "/usr/bin/fuse-overlayfs"
+STOR
 
 # Write /etc/hosts to fix "unable to resolve host" warnings
 cat > /etc/hosts <<HOSTS
