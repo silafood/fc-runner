@@ -77,7 +77,10 @@ jobs:
         working-directory: linux-${{ env.KERNEL_VERSION }}
         run: |
           cp $GITHUB_WORKSPACE/guest_configs/microvm-kernel-ci-x86_64-6.1.config .config
+          cp .config .config.orig
           make olddefconfig
+          # Show any configs that changed (helps debug CI vs local differences)
+          diff .config.orig .config || true
 
       - name: Build vmlinux
         working-directory: linux-${{ env.KERNEL_VERSION }}
@@ -95,7 +98,14 @@ jobs:
           grep -q "CONFIG_SQUASHFS_ZSTD=y" .config || MISSING="$MISSING CONFIG_SQUASHFS_ZSTD"
           grep -q "CONFIG_OVERLAY_FS=y" .config || MISSING="$MISSING CONFIG_OVERLAY_FS"
           grep -q "CONFIG_VIRTIO=y" .config || MISSING="$MISSING CONFIG_VIRTIO"
+          grep -q "CONFIG_VIRTIO_BLK=y" .config || MISSING="$MISSING CONFIG_VIRTIO_BLK"
+          grep -q "CONFIG_VIRTIO_MMIO=y" .config || MISSING="$MISSING CONFIG_VIRTIO_MMIO"
+          grep -q "CONFIG_VIRTIO_NET=y" .config || MISSING="$MISSING CONFIG_VIRTIO_NET"
           grep -q "CONFIG_EXT4_FS=y" .config || MISSING="$MISSING CONFIG_EXT4_FS"
+          grep -q "CONFIG_VETH=y" .config || MISSING="$MISSING CONFIG_VETH"
+          grep -q "CONFIG_BRIDGE=y" .config || MISSING="$MISSING CONFIG_BRIDGE"
+          grep -q "CONFIG_IP_NF_IPTABLES=y" .config || MISSING="$MISSING CONFIG_IP_NF_IPTABLES"
+          grep -q "CONFIG_IP_NF_NAT=y" .config || MISSING="$MISSING CONFIG_IP_NF_NAT"
           grep -q "CONFIG_NETFILTER_XT_MATCH_COMMENT=y" .config || MISSING="$MISSING CONFIG_NETFILTER_XT_MATCH_COMMENT"
           grep -q "CONFIG_NETFILTER_XT_MATCH_MULTIPORT=y" .config || MISSING="$MISSING CONFIG_NETFILTER_XT_MATCH_MULTIPORT"
 
