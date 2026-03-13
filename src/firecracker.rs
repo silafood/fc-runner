@@ -177,7 +177,7 @@ async fn put_vsock_raw(socket_path: &std::path::Path, json_body: &str) -> anyhow
     if !response_str.contains("204") && !response_str.contains("200") {
         anyhow::bail!(
             "VSOCK PUT failed: {}",
-            response_str.lines().next().unwrap_or("")
+            response_str.trim()
         );
     }
 
