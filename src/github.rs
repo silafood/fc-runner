@@ -377,7 +377,10 @@ impl GitHubClient {
         metrics::GITHUB_API_CALLS
             .with_label_values(&["list_runners"])
             .inc();
-        let url = format!("{}/actions/runners", self.repo_url(repo));
+        let url = format!(
+            "{}/actions/runners?per_page=100",
+            self.repo_url(repo)
+        );
         let resp = self
             .request(reqwest::Method::GET, &url)
             .await?
@@ -564,7 +567,7 @@ impl GitHubClient {
     /// List all self-hosted runners for the organization.
     pub async fn list_org_runners(&self) -> anyhow::Result<Vec<Runner>> {
         let org_url = self.org_url().context("organization not configured")?;
-        let url = format!("{}/actions/runners", org_url);
+        let url = format!("{}/actions/runners?per_page=100", org_url);
         metrics::GITHUB_API_CALLS
             .with_label_values(&["list_org_runners"])
             .inc();
@@ -587,7 +590,7 @@ impl GitHubClient {
             Some(url) => url,
             None => return,
         };
-        let url = format!("{}/actions/runners", org_url);
+        let url = format!("{}/actions/runners?per_page=100", org_url);
         metrics::GITHUB_API_CALLS
             .with_label_values(&["list_org_runners"])
             .inc();
@@ -625,10 +628,34 @@ impl GitHubClient {
                 metrics::GITHUB_API_CALLS
                     .with_label_values(&["delete_org_runner"])
                     .inc();
-                if let Ok(req) = self.request(reqwest::Method::DELETE, &del_url).await
-                    && let Err(e) = req.send().await
-                {
-                    tracing::warn!(runner_id = runner.id, error = %e, "failed to delete org runner");
+                match self.request(reqwest::Method::DELETE, &del_url).await {
+                    Ok(req) => match req.send().await {
+                        Ok(resp) => {
+                            if !resp.status().is_success() {
+                                let status = resp.status();
+                                let body = resp.text().await.unwrap_or_default();
+                                tracing::warn!(
+                                    runner_id = runner.id,
+                                    runner_name = %runner.name,
+                                    status = %status,
+                                    body = %body,
+                                    "failed to delete org runner (HTTP error)"
+                                );
+                            } else {
+                                tracing::info!(
+                                    runner_id = runner.id,
+                                    runner_name = %runner.name,
+                                    "successfully removed offline org runner"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(runner_id = runner.id, error = %e, "failed to send delete request for org runner");
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(runner_id = runner.id, error = %e, "failed to build delete request for org runner");
+                    }
                 }
             }
         }
