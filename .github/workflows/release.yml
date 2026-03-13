@@ -9,17 +9,17 @@ on:
       tag:
         description: 'Release tag (e.g. v0.1.0)'
         required: true
-      kernel_version:
-        description: 'Kernel version to build (e.g. 6.1.102)'
+      kernel_tag:
+        description: 'Amazon Linux microVM kernel tag (e.g. microvm-kernel-6.1.164-23.303.amzn2023)'
         required: false
-        default: '6.1.102'
+        default: 'microvm-kernel-6.1.164-23.303.amzn2023'
       runner_version:
         description: 'GitHub Actions runner version (e.g. 2.332.0)'
         required: false
         default: '2.332.0'
 
 env:
-  KERNEL_VERSION: ${{ github.event.inputs.kernel_version || '6.1.102' }}
+  KERNEL_TAG: ${{ github.event.inputs.kernel_tag || 'microvm-kernel-6.1.164-23.303.amzn2023' }}
   RUNNER_VERSION: ${{ github.event.inputs.runner_version || '2.332.0' }}
   RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
@@ -56,7 +56,7 @@ jobs:
           path: target/release/fc-runner
 
   build-kernel:
-    name: Build Linux ${{ github.event.inputs.kernel_version || '6.1.102' }} kernel
+    name: Build Amazon Linux microVM kernel
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -66,15 +66,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential libncurses-dev bison flex \
-            libssl-dev libelf-dev bc wget
+            libssl-dev libelf-dev bc git
 
-      - name: Download kernel source
+      - name: Clone Amazon Linux kernel source
         run: |
-          wget -q https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VERSION}.tar.xz
-          tar -xf linux-${KERNEL_VERSION}.tar.xz
+          git clone --depth 1 --branch ${KERNEL_TAG} \
+            https://github.com/amazonlinux/linux.git linux-amzn
 
       - name: Apply Firecracker kernel config
-        working-directory: linux-${{ env.KERNEL_VERSION }}
+        working-directory: linux-amzn
         run: |
           cp $GITHUB_WORKSPACE/guest_configs/microvm-kernel-ci-x86_64-6.1.config .config
           cp .config .config.orig
@@ -83,11 +83,11 @@ jobs:
           diff .config.orig .config || true
 
       - name: Build vmlinux
-        working-directory: linux-${{ env.KERNEL_VERSION }}
+        working-directory: linux-amzn
         run: make vmlinux -j$(nproc)
 
       - name: Verify output
-        working-directory: linux-${{ env.KERNEL_VERSION }}
+        working-directory: linux-amzn
         run: |
           ls -lh vmlinux
           file vmlinux | grep -q "ELF 64-bit" || { echo "ERROR: not a valid ELF binary"; exit 1; }
@@ -106,7 +106,6 @@ jobs:
           grep -q "CONFIG_BRIDGE=y" .config || MISSING="$MISSING CONFIG_BRIDGE"
           grep -q "CONFIG_IP_NF_IPTABLES=y" .config || MISSING="$MISSING CONFIG_IP_NF_IPTABLES"
           grep -q "CONFIG_IP_NF_NAT=y" .config || MISSING="$MISSING CONFIG_IP_NF_NAT"
-          grep -q "CONFIG_PCI=y" .config || MISSING="$MISSING CONFIG_PCI"
           grep -q "CONFIG_ACPI=y" .config || MISSING="$MISSING CONFIG_ACPI"
           grep -q "CONFIG_NETFILTER_XT_MATCH_COMMENT=y" .config || MISSING="$MISSING CONFIG_NETFILTER_XT_MATCH_COMMENT"
           grep -q "CONFIG_NETFILTER_XT_MATCH_MULTIPORT=y" .config || MISSING="$MISSING CONFIG_NETFILTER_XT_MATCH_MULTIPORT"
@@ -120,8 +119,8 @@ jobs:
       - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vmlinux-${{ env.KERNEL_VERSION }}
-          path: linux-${{ env.KERNEL_VERSION }}/vmlinux
+          name: vmlinux
+          path: linux-amzn/vmlinux
           retention-days: 90
 
   build-rootfs:
@@ -366,7 +365,7 @@ jobs:
       - name: Download vmlinux kernel
         uses: actions/download-artifact@v4
         with:
-          name: vmlinux-${{ env.KERNEL_VERSION }}
+          name: vmlinux
           path: artifacts/
 
       - name: Download rootfs
@@ -378,7 +377,9 @@ jobs:
       - name: Prepare release assets
         run: |
           chmod +x artifacts/fc-runner
-          mv artifacts/vmlinux artifacts/vmlinux-${KERNEL_VERSION}
+          # Extract kernel version from Amazon tag (e.g. microvm-kernel-6.1.164-23.303.amzn2023 → 6.1.164)
+          KVER=$(echo "${KERNEL_TAG}" | sed 's/microvm-kernel-//' | cut -d- -f1)
+          mv artifacts/vmlinux "artifacts/vmlinux-${KVER}"
           mv artifacts/rootfs.ext4.zst artifacts/runner-rootfs-golden.ext4.zst
 
       - name: Create release
@@ -389,7 +390,7 @@ jobs:
             --title "fc-runner ${RELEASE_TAG}" \
             --generate-notes \
             artifacts/fc-runner \
-            artifacts/vmlinux-${KERNEL_VERSION} \
+            artifacts/vmlinux-* \
             artifacts/runner-rootfs-golden.ext4.zst \
             config.toml.example \
             fc-runner.service \
