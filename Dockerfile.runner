@@ -61,7 +61,7 @@ RUN systemctl enable systemd-networkd systemd-resolved && \
     systemctl mask systemd-timesyncd.service 2>/dev/null || true
 
 # Podman: symlink docker → podman for GitHub Actions runner compatibility
-RUN ln -sf /usr/bin/podman /usr/local/bin/docker
+RUN ln -sf /usr/bin/podman /usr/bin/docker
 
 # Podman config: DNS + runtime
 RUN mkdir -p /etc/containers && \

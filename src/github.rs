@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::Context;
 use reqwest::Client;
@@ -31,9 +31,14 @@ struct CachedToken {
 impl AuthProvider {
     fn from_config(config: &GitHubConfig) -> anyhow::Result<Self> {
         if let Some(app) = &config.app {
-            let private_key = std::fs::read(&app.private_key_path)
-                .with_context(|| format!("reading GitHub App private key: {}", app.private_key_path))?;
-            tracing::info!(app_id = app.app_id, installation_id = app.installation_id, "using GitHub App authentication");
+            let private_key = std::fs::read(&app.private_key_path).with_context(|| {
+                format!("reading GitHub App private key: {}", app.private_key_path)
+            })?;
+            tracing::info!(
+                app_id = app.app_id,
+                installation_id = app.installation_id,
+                "using GitHub App authentication"
+            );
             Ok(AuthProvider::App {
                 app_id: app.app_id,
                 installation_id: app.installation_id,
@@ -273,20 +278,26 @@ impl GitHubClient {
             .and_then(|h| h.to_str().ok())
             .and_then(|s| s.parse::<u32>().ok())
         {
-            self.rate_limit_remaining.store(remaining, Ordering::Relaxed);
+            self.rate_limit_remaining
+                .store(remaining, Ordering::Relaxed);
             metrics::GITHUB_RATE_LIMIT_REMAINING.set(remaining as i64);
             if remaining < 100 {
                 tracing::warn!(remaining, "GitHub API rate limit running low");
             }
             if remaining < 10 {
-                tracing::error!(remaining, "GitHub API rate limit nearly exhausted, backing off");
+                tracing::error!(
+                    remaining,
+                    "GitHub API rate limit nearly exhausted, backing off"
+                );
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
     }
 
     pub async fn list_queued_runs(&self, repo: &str) -> anyhow::Result<Vec<WorkflowRun>> {
-        metrics::GITHUB_API_CALLS.with_label_values(&["list_queued_runs"]).inc();
+        metrics::GITHUB_API_CALLS
+            .with_label_values(&["list_queued_runs"])
+            .inc();
         let url = format!("{}/actions/runs?status=queued", self.repo_url(repo));
         let resp = self
             .request(reqwest::Method::GET, &url)
@@ -303,7 +314,9 @@ impl GitHubClient {
     }
 
     pub async fn list_queued_jobs(&self, repo: &str, run_id: u64) -> anyhow::Result<Vec<Job>> {
-        metrics::GITHUB_API_CALLS.with_label_values(&["list_queued_jobs"]).inc();
+        metrics::GITHUB_API_CALLS
+            .with_label_values(&["list_queued_jobs"])
+            .inc();
         let url = format!(
             "{}/actions/runs/{}/jobs?filter=queued",
             self.repo_url(repo),
@@ -317,7 +330,12 @@ impl GitHubClient {
         self.check_rate_limit(&resp).await;
         let data = resp
             .error_for_status()
-            .with_context(|| format!("listing queued jobs for {}/{} run {}", self.config.owner, repo, run_id))?
+            .with_context(|| {
+                format!(
+                    "listing queued jobs for {}/{} run {}",
+                    self.config.owner, repo, run_id
+                )
+            })?
             .json::<JobsResponse>()
             .await?;
         Ok(data.jobs)
@@ -325,7 +343,9 @@ impl GitHubClient {
 
     /// Generate a registration token for pre-registering runners (warm pool mode).
     pub async fn generate_registration_token(&self, repo: &str) -> anyhow::Result<String> {
-        metrics::GITHUB_API_CALLS.with_label_values(&["generate_registration_token"]).inc();
+        metrics::GITHUB_API_CALLS
+            .with_label_values(&["generate_registration_token"])
+            .inc();
         let url = format!("{}/actions/runners/registration-token", self.repo_url(repo));
         let resp = self
             .request(reqwest::Method::POST, &url)
@@ -338,7 +358,10 @@ impl GitHubClient {
             let body = resp.text().await.unwrap_or_default();
             anyhow::bail!(
                 "registration token for {}/{} failed (HTTP {}): {}",
-                self.config.owner, repo, status, body
+                self.config.owner,
+                repo,
+                status,
+                body
             );
         }
         #[derive(Deserialize)]
@@ -351,7 +374,9 @@ impl GitHubClient {
 
     /// List all self-hosted runners for a repo.
     pub async fn list_runners(&self, repo: &str) -> anyhow::Result<Vec<Runner>> {
-        metrics::GITHUB_API_CALLS.with_label_values(&["list_runners"]).inc();
+        metrics::GITHUB_API_CALLS
+            .with_label_values(&["list_runners"])
+            .inc();
         let url = format!("{}/actions/runners", self.repo_url(repo));
         let resp = self
             .request(reqwest::Method::GET, &url)
@@ -369,7 +394,9 @@ impl GitHubClient {
 
     /// Delete a runner by ID.
     pub async fn delete_runner(&self, repo: &str, runner_id: u64) -> anyhow::Result<()> {
-        metrics::GITHUB_API_CALLS.with_label_values(&["delete_runner"]).inc();
+        metrics::GITHUB_API_CALLS
+            .with_label_values(&["delete_runner"])
+            .inc();
         let url = format!("{}/actions/runners/{}", self.repo_url(repo), runner_id);
         let resp = self
             .request(reqwest::Method::DELETE, &url)
@@ -382,7 +409,11 @@ impl GitHubClient {
             let body = resp.text().await.unwrap_or_default();
             anyhow::bail!(
                 "delete runner {} for {}/{} failed (HTTP {}): {}",
-                runner_id, self.config.owner, repo, status, body
+                runner_id,
+                self.config.owner,
+                repo,
+                status,
+                body
             );
         }
         Ok(())
@@ -427,7 +458,9 @@ impl GitHubClient {
 
     /// Generate a repo-level JIT config.
     async fn generate_repo_jit_config(&self, repo: &str, job_id: u64) -> anyhow::Result<String> {
-        metrics::GITHUB_API_CALLS.with_label_values(&["generate_jit_config"]).inc();
+        metrics::GITHUB_API_CALLS
+            .with_label_values(&["generate_jit_config"])
+            .inc();
         let url = format!("{}/actions/runners/generate-jitconfig", self.repo_url(repo));
         let body = serde_json::json!({
             "name": format!("fc-{}-{}", job_id, &uuid::Uuid::new_v4().to_string()[..8]),
@@ -447,7 +480,11 @@ impl GitHubClient {
             let body = resp.text().await.unwrap_or_default();
             anyhow::bail!(
                 "JIT config for {}/{} job {} failed (HTTP {}): {}",
-                self.config.owner, repo, job_id, status, body
+                self.config.owner,
+                repo,
+                job_id,
+                status,
+                body
             );
         }
         let data = resp.json::<JitConfigResponse>().await?;
@@ -456,7 +493,9 @@ impl GitHubClient {
 
     /// Generate an org-level JIT config.
     async fn generate_org_jit_config(&self, job_id: u64) -> anyhow::Result<String> {
-        metrics::GITHUB_API_CALLS.with_label_values(&["generate_org_jit_config"]).inc();
+        metrics::GITHUB_API_CALLS
+            .with_label_values(&["generate_org_jit_config"])
+            .inc();
         let org_url = self.org_url().expect("org mode checked by caller");
         let url = format!("{}/actions/runners/generate-jitconfig", org_url);
         let body = serde_json::json!({
@@ -478,7 +517,10 @@ impl GitHubClient {
             let org = self.config.organization.as_deref().unwrap_or("unknown");
             anyhow::bail!(
                 "org JIT config for {} job {} failed (HTTP {}): {}",
-                org, job_id, status, body
+                org,
+                job_id,
+                status,
+                body
             );
         }
         let data = resp.json::<JitConfigResponse>().await?;
@@ -488,7 +530,9 @@ impl GitHubClient {
     /// Generate an org-level registration token.
     #[allow(dead_code)]
     pub async fn generate_org_registration_token(&self) -> anyhow::Result<String> {
-        metrics::GITHUB_API_CALLS.with_label_values(&["generate_org_registration_token"]).inc();
+        metrics::GITHUB_API_CALLS
+            .with_label_values(&["generate_org_registration_token"])
+            .inc();
         let org_url = self.org_url().expect("org mode checked by caller");
         let url = format!("{}/actions/runners/registration-token", org_url);
         let resp = self
@@ -503,7 +547,9 @@ impl GitHubClient {
             let org = self.config.organization.as_deref().unwrap_or("unknown");
             anyhow::bail!(
                 "org registration token for {} failed (HTTP {}): {}",
-                org, status, body
+                org,
+                status,
+                body
             );
         }
         #[derive(Deserialize)]
@@ -517,10 +563,11 @@ impl GitHubClient {
     /// Remove offline runners at the org level.
     /// List all self-hosted runners for the organization.
     pub async fn list_org_runners(&self) -> anyhow::Result<Vec<Runner>> {
-        let org_url = self.org_url()
-            .context("organization not configured")?;
+        let org_url = self.org_url().context("organization not configured")?;
         let url = format!("{}/actions/runners", org_url);
-        metrics::GITHUB_API_CALLS.with_label_values(&["list_org_runners"]).inc();
+        metrics::GITHUB_API_CALLS
+            .with_label_values(&["list_org_runners"])
+            .inc();
         let resp = self
             .request(reqwest::Method::GET, &url)
             .await?
@@ -541,7 +588,9 @@ impl GitHubClient {
             None => return,
         };
         let url = format!("{}/actions/runners", org_url);
-        metrics::GITHUB_API_CALLS.with_label_values(&["list_org_runners"]).inc();
+        metrics::GITHUB_API_CALLS
+            .with_label_values(&["list_org_runners"])
+            .inc();
         let resp = match self.request(reqwest::Method::GET, &url).await {
             Ok(req) => match req.send().await {
                 Ok(r) => r,
@@ -573,7 +622,9 @@ impl GitHubClient {
                     "removing offline org runner"
                 );
                 let del_url = format!("{}/actions/runners/{}", org_url, runner.id);
-                metrics::GITHUB_API_CALLS.with_label_values(&["delete_org_runner"]).inc();
+                metrics::GITHUB_API_CALLS
+                    .with_label_values(&["delete_org_runner"])
+                    .inc();
                 if let Ok(req) = self.request(reqwest::Method::DELETE, &del_url).await
                     && let Err(e) = req.send().await
                 {

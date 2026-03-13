@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{ensure, Context};
+use anyhow::{Context, ensure};
 use firecracker_rs_sdk::firecracker::FirecrackerOption;
 use firecracker_rs_sdk::instance::Instance;
 use firecracker_rs_sdk::jailer::JailerOption;
@@ -8,7 +8,7 @@ use firecracker_rs_sdk::models::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::process::Command;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -25,7 +25,12 @@ fn mount_loop_ext4(image: &str, target: &str) -> anyhow::Result<()> {
         .args(["-o", "loop", image, target])
         .status()
         .context("running mount")?;
-    ensure!(status.success(), "mount -o loop {} {} failed", image, target);
+    ensure!(
+        status.success(),
+        "mount -o loop {} {} failed",
+        image,
+        target
+    );
     Ok(())
 }
 
@@ -136,7 +141,10 @@ async fn put_mmds_raw(socket_path: &std::path::Path, json_body: &str) -> anyhow:
     let response_str = String::from_utf8_lossy(&response[..n]);
 
     if !response_str.contains("204") && !response_str.contains("200") {
-        anyhow::bail!("MMDS PUT failed: {}", response_str.lines().next().unwrap_or(""));
+        anyhow::bail!(
+            "MMDS PUT failed: {}",
+            response_str.lines().next().unwrap_or("")
+        );
     }
 
     Ok(())
@@ -708,8 +716,7 @@ fi
         // Build drives array — overlay mode uses two drives
         let drives = if self.use_overlay() {
             let squashfs = if use_jailer {
-                filename_str(&self.rootfs_path)?
-                    .replace(".ext4", "-rootfs.squashfs")
+                filename_str(&self.rootfs_path)?.replace(".ext4", "-rootfs.squashfs")
             } else {
                 self.squashfs_path()
             };
@@ -803,12 +810,7 @@ fi
         );
         tokio::fs::create_dir_all(&root_dir)
             .await
-            .with_context(|| {
-                format!(
-                    "creating jailer chroot directory: {}",
-                    root_dir.display()
-                )
-            })?;
+            .with_context(|| format!("creating jailer chroot directory: {}", root_dir.display()))?;
 
         // Hard-link (or copy) kernel into chroot
         let kernel_name = filename_str(&self.rootfs_path)?.replace(".ext4", "-kernel");
@@ -837,14 +839,15 @@ fi
         if self.use_overlay() {
             // Overlay mode: link squashfs (shared) and overlay ext4 (per-VM) into chroot
             let squashfs_src = self.squashfs_path();
-            let squashfs_name = filename_str(&self.rootfs_path)?
-                .replace(".ext4", "-rootfs.squashfs");
+            let squashfs_name =
+                filename_str(&self.rootfs_path)?.replace(".ext4", "-rootfs.squashfs");
             let chroot_squashfs = root_dir.join(&squashfs_name);
             if tokio::fs::hard_link(&squashfs_src, &chroot_squashfs)
                 .await
                 .is_err()
             {
-                tokio::fs::copy(&squashfs_src, &chroot_squashfs).await
+                tokio::fs::copy(&squashfs_src, &chroot_squashfs)
+                    .await
                     .context("copying squashfs into chroot")?;
             }
 
@@ -854,7 +857,8 @@ fi
                 .await
                 .is_err()
             {
-                tokio::fs::copy(&self.overlay_path, &chroot_overlay).await
+                tokio::fs::copy(&self.overlay_path, &chroot_overlay)
+                    .await
                     .context("copying overlay into chroot")?;
             }
         } else {
@@ -903,13 +907,10 @@ fi
         // them after the jailer drops privileges.
         if let (Some(uid), Some(gid)) = (self.fc_config.jailer_uid, self.fc_config.jailer_gid) {
             use std::os::unix::fs::chown;
-            for entry in
-                std::fs::read_dir(&root_dir).context("reading jailer chroot directory")?
-            {
+            for entry in std::fs::read_dir(&root_dir).context("reading jailer chroot directory")? {
                 let entry = entry?;
-                chown(entry.path(), Some(uid), Some(gid)).with_context(|| {
-                    format!("chown {}:{} {}", uid, gid, entry.path().display())
-                })?;
+                chown(entry.path(), Some(uid), Some(gid))
+                    .with_context(|| format!("chown {}:{} {}", uid, gid, entry.path().display()))?;
             }
         }
 
@@ -924,8 +925,7 @@ fi
     async fn write_vm_config(&self) -> anyhow::Result<()> {
         let use_jailer = self.fc_config.jailer_path.is_some();
         let config = self.build_vm_config(use_jailer)?;
-        let rendered =
-            serde_json::to_string_pretty(&config).context("serializing VM config")?;
+        let rendered = serde_json::to_string_pretty(&config).context("serializing VM config")?;
         tokio::fs::write(&self.config_path, rendered).await?;
         Ok(())
     }
@@ -1100,10 +1100,7 @@ fi
             }
         }
         let mut metadata = serde_json::Map::new();
-        metadata.insert(
-            "fc-runner".to_string(),
-            serde_json::Value::Object(inner),
-        );
+        metadata.insert("fc-runner".to_string(), serde_json::Value::Object(inner));
         let json = serde_json::to_string(&serde_json::Value::Object(metadata))
             .context("serializing MMDS metadata")?;
         Ok(json)
@@ -1171,9 +1168,9 @@ fi
     /// Wait for the firecracker process to exit by polling the PID.
     /// Kills the process immediately if the cancellation token fires (graceful shutdown).
     async fn wait_for_exit(&self, instance: &Instance) -> anyhow::Result<()> {
-        let pid = instance.firecracker_pid().ok_or_else(|| {
-            anyhow::anyhow!("no firecracker PID available")
-        })?;
+        let pid = instance
+            .firecracker_pid()
+            .ok_or_else(|| anyhow::anyhow!("no firecracker PID available"))?;
 
         tracing::info!(vm_id = %self.vm_id, pid, "waiting for firecracker process to exit");
 
@@ -1247,8 +1244,8 @@ fi
         let mut child = if let Some(jailer_path) = &self.fc_config.jailer_path {
             let uid = self.fc_config.jailer_uid.expect("validated in config");
             let gid = self.fc_config.jailer_gid.expect("validated in config");
-            let config_name = filename_str(&self.config_path)
-                .expect("config_path must have a valid filename");
+            let config_name =
+                filename_str(&self.config_path).expect("config_path must have a valid filename");
             tracing::info!(
                 vm_id = %self.vm_id,
                 jailer = %jailer_path,
@@ -1497,7 +1494,15 @@ mod tests {
     fn create_test_vm(overlay: bool) -> MicroVm {
         let fc_config = test_fc_config(overlay);
         let network = test_network_config();
-        MicroVm::new(12345, &fc_config, &network, "/tmp/fc-test", 3600, 0, CancellationToken::new())
+        MicroVm::new(
+            12345,
+            &fc_config,
+            &network,
+            "/tmp/fc-test",
+            3600,
+            0,
+            CancellationToken::new(),
+        )
     }
 
     #[test]
@@ -1532,10 +1537,12 @@ mod tests {
         assert_eq!(drives.len(), 1);
         assert_eq!(drives[0]["drive_id"], "rootfs");
         assert_eq!(drives[0]["is_read_only"], false);
-        assert!(!config["boot-source"]["boot_args"]
-            .as_str()
-            .unwrap()
-            .contains("overlay-init"));
+        assert!(
+            !config["boot-source"]["boot_args"]
+                .as_str()
+                .unwrap()
+                .contains("overlay-init")
+        );
     }
 
     #[test]
@@ -1549,19 +1556,23 @@ mod tests {
         assert_eq!(drives[0]["drive_id"], "rootfs");
         assert_eq!(drives[0]["is_root_device"], true);
         assert_eq!(drives[0]["is_read_only"], true);
-        assert!(drives[0]["path_on_host"]
-            .as_str()
-            .unwrap()
-            .ends_with(".squashfs"));
+        assert!(
+            drives[0]["path_on_host"]
+                .as_str()
+                .unwrap()
+                .ends_with(".squashfs")
+        );
 
         // Second drive: overlay, read-write
         assert_eq!(drives[1]["drive_id"], "overlay");
         assert_eq!(drives[1]["is_root_device"], false);
         assert_eq!(drives[1]["is_read_only"], false);
-        assert!(drives[1]["path_on_host"]
-            .as_str()
-            .unwrap()
-            .contains(".overlay.ext4"));
+        assert!(
+            drives[1]["path_on_host"]
+                .as_str()
+                .unwrap()
+                .contains(".overlay.ext4")
+        );
     }
 
     #[test]

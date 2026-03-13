@@ -10,7 +10,7 @@
 use std::process::Stdio;
 use std::time::Duration;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 
 /// MMDS V2 base URL (Firecracker metadata service).
@@ -28,7 +28,8 @@ const RUNNER_DIR: &str = "/home/runner";
 /// Runner user name.
 const RUNNER_USER: &str = "runner";
 /// Explicit PATH for the runner process — includes cargo and standard dirs.
-const RUNNER_PATH: &str = "/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const RUNNER_PATH: &str =
+    "/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// Metadata expected from MMDS.
 #[derive(Debug, Deserialize)]
@@ -121,9 +122,13 @@ async fn run_with_reporting(metadata: &Metadata) -> i32 {
         }
     };
 
-    vsock_send(&mut stream, &AgentMessage::Ready {
-        timestamp: chrono::Utc::now().to_rfc3339(),
-    }).await;
+    vsock_send(
+        &mut stream,
+        &AgentMessage::Ready {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        },
+    )
+    .await;
 
     tracing::info!("starting GitHub Actions runner");
     vsock_send(&mut stream, &AgentMessage::JobStarted { job_id: None }).await;
@@ -385,8 +390,7 @@ async fn run_runner_jit(metadata: &Metadata) -> i32 {
         .stderr(Stdio::inherit());
     #[cfg(unix)]
     as_runner_user(&mut cmd);
-    let mut child = match cmd.spawn()
-    {
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "failed to start runner");
@@ -419,7 +423,9 @@ async fn run_runner_registered(metadata: &Metadata) -> i32 {
             return 1;
         }
     };
-    let runner_name = metadata.runner_name.as_deref()
+    let runner_name = metadata
+        .runner_name
+        .as_deref()
         .unwrap_or(&metadata.hostname);
     let labels = "firecracker,linux,x64";
 
@@ -429,13 +435,18 @@ async fn run_runner_registered(metadata: &Metadata) -> i32 {
     let work_dir = format!("{}/_work", RUNNER_DIR);
     let mut cmd = tokio::process::Command::new(&config_sh);
     let mut args = vec![
-        "--url", repo_url,
-        "--token", token,
-        "--name", runner_name,
-        "--labels", labels,
+        "--url",
+        repo_url,
+        "--token",
+        token,
+        "--name",
+        runner_name,
+        "--labels",
+        labels,
         "--unattended",
         "--disableupdate",
-        "--work", &work_dir,
+        "--work",
+        &work_dir,
     ];
     if metadata.ephemeral {
         args.push("--ephemeral");
@@ -448,8 +459,7 @@ async fn run_runner_registered(metadata: &Metadata) -> i32 {
         .stderr(Stdio::inherit());
     #[cfg(unix)]
     as_runner_user(&mut cmd);
-    let status = match cmd.status().await
-    {
+    let status = match cmd.status().await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "failed to start config.sh");
@@ -509,7 +519,10 @@ mod tests {
         let meta: Metadata = serde_json::from_str(json).unwrap();
         assert_eq!(meta.runner_token.as_deref(), Some("tok"));
         assert_eq!(meta.runner_mode.as_deref(), Some("register"));
-        assert_eq!(meta.repo_url.as_deref(), Some("https://github.com/org/repo"));
+        assert_eq!(
+            meta.repo_url.as_deref(),
+            Some("https://github.com/org/repo")
+        );
         assert_eq!(meta.runner_name.as_deref(), Some("fc-warm-0-abc"));
         assert!(!meta.shutdown_on_exit);
     }
@@ -585,14 +598,21 @@ mod tests {
     #[test]
     fn agent_messages_are_ndjson_compatible() {
         let messages = vec![
-            AgentMessage::Ready { timestamp: "t".to_string() },
+            AgentMessage::Ready {
+                timestamp: "t".to_string(),
+            },
             AgentMessage::JobStarted { job_id: Some(1) },
-            AgentMessage::Log { line: "test".to_string() },
+            AgentMessage::Log {
+                line: "test".to_string(),
+            },
             AgentMessage::JobCompleted { exit_code: 0 },
         ];
         for msg in messages {
             let json = serde_json::to_string(&msg).unwrap();
-            assert!(!json.contains('\n'), "NDJSON messages must not contain newlines");
+            assert!(
+                !json.contains('\n'),
+                "NDJSON messages must not contain newlines"
+            );
             let _: serde_json::Value = serde_json::from_str(&json).unwrap();
         }
     }
@@ -626,9 +646,11 @@ mod tests {
     async fn mmds_read_failure_with_retry() {
         let result = read_mmds_with_retry(2, std::time::Duration::from_millis(10)).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("failed to read MMDS"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("failed to read MMDS")
+        );
     }
 }
