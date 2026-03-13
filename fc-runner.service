@@ -12,6 +12,10 @@ KillSignal=SIGTERM
 TimeoutStopSec=300
 Environment=RUST_LOG=fc_runner=info
 
+# Prevent journald rate limiting from suppressing fc-runner logs.
+# Guest serial console output (now suppressed) was triggering rate limits.
+LogRateLimitIntervalSec=0
+
 # fc-runner needs root with broad access for:
 #   mount/umount (loop devices), chroot (rootfs provisioning),
 #   iptables/ipset (NAT rules), TAP devices (ioctl TUNSETIFF)

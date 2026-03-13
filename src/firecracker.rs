@@ -1394,6 +1394,10 @@ fi
                 .arg("--config-file")
                 .arg(config_name)
                 .arg("--no-api")
+                // Suppress guest serial console output (console=ttyS0) from flooding
+                // journald. Guest logs are captured via log_path and dump_guest_log().
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .spawn()
                 .context("spawning jailer")?
         } else {
@@ -1401,6 +1405,8 @@ fi
                 .arg("--config-file")
                 .arg(&self.config_path)
                 .arg("--no-api")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .spawn()
                 .context("spawning firecracker")?
         };
