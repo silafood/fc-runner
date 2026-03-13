@@ -20,13 +20,8 @@ const DEFAULT_IMAGE_SIZE: u64 = 6 * 1024 * 1024 * 1024;
 /// If the image has already been pulled and the digest matches, the cached
 /// rootfs is reused. The `fc-runner` binary is installed into the image
 /// automatically if not already present.
-pub async fn pull_and_convert(
-    image_ref: &str,
-    output_path: &str,
-) -> anyhow::Result<()> {
-    let reference: Reference = image_ref
-        .parse()
-        .context("parsing OCI image reference")?;
+pub async fn pull_and_convert(image_ref: &str, output_path: &str) -> anyhow::Result<()> {
+    let reference: Reference = image_ref.parse().context("parsing OCI image reference")?;
 
     let client = Client::default();
     let auth = RegistryAuth::Anonymous;
@@ -44,7 +39,10 @@ pub async fn pull_and_convert(
             .await
             .unwrap_or_default();
         if cached.trim() == digest {
-            tracing::info!(image = image_ref, "OCI image unchanged (digest match), using cached rootfs");
+            tracing::info!(
+                image = image_ref,
+                "OCI image unchanged (digest match), using cached rootfs"
+            );
             return Ok(());
         }
     }
@@ -156,9 +154,7 @@ fn extract_layer(layer_data: &[u8], mount_dir: &str) -> anyhow::Result<()> {
         if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
             if file_name == ".wh..wh..opq" {
                 // Opaque whiteout: delete all contents of the parent directory
-                let parent = mount_path.join(
-                    path.parent().unwrap_or_else(|| Path::new(".")),
-                );
+                let parent = mount_path.join(path.parent().unwrap_or_else(|| Path::new(".")));
                 if parent.exists() {
                     for child in std::fs::read_dir(&parent)? {
                         let child = child?;
@@ -263,11 +259,12 @@ async fn install_agent_if_missing(rootfs_path: &str) -> anyhow::Result<()> {
     let _ = tokio::fs::remove_file(&mask_link).await;
     tokio::fs::symlink("/dev/null", &mask_link).await?;
 
-    // Podman: symlink docker → podman so GitHub Actions runner uses podman transparently
-    let docker_link = format!("{}/usr/local/bin/docker", mount_dir);
-    tokio::fs::create_dir_all(format!("{}/usr/local/bin", mount_dir)).await?;
-    let _ = tokio::fs::remove_file(&docker_link).await;
-    tokio::fs::symlink("/usr/bin/podman", &docker_link).await?;
+    // Podman: replace /usr/bin/docker with symlink to podman.
+    // GitHub Actions runner calls /usr/bin/docker by full path, so the symlink
+    // must be there (not just /usr/local/bin/docker).
+    let docker_bin = format!("{}/usr/bin/docker", mount_dir);
+    let _ = tokio::fs::remove_file(&docker_bin).await;
+    tokio::fs::symlink("/usr/bin/podman", &docker_bin).await?;
 
     // Podman containers.conf: configure DNS for container networking
     let containers_dir = format!("{}/etc/containers", mount_dir);
@@ -279,7 +276,8 @@ async fn install_agent_if_missing(rootfs_path: &str) -> anyhow::Result<()> {
          \n\
          [engine]\n\
          runtime = \"crun\"\n",
-    ).await?;
+    )
+    .await?;
 
     // Install overlay-init script and directories for OverlayFS COW mode
     install_overlay_init_into(&mount_dir).await?;
@@ -473,9 +471,7 @@ mod tests {
 
     #[test]
     fn parse_image_reference() {
-        let r: Reference = "ghcr.io/silafood/fc-runner-image:latest"
-            .parse()
-            .unwrap();
+        let r: Reference = "ghcr.io/silafood/fc-runner-image:latest".parse().unwrap();
         assert_eq!(r.registry(), "ghcr.io");
         assert_eq!(r.repository(), "silafood/fc-runner-image");
         assert_eq!(r.tag().unwrap(), "latest");
@@ -513,5 +509,4 @@ mod tests {
         let result = extract_layer(&gz_data, tmp.path().to_str().unwrap());
         assert!(result.is_ok());
     }
-
 }
