@@ -275,7 +275,14 @@ async fn install_agent_if_missing(rootfs_path: &str) -> anyhow::Result<()> {
          dns_servers = [\"8.8.8.8\", \"1.1.1.1\"]\n\
          \n\
          [engine]\n\
+         cgroup_manager = \"cgroupfs\"\n\
          runtime = \"crun\"\n",
+    )
+    .await?;
+    // Allow short image names like "postgres:16" to resolve to Docker Hub
+    tokio::fs::write(
+        format!("{}/registries.conf", containers_dir),
+        "unqualified-search-registries = [\"docker.io\"]\n",
     )
     .await?;
 

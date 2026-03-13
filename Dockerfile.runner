@@ -63,9 +63,10 @@ RUN systemctl enable systemd-networkd systemd-resolved && \
 # Podman: symlink docker → podman for GitHub Actions runner compatibility
 RUN ln -sf /usr/bin/podman /usr/bin/docker
 
-# Podman config: DNS + runtime
+# Podman config: DNS, cgroup manager, runtime, and Docker Hub registry
 RUN mkdir -p /etc/containers && \
-    printf '[containers]\ndns_servers = ["8.8.8.8", "1.1.1.1"]\n\n[engine]\nruntime = "crun"\n' > /etc/containers/containers.conf
+    printf '[containers]\ndns_servers = ["8.8.8.8", "1.1.1.1"]\n\n[engine]\ncgroup_manager = "cgroupfs"\nruntime = "crun"\n' > /etc/containers/containers.conf && \
+    printf 'unqualified-search-registries = ["docker.io"]\n' > /etc/containers/registries.conf
 
 # fstab for Firecracker (/dev/vda)
 RUN printf '/dev/vda\t/\text4\tdefaults,noatime\t0\t1\n' > /etc/fstab
