@@ -676,7 +676,7 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
                  gcc g++ make cmake \
                  python3 python3-pip python3-venv \
                  nodejs npm \
-                 podman buildah slirp4netns fuse-overlayfs uidmap \
+                 podman buildah crun netavark aardvark-dns \
                  wget tar gzip xz-utils \
                  zip bzip2 \
                  libffi-dev zlib1g-dev \
@@ -779,7 +779,11 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
              systemctl disable motd-news.timer 2>/dev/null || true; \
              systemctl mask systemd-timesyncd.service 2>/dev/null || true; \
              systemctl mask boot-efi.mount 2>/dev/null || true; \
-             systemctl mask systemd-gpt-auto-generator 2>/dev/null || true",
+             systemctl mask systemd-gpt-auto-generator 2>/dev/null || true; \
+             systemctl mask podman-restart.service 2>/dev/null || true; \
+             systemctl mask podman-auto-update.service 2>/dev/null || true; \
+             systemctl mask podman-auto-update.timer 2>/dev/null || true; \
+             systemctl mask podman-clean-transient.service 2>/dev/null || true",
         ],
     )
     .status()
@@ -833,7 +837,13 @@ async fn build_rootfs_contents(mount_dir: &str, network: &NetworkConfig) -> anyh
     // Allow short image names like "postgres:16" to resolve to Docker Hub
     tokio::fs::write(
         format!("{}/registries.conf", containers_dir),
-        "unqualified-search-registries = [\"docker.io\"]\n",
+        "unqualified-search-registries = [\"docker.io\"]\nshort-name-mode = \"permissive\"\n",
+    )
+    .await?;
+    // Image signature policy — accept all (required for podman pull)
+    tokio::fs::write(
+        format!("{}/policy.json", containers_dir),
+        "{ \"default\": [{ \"type\": \"insecureAcceptAnything\" }] }\n",
     )
     .await?;
 

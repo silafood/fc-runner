@@ -289,7 +289,13 @@ async fn install_agent_if_missing(rootfs_path: &str) -> anyhow::Result<()> {
     // Allow short image names like "postgres:16" to resolve to Docker Hub
     tokio::fs::write(
         format!("{}/registries.conf", containers_dir),
-        "unqualified-search-registries = [\"docker.io\"]\n",
+        "unqualified-search-registries = [\"docker.io\"]\nshort-name-mode = \"permissive\"\n",
+    )
+    .await?;
+    // Image signature policy — accept all (required for podman pull)
+    tokio::fs::write(
+        format!("{}/policy.json", containers_dir),
+        "{ \"default\": [{ \"type\": \"insecureAcceptAnything\" }] }\n",
     )
     .await?;
 
