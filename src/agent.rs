@@ -81,6 +81,11 @@ pub async fn run(log_level: &str) -> anyhow::Result<()> {
 
     set_hostname(&metadata.hostname).await;
 
+    // Wait for Docker daemon to be ready before starting the runner.
+    // GitHub Actions services: containers need Docker, and the daemon may still
+    // be starting when we reach this point (race with systemd boot).
+    wait_for_docker(30, Duration::from_secs(2)).await;
+
     let exit_code = run_with_reporting(&metadata).await;
 
     if metadata.shutdown_on_exit {
@@ -222,6 +227,122 @@ async fn set_hostname(hostname: &str) {
     );
     if let Err(e) = tokio::fs::write("/etc/hosts", hosts).await {
         tracing::warn!(error = %e, "failed to update /etc/hosts");
+    }
+}
+
+/// Wait for Docker daemon socket to appear and become accessible.
+/// Logs detailed diagnostics if Docker is not ready after all attempts.
+async fn wait_for_docker(max_attempts: u32, delay: Duration) {
+    let socket_path = "/var/run/docker.sock";
+
+    for attempt in 1..=max_attempts {
+        // First check if the socket file exists
+        if tokio::fs::metadata(socket_path).await.is_err() {
+            if attempt == max_attempts {
+                tracing::warn!(
+                    "Docker socket {socket_path} not found after {max_attempts} attempts — \
+                     services: containers will fail"
+                );
+                log_docker_diagnostics().await;
+                return;
+            }
+            tracing::info!(attempt, "waiting for Docker socket to appear...");
+            tokio::time::sleep(delay).await;
+            continue;
+        }
+
+        // Socket exists — try `docker version` as the runner user to verify access
+        let mut cmd = tokio::process::Command::new("/usr/bin/docker");
+        cmd.args(["version", "--format", "{{.Server.APIVersion}}"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        as_runner_user(&mut cmd);
+
+        match cmd.output().await {
+            Ok(output) if output.status.success() => {
+                let api_version = String::from_utf8_lossy(&output.stdout);
+                tracing::info!(
+                    api_version = api_version.trim(),
+                    attempt,
+                    "Docker daemon is ready"
+                );
+                return;
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if attempt == max_attempts {
+                    tracing::warn!(
+                        stderr = stderr.trim(),
+                        "Docker not accessible after {max_attempts} attempts"
+                    );
+                    log_docker_diagnostics().await;
+                    return;
+                }
+                tracing::info!(attempt, stderr = stderr.trim(), "Docker not ready yet, retrying...");
+            }
+            Err(e) => {
+                if attempt == max_attempts {
+                    tracing::warn!(error = %e, "docker command failed after {max_attempts} attempts");
+                    return;
+                }
+                tracing::info!(attempt, error = %e, "docker command failed, retrying...");
+            }
+        }
+        tokio::time::sleep(delay).await;
+    }
+}
+
+/// Log diagnostic info about Docker to help troubleshoot permission issues.
+async fn log_docker_diagnostics() {
+    // Check socket permissions
+    let socket_path = "/var/run/docker.sock";
+    if let Ok(output) = tokio::process::Command::new("ls")
+        .args(["-la", socket_path])
+        .output()
+        .await
+    {
+        let info = String::from_utf8_lossy(&output.stdout);
+        tracing::warn!(socket = info.trim(), "Docker socket permissions");
+    }
+
+    // Check if docker daemon is running
+    if let Ok(output) = tokio::process::Command::new("pgrep")
+        .args(["-a", "dockerd"])
+        .output()
+        .await
+    {
+        let info = String::from_utf8_lossy(&output.stdout);
+        if info.trim().is_empty() {
+            tracing::warn!("dockerd process NOT running");
+        } else {
+            tracing::warn!(process = info.trim(), "dockerd process found");
+        }
+    }
+
+    // Show runner user's groups
+    let (uid, gid, groups) = runner_credentials();
+    tracing::warn!(uid, gid, ?groups, "runner user credentials");
+
+    // Check docker group GID
+    if let Ok(contents) = tokio::fs::read_to_string("/etc/group").await {
+        for line in contents.lines() {
+            if line.starts_with("docker:") {
+                tracing::warn!(group_entry = line, "docker group in /etc/group");
+                break;
+            }
+        }
+    }
+
+    // Check systemd service status
+    if let Ok(output) = tokio::process::Command::new("systemctl")
+        .args(["status", "docker", "--no-pager", "-l"])
+        .output()
+        .await
+    {
+        let info = String::from_utf8_lossy(&output.stdout);
+        let err = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!(status = info.trim(), stderr = err.trim(), "docker.service status");
     }
 }
 
