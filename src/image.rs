@@ -259,21 +259,19 @@ async fn install_agent_if_missing(rootfs_path: &str) -> anyhow::Result<()> {
     let _ = tokio::fs::remove_file(&mask_link).await;
     tokio::fs::symlink("/dev/null", &mask_link).await?;
 
-    // Podman: replace /usr/bin/docker with symlink to podman.
-    // GitHub Actions runner calls /usr/bin/docker by full path, so the symlink
-    // must be there (not just /usr/local/bin/docker).
-    let docker_bin = format!("{}/usr/bin/docker", mount_dir);
-    let _ = tokio::fs::remove_file(&docker_bin).await;
-    tokio::fs::symlink("/usr/bin/podman", &docker_bin).await?;
-
-    // Podman rootless: subordinate UID/GID ranges for user namespace mapping
-    for file in ["subuid", "subgid"] {
-        let path = format!("{}/etc/{}", mount_dir, file);
-        let existing = tokio::fs::read_to_string(&path).await.unwrap_or_default();
-        if !existing.contains("runner:") {
-            tokio::fs::write(&path, format!("{}runner:100000:65536\n", existing)).await?;
-        }
-    }
+    // Podman: create a wrapper at /usr/bin/docker that runs podman as root.
+    // Running rootful avoids user namespace issues inside Firecracker VMs.
+    let docker_wrapper = format!("{}/usr/bin/docker", mount_dir);
+    let _ = tokio::fs::remove_file(&docker_wrapper).await;
+    tokio::fs::write(
+        &docker_wrapper,
+        "#!/bin/sh\nexec sudo /usr/bin/podman \"$@\"\n",
+    )
+    .await?;
+    std::fs::set_permissions(
+        &docker_wrapper,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )?;
 
     // Podman containers.conf: configure DNS for container networking
     let containers_dir = format!("{}/etc/containers", mount_dir);
