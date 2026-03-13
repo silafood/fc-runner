@@ -27,6 +27,7 @@ GitHub Actions                fc-runner                    Firecracker
 - **Fast boot** — Firecracker microVMs start in ~125 ms
 - **Auto-provisioning** — kernel download, golden rootfs build (from Ubuntu cloud image via pure Rust qcow2 conversion), per-VM TAP networking, and NAT are all set up automatically at first startup
 - **OCI image support** — define VM images as standard Dockerfiles, push to any registry (GHCR, Docker Hub), and fc-runner pulls and converts to ext4 automatically with digest-based caching
+- **Container support** — Podman (Docker-compatible) runs inside VMs with full port mapping support for GitHub Actions `services:` (e.g., `postgres:16`)
 - **JIT tokens** — single-use, short-lived tokens (no static runner registration)
 - **GitHub App auth** — authenticate as a GitHub App for higher rate limits and no PAT expiry management
 - **MMDS secret injection** — inject secrets via Firecracker's built-in metadata service (no loop-mount needed)
@@ -53,6 +54,8 @@ GitHub Actions                fc-runner                    Firecracker
 | Orchestrator | Rust + Tokio (async) |
 | Hypervisor | Firecracker v1.14.2 via [firecracker-rs-sdk](https://crates.io/crates/firecracker-rs-sdk) |
 | Guest OS | Ubuntu 24.04 Noble |
+| Guest kernel | Linux 6.1.164 (Amazon Linux source, custom config with nf_tables) |
+| In-VM containers | Podman + netavark (Docker-compatible, with port mapping) |
 | Guest networking | virtio-net over per-VM TAP (pure Rust rtnetlink) + iptables NAT |
 | CI platform | GitHub Actions REST API |
 | Host init | systemd |
@@ -143,9 +146,19 @@ sudo fc-runner server --config /etc/fc-runner/config.toml
 jobs:
   build:
     runs-on: [self-hosted, linux, firecracker]
+    services:
+      postgres:
+        image: postgres:16
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: testdb
     steps:
       - uses: actions/checkout@v4
       - run: echo "Running inside a Firecracker microVM!"
+      - run: pg_isready -h localhost -p 5432
 ```
 
 ## CLI Usage
@@ -217,7 +230,9 @@ fc-runner/
 │   ├── fetch-mmds-env.sh            # Guest-side MMDS metadata fetch script
 │   └── microvm-kernel-ci-*.config   # Firecracker kernel configs (x86_64 + aarch64)
 ├── .github/workflows/
-│   └── release.yml       # CI: build binary + kernel + rootfs, publish release
+│   ├── release.yml        # CI: build binary + kernel + rootfs, publish release
+│   ├── build-kernel.yml   # CI: build kernel from Amazon Linux source, push to GHCR
+│   └── docker-image.yml   # CI: build runner OCI image, push to GHCR
 ├── docs/
 │   ├── architecture.md   # System design and module overview
 │   ├── setup.md          # Installation guide
@@ -320,9 +335,21 @@ sudo rm /opt/fc-runner/runner-rootfs-golden.ext4
 sudo systemctl restart fc-runner
 ```
 
+## Guest Kernel
+
+The guest kernel is built from [Amazon Linux's kernel source](https://github.com/amazonlinux/linux)
+using Firecracker's minimal config with additions for container networking:
+
+- **Base**: Firecracker official config (VIRTIO, ACPI, KVM_GUEST, ext4, overlay, squashfs)
+- **Container networking**: `CONFIG_NF_TABLES` + 19 NFT modules for iptables-nft / netavark
+- **xtables extensions**: MARK, TARGET_MARK, MATCH_COMMENT, MATCH_MULTIPORT
+
+See [docs/guest-kernel-config.md](docs/guest-kernel-config.md) for the full kernel configuration reference.
+
 ## Documentation
 
 - [Architecture](docs/architecture.md) — system design, module overview, security model
+- [Guest Kernel Config](docs/guest-kernel-config.md) — kernel configuration reference
 - [Host Dependencies](docs/host-dependencies.md) — required system tools and packages
 - [Setup Guide](docs/setup.md) — installation and verification
 - [Configuration Reference](docs/configuration.md) — all config options
