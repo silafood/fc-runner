@@ -195,6 +195,8 @@ pub struct MicroVm {
     mount_point: PathBuf,
     /// Per-VM overlay ext4 file (used only when overlay_rootfs = true).
     overlay_path: PathBuf,
+    /// Per-VM VSOCK Unix socket path (used only when vsock_enabled = true).
+    vsock_socket_path: PathBuf,
     /// Per-slot persistent cache ext4 image (used only when cache_enabled = true).
     cache_path: Option<PathBuf>,
     fc_config: FirecrackerConfig,
@@ -246,6 +248,7 @@ impl MicroVm {
             log_path: base.join(format!("{}.log", vm_id)),
             mount_point: base.join(format!("{}.mnt", vm_id)),
             overlay_path: base.join(format!("{}.overlay.ext4", vm_id)),
+            vsock_socket_path: base.join(format!("{}.vsock", vm_id)),
             cache_path,
             job_id,
             vm_id,
@@ -904,7 +907,7 @@ fi
             let uds_path = if use_jailer {
                 "vsock.sock".to_string()
             } else {
-                path_str(&self.socket_path)?.to_string()
+                path_str(&self.vsock_socket_path)?.to_string()
             };
             config["vsock"] = serde_json::json!({
                 "guest_cid": cid,
@@ -1230,14 +1233,15 @@ fi
         // incorrectly deserializes Firecracker's `{}` response as unit struct.
         if self.fc_config.vsock_enabled {
             let cid = self.vsock_cid();
-            let socket_path = self.api_socket_path();
+            let api_sock = self.api_socket_path();
+            let vsock_uds = path_str(&self.vsock_socket_path)?;
             let vsock_json = serde_json::json!({
                 "guest_cid": cid,
-                "uds_path": "vsock.sock"
+                "uds_path": vsock_uds
             })
             .to_string();
-            put_vsock_raw(&socket_path, &vsock_json).await?;
-            tracing::info!(vm_id = %self.vm_id, cid, "VSOCK device configured");
+            put_vsock_raw(&api_sock, &vsock_json).await?;
+            tracing::info!(vm_id = %self.vm_id, cid, vsock_uds, "VSOCK device configured");
         }
 
         Ok(())
@@ -1476,6 +1480,7 @@ fi
             &self.log_path,
             &console_path,
             &self.overlay_path,
+            &self.vsock_socket_path,
         ] {
             if let Err(e) = tokio::fs::remove_file(path).await
                 && e.kind() != std::io::ErrorKind::NotFound
