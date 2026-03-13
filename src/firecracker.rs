@@ -86,7 +86,27 @@ fn lazy_umount_sync(target: &str) -> anyhow::Result<()> {
 fn is_process_alive(pid: u32) -> bool {
     #[cfg(target_os = "linux")]
     {
-        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
+        // Try waitpid(WNOHANG) first — this reaps zombies and detects exit.
+        // kill(pid, 0) is insufficient because it returns Ok for zombies.
+        match nix::sys::wait::waitpid(
+            nix::unistd::Pid::from_raw(pid as i32),
+            Some(nix::sys::wait::WaitPidFlag::WNOHANG),
+        ) {
+            Ok(nix::sys::wait::WaitStatus::StillAlive) => true,
+            Ok(_) => false, // exited, signaled, or stopped — not alive
+            Err(nix::errno::Errno::ECHILD) => {
+                // Not our child (or already reaped). Fall back to kill(0)
+                // but also check /proc/{pid}/status for zombie state.
+                if nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_err() {
+                    return false;
+                }
+                // Process exists but isn't our child — check for zombie
+                std::fs::read_to_string(format!("/proc/{}/status", pid))
+                    .map(|s| !s.contains("\nState:\tZ"))
+                    .unwrap_or(false)
+            }
+            Err(_) => false,
+        }
     }
     #[cfg(not(target_os = "linux"))]
     {
