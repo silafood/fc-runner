@@ -386,6 +386,7 @@ impl Orchestrator {
         done_tx: mpsc::Sender<(usize, String)>,
         done_rx: &mut mpsc::Receiver<(usize, String)>,
     ) -> anyhow::Result<()> {
+        tracing::info!("ephemeral warm pool replacement loop started");
         loop {
             tokio::select! {
                 _ = self.cancel.cancelled() => {
@@ -394,10 +395,17 @@ impl Orchestrator {
                     break;
                 }
                 Some((slot, repo)) = done_rx.recv() => {
+                    tracing::info!(
+                        slot,
+                        repo = %repo,
+                        "received VM completion signal, scheduling replacement"
+                    );
                     self.slot_pool.lock().await.push(slot);
+                    tracing::debug!(slot, "slot returned to pool, waiting 3s before replacement");
                     tokio::time::sleep(Duration::from_secs(3)).await;
 
                     if self.cancel.is_cancelled() {
+                        tracing::info!("shutdown cancelled during replacement delay");
                         break;
                     }
 
@@ -412,7 +420,12 @@ impl Orchestrator {
                         }
                     };
 
-                    tracing::info!(slot = new_slot, repo = %repo, "spawning warm pool replacement");
+                    tracing::info!(
+                        old_slot = slot,
+                        new_slot,
+                        repo = %repo,
+                        "spawning warm pool replacement VM"
+                    );
                     self.spawn_warm_vm(new_slot, repo, done_tx.clone());
                 }
             }
@@ -447,7 +460,7 @@ impl Orchestrator {
                 // Handle crashed/exited VMs — spawn replacement
                 Some((slot, repo)) = done_rx.recv() => {
                     self.slot_pool.lock().await.push(slot);
-                    tracing::info!(slot, repo = %repo, "non-ephemeral VM exited, spawning replacement");
+                    tracing::info!(slot, repo = %repo, "non-ephemeral VM exited, scheduling replacement");
 
                     tokio::time::sleep(Duration::from_secs(3)).await;
                     if self.cancel.is_cancelled() { break; }
@@ -590,10 +603,12 @@ impl Orchestrator {
                     let _ = early_done_tx.send((early_slot, early_repo)).await;
                     true
                 } else {
+                    tracing::debug!(slot = early_slot, "VSOCK channel closed without notification");
                     false
                 }
             });
 
+            tracing::info!(slot, repo = %repo, "warm pool VM running, waiting for exit...");
             let result = run_warm_vm(
                 config,
                 github.clone(),
@@ -604,9 +619,38 @@ impl Orchestrator {
             )
             .await;
             timer.observe_duration();
+            tracing::info!(
+                slot,
+                repo = %repo,
+                success = result.is_ok(),
+                "warm pool VM exited"
+            );
 
-            // Check if VSOCK already sent the early replacement signal
-            let early_signaled = early_handle.await.unwrap_or(false);
+            // Check if VSOCK already sent the early replacement signal.
+            // Use a timeout to prevent deadlock if the VSOCK channel isn't
+            // cleaned up properly (e.g. listener task stuck on accept).
+            let early_signaled = match tokio::time::timeout(
+                Duration::from_secs(5),
+                early_handle,
+            )
+            .await
+            {
+                Ok(Ok(signaled)) => {
+                    tracing::debug!(slot, early_signaled = signaled, "early_handle resolved");
+                    signaled
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(slot, error = %e, "early_handle task panicked");
+                    false
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        slot,
+                        "early_handle timed out after 5s, forcing replacement signal"
+                    );
+                    false
+                }
+            };
 
             // Delete this specific runner from GitHub (targeted, not a full scan)
             match &result {
@@ -616,17 +660,23 @@ impl Orchestrator {
                         slot,
                         repo = %repo,
                         runner_name = %vm_result.runner_name,
-                        "warm pool VM completed, deleting runner"
+                        "warm pool VM completed, deleting runner from GitHub"
                     );
                     if github.is_org_mode() {
                         github.delete_org_runner_by_name(&vm_result.runner_name).await;
                     } else {
                         github.delete_runner_by_name(&repo, &vm_result.runner_name).await;
                     }
+                    tracing::info!(
+                        slot,
+                        runner_name = %vm_result.runner_name,
+                        "runner deletion complete"
+                    );
                 }
                 Err(e) => {
                     metrics::JOBS_FAILED.with_label_values(&[&repo]).inc();
                     tracing::error!(slot, repo = %repo, error = ?e, "warm pool VM failed");
+                    tracing::info!(slot, "falling back to offline runner scan");
                     // Fall back to scanning for offline runners since we don't have the name
                     if github.is_org_mode() {
                         github.remove_org_offline_runners().await;
@@ -642,7 +692,28 @@ impl Orchestrator {
 
             // Only signal done_tx if VSOCK didn't already send an early signal
             if !early_signaled {
-                let _ = done_tx.send((slot, repo)).await;
+                tracing::info!(
+                    slot,
+                    repo = %repo,
+                    "signaling warm pool for replacement VM"
+                );
+                match done_tx.send((slot, repo)).await {
+                    Ok(()) => {
+                        tracing::info!(slot, "replacement signal sent successfully");
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            slot,
+                            error = %e,
+                            "failed to send replacement signal (receiver dropped?)"
+                        );
+                    }
+                }
+            } else {
+                tracing::info!(
+                    slot,
+                    "skipping replacement signal (VSOCK already triggered early replacement)"
+                );
             }
         });
     }
@@ -740,6 +811,11 @@ async fn run_warm_vm(
         slot,
         &uuid::Uuid::new_v4().to_string()[..8]
     );
+    tracing::info!(
+        slot,
+        runner_name = %runner_name,
+        "registering warm pool runner"
+    );
     let vm = MicroVm::new(
         0, // no specific job_id for warm pool VMs
         &config.firecracker,
@@ -754,6 +830,18 @@ async fn run_warm_vm(
         "RUNNER_MODE=register\nRUNNER_TOKEN={}\nREPO_URL={}\nRUNNER_NAME={}\nVM_ID={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\nEPHEMERAL={}\n",
         reg_token, registration_url, runner_name, vm.vm_id, vm.vm_id, ephemeral
     );
+    tracing::info!(
+        slot,
+        vm_id = %vm.vm_id,
+        runner_name = %runner_name,
+        ephemeral,
+        "launching warm pool VM"
+    );
     vm.execute_with_notify(&env_content, vsock_notify).await?;
+    tracing::info!(
+        slot,
+        runner_name = %runner_name,
+        "warm pool VM execution finished"
+    );
     Ok(WarmVmResult { runner_name })
 }
