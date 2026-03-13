@@ -137,7 +137,7 @@ fn set_executable(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-const KERNEL_URL: &str =
+const DEFAULT_KERNEL_URL: &str =
     "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.11/x86_64/vmlinux-6.1.102";
 const RUNNER_VERSION: &str = "2.332.0";
 const DEFAULT_CLOUD_IMG_URL: &str = "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img";
@@ -146,7 +146,12 @@ const DEFAULT_CLOUD_IMG_URL: &str = "https://cloud-images.ubuntu.com/minimal/rel
 pub async fn ensure_vm_assets(config: &mut AppConfig) -> anyhow::Result<()> {
     preflight_kvm()?;
     resolve_allowed_networks(&mut config.network, config.github.token.as_ref()).await?;
-    ensure_kernel(&config.firecracker.kernel_path).await?;
+    let kernel_url = config
+        .firecracker
+        .kernel_url
+        .as_deref()
+        .unwrap_or(DEFAULT_KERNEL_URL);
+    ensure_kernel(&config.firecracker.kernel_path, kernel_url).await?;
     if let Some(image_ref) = &config.firecracker.image {
         // OCI image mode: pull and convert to ext4
         crate::image::pull_and_convert(image_ref, &config.firecracker.rootfs_golden)
@@ -348,19 +353,23 @@ fn preflight_kvm() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn ensure_kernel(kernel_path: &str) -> anyhow::Result<()> {
+async fn ensure_kernel(kernel_path: &str, kernel_url: &str) -> anyhow::Result<()> {
     if Path::new(kernel_path).exists() {
         tracing::info!(path = kernel_path, "kernel already exists");
         return Ok(());
     }
 
-    tracing::info!(path = kernel_path, "kernel not found, downloading...");
+    tracing::info!(
+        path = kernel_path,
+        url = kernel_url,
+        "kernel not found, downloading..."
+    );
 
     if let Some(parent) = Path::new(kernel_path).parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    download_file(KERNEL_URL, kernel_path).await?;
+    download_file(kernel_url, kernel_path).await?;
 
     tracing::info!(path = kernel_path, "kernel downloaded");
     Ok(())

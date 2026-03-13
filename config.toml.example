@@ -28,6 +28,9 @@ labels = ["self-hosted", "linux", "firecracker"]
 [firecracker]
 binary_path = "/usr/local/bin/firecracker"
 kernel_path = "/opt/fc-runner/vmlinux.bin"
+# URL to download the kernel from if kernel_path does not exist.
+# Defaults to the Firecracker CI kernel from Amazon S3.
+# kernel_url = "https://github.com/silafood/fc-runner/releases/download/v0.3.0/vmlinux-6.1.102"
 rootfs_golden = "/opt/fc-runner/runner-rootfs-golden.ext4"
 # OCI image reference (recommended over cloud image build).
 # When set, the image is pulled from the registry, extracted to ext4,

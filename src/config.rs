@@ -159,6 +159,9 @@ pub struct FirecrackerConfig {
     /// Chroot base directory for jailer (default: /var/lib/fc-runner/jailer)
     #[serde(default = "default_jailer_chroot_base")]
     pub jailer_chroot_base: String,
+    /// URL to download the guest kernel from when kernel_path does not exist.
+    /// Defaults to the Firecracker CI kernel from Amazon S3.
+    pub kernel_url: Option<String>,
     /// URL for the cloud image used to build the golden rootfs (optional, has default)
     pub cloud_img_url: Option<String>,
     /// Secret injection method: "mmds" (default) uses Firecracker's MMDS service,
