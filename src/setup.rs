@@ -172,6 +172,10 @@ pub async fn ensure_vm_assets(config: &mut AppConfig) -> anyhow::Result<()> {
         .await?;
     }
 
+    // Ensure overlay-init is installed in the golden rootfs.
+    // OCI images may not include it, and it must match the current fc-runner version.
+    ensure_overlay_init_installed(&config.firecracker.rootfs_golden).await?;
+
     // Convert golden rootfs to squashfs when overlay mode is enabled
     if config.firecracker.overlay_rootfs {
         verify_kernel_overlay_support(&config.firecracker.kernel_path).await?;
@@ -1098,6 +1102,29 @@ async fn convert_to_squashfs(ext4_path: &str) -> anyhow::Result<()> {
         "squashfs rootfs ready for overlay mode"
     );
 
+    Ok(())
+}
+
+/// Mount the golden ext4, install/update overlay-init, then unmount.
+/// Called on every startup to ensure the overlay-init matches the current fc-runner version,
+/// regardless of whether the rootfs was built from a cloud image or pulled from an OCI registry.
+async fn ensure_overlay_init_installed(rootfs_path: &str) -> anyhow::Result<()> {
+    let mount_dir = format!("{}.mnt", rootfs_path);
+    tokio::fs::create_dir_all(&mount_dir).await?;
+
+    mount_ext4(rootfs_path, &mount_dir, false)
+        .await
+        .context("mounting rootfs to install overlay-init")?;
+
+    let result = install_overlay_init(&mount_dir).await;
+
+    lazy_umount(&mount_dir)
+        .await
+        .context("unmounting rootfs after overlay-init install")?;
+    let _ = tokio::fs::remove_dir(&mount_dir).await;
+
+    result.context("installing overlay-init")?;
+    tracing::info!("overlay-init installed/updated in golden rootfs");
     Ok(())
 }
 
