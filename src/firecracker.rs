@@ -1111,7 +1111,7 @@ fi
             .map_err(|e| anyhow::anyhow!("put_machine_configuration failed: {}", e))?;
 
         // Boot source — append overlay init params when in overlay mode
-        let boot_args = if self.use_overlay() {
+        let mut boot_args = if self.use_overlay() {
             format!(
                 "{} init=/sbin/overlay-init overlay_root=vdb",
                 self.fc_config.boot_args
@@ -1119,6 +1119,9 @@ fi
         } else {
             self.fc_config.boot_args.clone()
         };
+        if self.cache_path.is_some() {
+            boot_args = format!("{} cache_dev={}", boot_args, self.cache_device_name());
+        }
         instance
             .put_guest_boot_source(&BootSource {
                 kernel_image_path: PathBuf::from(&self.fc_config.kernel_path),
