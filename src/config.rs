@@ -435,9 +435,17 @@ impl AppConfig {
             let meta = std::fs::metadata(config_path)
                 .with_context(|| format!("reading config metadata: {}", path))?;
             let mode = meta.mode() & 0o777;
-            if mode & 0o007 != 0 {
+            if mode & 0o004 != 0 {
                 bail!(
                     "config file is world-readable (mode {:o}) — contains secrets!\n\
+                     Fix with: chmod 600 {}",
+                    mode,
+                    path
+                );
+            }
+            if mode & 0o002 != 0 {
+                bail!(
+                    "config file is world-writable (mode {:o}) — security risk!\n\
                      Fix with: chmod 600 {}",
                     mode,
                     path
@@ -535,6 +543,18 @@ impl AppConfig {
                     path = %self.runner.work_dir,
                     error = %e,
                     "could not set work_dir permissions to 0700 (ok if running under systemd ProtectSystem)"
+                );
+            }
+        }
+
+        // Validate pool configurations
+        for pool in &self.pool {
+            if pool.min_ready > pool.max_ready {
+                bail!(
+                    "pool '{}': min_ready ({}) must not exceed max_ready ({})",
+                    pool.name,
+                    pool.min_ready,
+                    pool.max_ready
                 );
             }
         }
