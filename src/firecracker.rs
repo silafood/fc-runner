@@ -35,6 +35,49 @@ pub struct VmRunContext {
     pub mem_override: Option<u32>,
 }
 
+impl VmRunContext {
+    pub fn new(
+        config: Arc<AppConfig>,
+        github: Arc<GitHubClient>,
+        slot: usize,
+        cancel: CancellationToken,
+    ) -> Self {
+        Self {
+            config,
+            github,
+            slot,
+            cancel,
+            log_tx: None,
+            vsock_notify: None,
+            vcpu_override: None,
+            mem_override: None,
+        }
+    }
+
+    pub fn log_tx(mut self, tx: broadcast::Sender<VmLogEvent>) -> Self {
+        self.log_tx = Some(tx);
+        self
+    }
+
+    pub fn vsock_notify(
+        mut self,
+        tx: tokio::sync::mpsc::Sender<vsock::JobDoneNotification>,
+    ) -> Self {
+        self.vsock_notify = Some(tx);
+        self
+    }
+
+    pub fn vcpu_override(mut self, vcpu: u32) -> Self {
+        self.vcpu_override = Some(vcpu);
+        self
+    }
+
+    pub fn mem_override(mut self, mem: u32) -> Self {
+        self.mem_override = Some(mem);
+        self
+    }
+}
+
 /// Mount an ext4 image via loop (read-write).
 ///
 /// Loop device setup is handled by the `mount` command (userspace), not the

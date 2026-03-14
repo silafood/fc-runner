@@ -282,16 +282,8 @@ impl Orchestrator {
                 })
                 .await;
 
-            let ctx = VmRunContext {
-                config: config.clone(),
-                github: github.clone(),
-                slot,
-                cancel,
-                log_tx: Some(server_state.log_tx.clone()),
-                vsock_notify: None,
-                vcpu_override: None,
-                mem_override: None,
-            };
+            let ctx = VmRunContext::new(config.clone(), github.clone(), slot, cancel)
+                .log_tx(server_state.log_tx.clone());
             let timer = metrics::VM_BOOT_DURATION
                 .with_label_values(&[&repo])
                 .start_timer();
@@ -618,16 +610,9 @@ impl Orchestrator {
             });
 
             tracing::info!(slot, repo = %repo, "warm pool VM running, waiting for exit...");
-            let ctx = VmRunContext {
-                config,
-                github: github.clone(),
-                slot,
-                cancel,
-                log_tx: Some(log_tx),
-                vsock_notify: Some(vsock_tx),
-                vcpu_override: None,
-                mem_override: None,
-            };
+            let ctx = VmRunContext::new(config, github.clone(), slot, cancel)
+                .log_tx(log_tx)
+                .vsock_notify(vsock_tx);
             let result = run_warm_vm(ctx, &repo).await;
             timer.observe_duration();
             tracing::info!(

@@ -208,16 +208,19 @@ impl PoolManager {
     }
 
     fn spawn_vm(&self, slot: usize, repo: String, done_tx: mpsc::Sender<(usize, String)>) {
-        let ctx = VmRunContext {
-            config: self.config.clone(),
-            github: self.github.clone(),
+        let mut ctx = VmRunContext::new(
+            self.config.clone(),
+            self.github.clone(),
             slot,
-            cancel: self.cancel.clone(),
-            log_tx: Some(self.log_tx.clone()),
-            vsock_notify: None,
-            vcpu_override: self.pool_config.vcpu_count,
-            mem_override: self.pool_config.mem_size_mib,
-        };
+            self.cancel.clone(),
+        )
+        .log_tx(self.log_tx.clone());
+        if let Some(vcpu) = self.pool_config.vcpu_count {
+            ctx = ctx.vcpu_override(vcpu);
+        }
+        if let Some(mem) = self.pool_config.mem_size_mib {
+            ctx = ctx.mem_override(mem);
+        }
         let active_count = self.active_count.clone();
         let pool_name = self.pool_config.name.clone();
 
