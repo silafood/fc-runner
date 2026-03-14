@@ -74,8 +74,7 @@ async fn run_server(config_path: &str) -> anyhow::Result<()> {
             .token
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let dir = std::path::PathBuf::from(&config.cache_service.dir);
-        let cs = cache_server::CacheState::new(dir, token)
+        let cs = cache_server::CacheState::new(&config.cache_service, token)
             .await
             .context("failed to initialize cache service")?;
         Some(cs)

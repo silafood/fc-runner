@@ -144,10 +144,16 @@ dns = ["8.8.8.8", "1.1.1.1"]
 
 # GitHub Actions cache service (drop-in replacement for GitHub's hosted cache).
 # When enabled, @actions/cache and actions like Swatinem/rust-cache store
-# cache archives locally instead of uploading to GitHub. Runs on the same
-# HTTP server as metrics/management API.
+# cache archives in S3 instead of uploading to GitHub. Runs on the same
+# HTTP server as metrics/management API. Uses RustFS/MinIO as the S3 backend.
 [cache_service]
 # enabled = true
 # dir = "/var/lib/fc-runner/cache-service"
 # Bearer token for cache API auth. If omitted, a random token is generated.
 # token = "your-cache-token"
+# S3-compatible backend (RustFS, MinIO, etc.)
+# s3_endpoint = "http://localhost:9000"
+# s3_bucket = "actions-cache"
+# s3_access_key = "rustfsadmin"
+# s3_secret_key = "ChangeMe123!"
+# s3_region = "us-east-1"

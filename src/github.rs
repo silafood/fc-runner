@@ -377,10 +377,7 @@ impl GitHubClient {
         metrics::GITHUB_API_CALLS
             .with_label_values(&["list_runners"])
             .inc();
-        let url = format!(
-            "{}/actions/runners?per_page=100",
-            self.repo_url(repo)
-        );
+        let url = format!("{}/actions/runners?per_page=100", self.repo_url(repo));
         let resp = self
             .request(reqwest::Method::GET, &url)
             .await?
