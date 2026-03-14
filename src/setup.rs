@@ -1287,13 +1287,6 @@ if [ -n "$cache_dev" ] && [ -b "/dev/$cache_dev" ]; then
             "$RUNNER_HOME/.cargo/git" "$RUNNER_HOME/.cargo/bin" 2>/dev/null
     fi
 
-    # Set RUNNER_TOOL_CACHE to persistent cache
-    mkdir -p /cache/tool-cache
-    echo "RUNNER_TOOL_CACHE=/cache/tool-cache" >> /etc/environment
-    # GitHub Actions runner reads .env from its install directory, not /etc/environment
-    RUNNER_HOME="/home/runner"
-    echo "RUNNER_TOOL_CACHE=/cache/tool-cache" >> "$RUNNER_HOME/.env"
-
     echo "overlay-init: cache volume mounted at /cache"
 else
     if [ -n "$cache_dev" ]; then
