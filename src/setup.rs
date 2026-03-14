@@ -1126,6 +1126,27 @@ async fn ensure_overlay_init_installed(rootfs_path: &str) -> anyhow::Result<()> 
     let mount_dir = format!("{}.mnt", rootfs_path);
     tokio::fs::create_dir_all(&mount_dir).await?;
 
+    // Mount read-only first to check if overlay-init is already up-to-date
+    mount_ext4(rootfs_path, &mount_dir, true)
+        .await
+        .context("mounting rootfs to check overlay-init")?;
+
+    let existing_script = tokio::fs::read_to_string(format!("{}/sbin/overlay-init", mount_dir))
+        .await
+        .unwrap_or_default();
+
+    lazy_umount(&mount_dir)
+        .await
+        .context("unmounting rootfs after overlay-init check")?;
+
+    let expected_script = overlay_init_script();
+    if existing_script == expected_script {
+        tracing::info!("overlay-init already up-to-date in golden rootfs");
+        let _ = tokio::fs::remove_dir(&mount_dir).await;
+        return Ok(());
+    }
+
+    // Script differs or missing — mount read-write and install
     mount_ext4(rootfs_path, &mount_dir, false)
         .await
         .context("mounting rootfs to install overlay-init")?;
@@ -1153,9 +1174,17 @@ async fn install_overlay_init(mount_dir: &str) -> anyhow::Result<()> {
 
     // Write overlay-init script
     let overlay_init = format!("{}/sbin/overlay-init", mount_dir);
-    tokio::fs::write(
-        &overlay_init,
-        r#"#!/bin/sh
+    tokio::fs::write(&overlay_init, overlay_init_script()).await?;
+    set_executable(&overlay_init)?;
+    tracing::info!("installed overlay-init script into rootfs");
+    Ok(())
+}
+
+/// Return the overlay-init script content.
+/// Extracted into a function so `ensure_overlay_init_installed` can compare
+/// the on-disk version with the expected content and skip writes when unchanged.
+fn overlay_init_script() -> &'static str {
+    r#"#!/bin/sh
 # overlay-init: OverlayFS COW boot for Firecracker VMs
 # Mounts a read-write overlay on top of the read-only squashfs root.
 # Usage: kernel boot args: init=/sbin/overlay-init overlay_root=vdb
@@ -1308,12 +1337,7 @@ ip route show 2>&1
 
 echo "overlay-init: done, exec /sbin/init"
 exec /sbin/init "$@"
-"#,
-    )
-    .await?;
-    set_executable(&overlay_init)?;
-    tracing::info!("installed overlay-init script into rootfs");
-    Ok(())
+"#
 }
 
 /// Ensures IP forwarding is enabled and iptables NAT rules are in place.
