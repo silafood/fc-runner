@@ -470,7 +470,7 @@ async fn umount(target: &str) -> anyhow::Result<()> {
     {
         nix::mount::umount2(target, nix::mount::MntFlags::MNT_DETACH)
             .map_err(|e| anyhow::anyhow!("umount {} failed: {}", target, e))?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(target_os = "linux"))]
     {

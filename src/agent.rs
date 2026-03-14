@@ -415,6 +415,7 @@ fn as_runner_user(cmd: &mut tokio::process::Command) {
         cmd.pre_exec(move || {
             let c_groups: Vec<u32> = groups.clone();
             if !c_groups.is_empty() {
+                #[allow(clippy::useless_conversion)]
                 let ret = libc::setgroups(
                     c_groups.len().try_into().unwrap(),
                     c_groups.as_ptr() as *const libc::gid_t,
