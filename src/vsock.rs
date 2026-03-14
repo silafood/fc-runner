@@ -44,18 +44,22 @@ pub struct JobDoneNotification {
 /// Spawn a VSOCK listener for a given VM.
 /// Returns a JoinHandle that reads messages until the guest disconnects.
 ///
+/// Firecracker proxies guest VSOCK connections to Unix domain sockets on the host.
+/// When a guest connects to host CID 2 on port P, Firecracker forwards it to
+/// `{uds_path}_{P}` as a Unix stream connection. We listen on that UDS path.
+///
 /// If `notify_tx` is provided, a `JobDoneNotification` is sent when the guest
 /// agent reports `JobCompleted`. This allows the orchestrator to begin
 /// spinning up a replacement VM before the current one fully shuts down.
 #[cfg(target_os = "linux")]
 pub fn spawn_listener(
     vm_id: String,
-    cid: u32,
+    uds_path: std::path::PathBuf,
     notify_tx: Option<mpsc::Sender<JobDoneNotification>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(e) = listen_loop(&vm_id, cid, notify_tx).await {
-            tracing::warn!(vm_id = %vm_id, cid, error = %e, "VSOCK listener ended");
+        if let Err(e) = listen_loop(&vm_id, &uds_path, notify_tx).await {
+            tracing::warn!(vm_id = %vm_id, uds = %uds_path.display(), error = %e, "VSOCK listener ended");
         }
     })
 }
@@ -63,25 +67,30 @@ pub fn spawn_listener(
 #[cfg(target_os = "linux")]
 async fn listen_loop(
     vm_id: &str,
-    cid: u32,
+    uds_path: &std::path::Path,
     notify_tx: Option<mpsc::Sender<JobDoneNotification>>,
 ) -> anyhow::Result<()> {
     use tokio::io::{AsyncBufReadExt, BufReader};
-    use tokio_vsock::VsockListener;
 
-    let addr = tokio_vsock::VsockAddr::new(cid, AGENT_PORT);
-    let mut listener = VsockListener::bind(addr)
-        .map_err(|e| anyhow::anyhow!("VSOCK bind CID {} port {}: {}", cid, AGENT_PORT, e))?;
+    // Firecracker creates {uds_path}_{port} when a guest connects to that port.
+    // We must listen on that path before the guest connects.
+    let listen_path = format!("{}_{}", uds_path.display(), AGENT_PORT);
 
-    tracing::info!(vm_id = %vm_id, cid, port = AGENT_PORT, "VSOCK listener started");
+    // Remove stale socket from previous runs
+    let _ = tokio::fs::remove_file(&listen_path).await;
 
-    // Accept one connection (the guest agent)
+    let listener = tokio::net::UnixListener::bind(&listen_path)
+        .map_err(|e| anyhow::anyhow!("VSOCK UDS bind {}: {}", listen_path, e))?;
+
+    tracing::info!(vm_id = %vm_id, uds = %listen_path, "VSOCK listener started (Unix socket)");
+
+    // Accept one connection (the guest agent via Firecracker's VSOCK proxy)
     let (stream, _addr) = listener
         .accept()
         .await
-        .map_err(|e| anyhow::anyhow!("VSOCK accept: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("VSOCK UDS accept: {}", e))?;
 
-    tracing::info!(vm_id = %vm_id, cid, "guest agent connected via VSOCK");
+    tracing::info!(vm_id = %vm_id, "guest agent connected via VSOCK");
 
     let reader = BufReader::new(stream);
     let mut lines = reader.lines();
@@ -114,7 +123,10 @@ async fn listen_loop(
         }
     }
 
-    tracing::info!(vm_id = %vm_id, cid, "guest agent disconnected");
+    // Clean up the listener socket
+    let _ = tokio::fs::remove_file(&listen_path).await;
+
+    tracing::info!(vm_id = %vm_id, "guest agent disconnected");
     Ok(())
 }
 
@@ -155,7 +167,7 @@ fn handle_message(vm_id: &str, msg: &AgentMessage) {
 #[cfg(not(target_os = "linux"))]
 pub fn spawn_listener(
     vm_id: String,
-    _cid: u32,
+    _uds_path: std::path::PathBuf,
     _notify_tx: Option<mpsc::Sender<JobDoneNotification>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {

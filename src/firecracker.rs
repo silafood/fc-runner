@@ -1618,9 +1618,12 @@ fi
 
         // Spawn VSOCK listener before VM starts (if enabled)
         let vsock_handle = if self.fc_config.vsock_enabled {
-            let cid = self.vsock_cid();
-            tracing::info!(vm_id = %self.vm_id, cid, "spawning VSOCK listener");
-            Some(vsock::spawn_listener(self.vm_id.clone(), cid, vsock_notify))
+            tracing::info!(vm_id = %self.vm_id, uds = %self.vsock_socket_path.display(), "spawning VSOCK listener");
+            Some(vsock::spawn_listener(
+                self.vm_id.clone(),
+                self.vsock_socket_path.clone(),
+                vsock_notify,
+            ))
         } else {
             None
         };
