@@ -111,22 +111,22 @@ async fn listen_loop(
                 handle_message(vm_id, &msg);
 
                 // Publish to SSE broadcast channel
-                if let Some(tx) = &log_tx {
-                    if let Some(event) = message_to_log_event(vm_id, &msg) {
-                        let _ = tx.send(event);
-                    }
+                if let Some(tx) = &log_tx
+                    && let Some(event) = message_to_log_event(vm_id, &msg)
+                {
+                    let _ = tx.send(event);
                 }
 
                 // Notify orchestrator on job completion
-                if let AgentMessage::JobCompleted { exit_code } = &msg {
-                    if let Some(tx) = &notify_tx {
-                        let _ = tx
-                            .send(JobDoneNotification {
-                                vm_id: vm_id.to_string(),
-                                exit_code: *exit_code,
-                            })
-                            .await;
-                    }
+                if let AgentMessage::JobCompleted { exit_code } = &msg
+                    && let Some(tx) = &notify_tx
+                {
+                    let _ = tx
+                        .send(JobDoneNotification {
+                            vm_id: vm_id.to_string(),
+                            exit_code: *exit_code,
+                        })
+                        .await;
                 }
             }
             Err(e) => {
