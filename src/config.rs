@@ -13,6 +13,9 @@ pub struct AppConfig {
     pub network: NetworkConfig,
     #[serde(default)]
     pub server: ServerConfig,
+    /// GitHub Actions cache service configuration.
+    #[serde(default)]
+    pub cache_service: CacheServiceConfig,
     /// Named VM pools with per-pool repos, replica counts, and resource overrides.
     /// When configured, pools replace the flat warm_pool_size setting.
     #[serde(default)]
@@ -37,6 +40,65 @@ impl Default for ServerConfig {
             api_key: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CacheServiceConfig {
+    /// Enable the GitHub Actions cache API service.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Directory for temp upload chunks and metadata index.
+    #[serde(default = "default_cache_service_dir")]
+    pub dir: String,
+    /// Bearer token for authenticating cache API requests.
+    /// If not set, a random token is generated at startup.
+    pub token: Option<String>,
+    /// S3-compatible endpoint URL (e.g. http://localhost:9000)
+    #[serde(default = "default_s3_endpoint")]
+    pub s3_endpoint: String,
+    /// S3 bucket name for cache blobs.
+    #[serde(default = "default_s3_bucket")]
+    pub s3_bucket: String,
+    /// S3 access key ID.
+    #[serde(default)]
+    pub s3_access_key: Option<String>,
+    /// S3 secret access key.
+    #[serde(default)]
+    pub s3_secret_key: Option<String>,
+    /// S3 region (default: us-east-1, used for signature).
+    #[serde(default = "default_s3_region")]
+    pub s3_region: String,
+}
+
+impl Default for CacheServiceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dir: default_cache_service_dir(),
+            token: None,
+            s3_endpoint: default_s3_endpoint(),
+            s3_bucket: default_s3_bucket(),
+            s3_access_key: None,
+            s3_secret_key: None,
+            s3_region: default_s3_region(),
+        }
+    }
+}
+
+fn default_cache_service_dir() -> String {
+    "/var/lib/fc-runner/cache-service".into()
+}
+
+fn default_s3_endpoint() -> String {
+    "http://localhost:9000".into()
+}
+
+fn default_s3_bucket() -> String {
+    "actions-cache".into()
+}
+
+fn default_s3_region() -> String {
+    "us-east-1".into()
 }
 
 fn default_listen_addr() -> String {

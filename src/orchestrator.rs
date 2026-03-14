@@ -561,12 +561,7 @@ impl Orchestrator {
         Ok(())
     }
 
-    fn spawn_warm_vm(
-        &self,
-        slot: usize,
-        repo: String,
-        done_tx: mpsc::Sender<(usize, String)>,
-    ) {
+    fn spawn_warm_vm(&self, slot: usize, repo: String, done_tx: mpsc::Sender<(usize, String)>) {
         let config = self.config.clone();
         let github = self.github.clone();
         let active_jobs = self.active_jobs.clone();
@@ -603,21 +598,17 @@ impl Orchestrator {
                     let _ = early_done_tx.send((early_slot, early_repo)).await;
                     true
                 } else {
-                    tracing::debug!(slot = early_slot, "VSOCK channel closed without notification");
+                    tracing::debug!(
+                        slot = early_slot,
+                        "VSOCK channel closed without notification"
+                    );
                     false
                 }
             });
 
             tracing::info!(slot, repo = %repo, "warm pool VM running, waiting for exit...");
-            let result = run_warm_vm(
-                config,
-                github.clone(),
-                slot,
-                &repo,
-                cancel,
-                Some(vsock_tx),
-            )
-            .await;
+            let result =
+                run_warm_vm(config, github.clone(), slot, &repo, cancel, Some(vsock_tx)).await;
             timer.observe_duration();
             tracing::info!(
                 slot,
@@ -629,28 +620,24 @@ impl Orchestrator {
             // Check if VSOCK already sent the early replacement signal.
             // Use a timeout to prevent deadlock if the VSOCK channel isn't
             // cleaned up properly (e.g. listener task stuck on accept).
-            let early_signaled = match tokio::time::timeout(
-                Duration::from_secs(5),
-                early_handle,
-            )
-            .await
-            {
-                Ok(Ok(signaled)) => {
-                    tracing::debug!(slot, early_signaled = signaled, "early_handle resolved");
-                    signaled
-                }
-                Ok(Err(e)) => {
-                    tracing::warn!(slot, error = %e, "early_handle task panicked");
-                    false
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        slot,
-                        "early_handle timed out after 5s, forcing replacement signal"
-                    );
-                    false
-                }
-            };
+            let early_signaled =
+                match tokio::time::timeout(Duration::from_secs(5), early_handle).await {
+                    Ok(Ok(signaled)) => {
+                        tracing::debug!(slot, early_signaled = signaled, "early_handle resolved");
+                        signaled
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(slot, error = %e, "early_handle task panicked");
+                        false
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            slot,
+                            "early_handle timed out after 5s, forcing replacement signal"
+                        );
+                        false
+                    }
+                };
 
             // Delete this specific runner from GitHub (targeted, not a full scan)
             match &result {
@@ -663,9 +650,13 @@ impl Orchestrator {
                         "warm pool VM completed, deleting runner from GitHub"
                     );
                     if github.is_org_mode() {
-                        github.delete_org_runner_by_name(&vm_result.runner_name).await;
+                        github
+                            .delete_org_runner_by_name(&vm_result.runner_name)
+                            .await;
                     } else {
-                        github.delete_runner_by_name(&repo, &vm_result.runner_name).await;
+                        github
+                            .delete_runner_by_name(&repo, &vm_result.runner_name)
+                            .await;
                     }
                     tracing::info!(
                         slot,
@@ -755,7 +746,7 @@ async fn run_jit_job(
     tracing::info!(job_id, repo = %repo, "JIT token acquired");
 
     let repo_url = format!("https://github.com/{}/{}", config.github.owner, repo);
-    let vm = MicroVm::new(
+    let mut vm = MicroVm::new(
         job_id,
         &config.firecracker,
         &config.network,
@@ -764,6 +755,15 @@ async fn run_jit_job(
         slot,
         cancel,
     );
+    if config.cache_service.enabled {
+        vm.cache_service_token = config.cache_service.token.clone();
+        vm.cache_service_port = config
+            .server
+            .listen_addr
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse().ok());
+    }
     let ephemeral = config.runner.ephemeral;
     let env_content = format!(
         "RUNNER_MODE=jit\nRUNNER_TOKEN={}\nREPO_URL={}\nVM_ID={}\nRUNNER_JIT_CONFIG={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\nEPHEMERAL={}\n",
@@ -816,7 +816,7 @@ async fn run_warm_vm(
         runner_name = %runner_name,
         "registering warm pool runner"
     );
-    let vm = MicroVm::new(
+    let mut vm = MicroVm::new(
         0, // no specific job_id for warm pool VMs
         &config.firecracker,
         &config.network,
@@ -825,6 +825,15 @@ async fn run_warm_vm(
         slot,
         cancel,
     );
+    if config.cache_service.enabled {
+        vm.cache_service_token = config.cache_service.token.clone();
+        vm.cache_service_port = config
+            .server
+            .listen_addr
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse().ok());
+    }
     let ephemeral = config.runner.ephemeral;
     let env_content = format!(
         "RUNNER_MODE=register\nRUNNER_TOKEN={}\nREPO_URL={}\nRUNNER_NAME={}\nVM_ID={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\nEPHEMERAL={}\n",

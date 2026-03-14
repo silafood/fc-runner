@@ -311,7 +311,7 @@ async fn run_pool_vm(
         fc_config.mem_size_mib = mem;
     }
 
-    let vm = MicroVm::new(
+    let mut vm = MicroVm::new(
         0, // no specific job_id for pool VMs
         &fc_config,
         &config.network,
@@ -320,6 +320,15 @@ async fn run_pool_vm(
         slot,
         cancel,
     );
+    if config.cache_service.enabled {
+        vm.cache_service_token = config.cache_service.token.clone();
+        vm.cache_service_port = config
+            .server
+            .listen_addr
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse().ok());
+    }
     let ephemeral = config.runner.ephemeral;
     let env_content = format!(
         "RUNNER_MODE=register\nRUNNER_TOKEN={}\nREPO_URL={}\nRUNNER_NAME={}\nVM_ID={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\nEPHEMERAL={}\n",
