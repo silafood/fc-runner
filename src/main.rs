@@ -56,6 +56,13 @@ async fn run_server(config_path: &str) -> anyhow::Result<()> {
         .await
         .context("failed to provision VM assets")?;
 
+    // Resolve cache service token before freezing config in Arc.
+    // If no token is configured, generate a random one so that both the
+    // HTTP server and the VM provisioning code share the same value.
+    if config.cache_service.enabled && config.cache_service.token.is_none() {
+        config.cache_service.token = Some(uuid::Uuid::new_v4().to_string());
+    }
+
     let config = Arc::new(config);
 
     let cancel = CancellationToken::new();
@@ -69,11 +76,7 @@ async fn run_server(config_path: &str) -> anyhow::Result<()> {
 
     // Initialize cache service if enabled
     let cache_state = if config.cache_service.enabled {
-        let token = config
-            .cache_service
-            .token
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let token = config.cache_service.token.clone().unwrap_or_default();
         let cs = cache_server::CacheState::new(&config.cache_service, token)
             .await
             .context("failed to initialize cache service")?;
