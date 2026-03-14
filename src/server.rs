@@ -1,15 +1,19 @@
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, broadcast};
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 
 use crate::cache_server::CacheState;
 use crate::config::ServerConfig;
@@ -29,6 +33,15 @@ pub struct VmInfo {
     pub started_at: String,
 }
 
+/// A log event from a guest agent, broadcast to SSE subscribers.
+#[derive(Clone, Debug, Serialize)]
+pub struct VmLogEvent {
+    pub vm_id: String,
+    pub event_type: String,
+    pub message: String,
+    pub timestamp: String,
+}
+
 /// Shared state between the server and orchestrator.
 pub struct ServerState {
     pub start_time: Instant,
@@ -38,10 +51,13 @@ pub struct ServerState {
     pub mode: Mutex<String>,
     /// Pool managers indexed by name, set when running in pool mode.
     pub pools: Mutex<HashMap<String, Arc<PoolManager>>>,
+    /// Broadcast channel for VM agent log events (SSE streaming).
+    pub log_tx: broadcast::Sender<VmLogEvent>,
 }
 
 impl ServerState {
     pub fn new(server_config: &ServerConfig) -> Self {
+        let (log_tx, _) = broadcast::channel(1024);
         Self {
             start_time: Instant::now(),
             version: version::version().to_string(),
@@ -49,6 +65,7 @@ impl ServerState {
             active_vms: Mutex::new(Vec::new()),
             mode: Mutex::new("starting".to_string()),
             pools: Mutex::new(HashMap::new()),
+            log_tx,
         }
     }
 
@@ -90,6 +107,9 @@ pub async fn start(
         .route("/api/v1/pools/{name}/scale", post(scale_pool_handler))
         .route("/api/v1/pools/{name}/pause", post(pause_pool_handler))
         .route("/api/v1/pools/{name}/resume", post(resume_pool_handler))
+        // SSE log streaming endpoints
+        .route("/api/v1/logs", get(logs_sse_handler))
+        .route("/api/v1/vms/{id}/logs", get(vm_logs_sse_handler))
         .with_state(state);
 
     // Merge cache service routes if enabled
@@ -292,6 +312,84 @@ async fn resume_pool_handler(
     }))
 }
 
+// ── SSE log streaming handlers ────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct LogsQuery {
+    /// Optional comma-separated list of event types to filter on.
+    #[serde(rename = "type")]
+    event_type: Option<String>,
+}
+
+/// Stream all VM agent logs as SSE events.
+async fn logs_sse_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(query): Query<LogsQuery>,
+) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
+    check_auth(&state, &headers)?;
+    let rx = state.log_tx.subscribe();
+    let type_filter = parse_type_filter(&query);
+
+    let stream = BroadcastStream::new(rx).filter_map(move |result| {
+        match result {
+            Ok(event) => {
+                if matches_type_filter(&event, &type_filter) {
+                    let data = serde_json::to_string(&event).unwrap_or_default();
+                    Some(Ok(Event::default().event(&event.event_type).data(data)))
+                } else {
+                    None
+                }
+            }
+            Err(_) => None, // lagged — skip missed events
+        }
+    });
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// Stream agent logs for a specific VM as SSE events.
+async fn vm_logs_sse_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Path(vm_id): Path<String>,
+    Query(query): Query<LogsQuery>,
+) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
+    check_auth(&state, &headers)?;
+    let rx = state.log_tx.subscribe();
+    let type_filter = parse_type_filter(&query);
+
+    let stream = BroadcastStream::new(rx).filter_map(move |result| match result {
+        Ok(event) => {
+            if event.vm_id == vm_id && matches_type_filter(&event, &type_filter) {
+                let data = serde_json::to_string(&event).unwrap_or_default();
+                Some(Ok(Event::default().event(&event.event_type).data(data)))
+            } else {
+                None
+            }
+        }
+        Err(_) => None,
+    });
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+fn parse_type_filter(query: &LogsQuery) -> Option<Vec<String>> {
+    query.event_type.as_ref().map(|t| {
+        t.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    })
+}
+
+fn matches_type_filter(event: &VmLogEvent, type_filter: &Option<Vec<String>>) -> bool {
+    match type_filter {
+        Some(types) => types.iter().any(|t| t == &event.event_type),
+        None => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,6 +426,8 @@ mod tests {
             .route("/api/v1/pools/{name}/scale", post(scale_pool_handler))
             .route("/api/v1/pools/{name}/pause", post(pause_pool_handler))
             .route("/api/v1/pools/{name}/resume", post(resume_pool_handler))
+            .route("/api/v1/logs", get(logs_sse_handler))
+            .route("/api/v1/vms/{id}/logs", get(vm_logs_sse_handler))
             .with_state(state)
     }
 
@@ -585,6 +685,60 @@ mod tests {
         let state = test_state_with_key("secret");
         let resp = app(state)
             .oneshot(Request::get("/api/v1/pools").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn logs_sse_streams_events() {
+        let state = test_state();
+        let log_tx = state.log_tx.clone();
+
+        // Send a log event after a short delay
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = log_tx.send(VmLogEvent {
+                vm_id: "fc-test-123".to_string(),
+                event_type: "log".to_string(),
+                message: "hello from agent".to_string(),
+                timestamp: "2026-03-14T00:00:00Z".to_string(),
+            });
+        });
+
+        let resp = app(state)
+            .oneshot(Request::get("/api/v1/logs").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(ct.contains("text/event-stream"));
+    }
+
+    #[tokio::test]
+    async fn logs_sse_requires_auth() {
+        let state = test_state_with_key("secret");
+        let resp = app(state)
+            .oneshot(Request::get("/api/v1/logs").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn vm_logs_sse_requires_auth() {
+        let state = test_state_with_key("secret");
+        let resp = app(state)
+            .oneshot(
+                Request::get("/api/v1/vms/fc-test/logs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
