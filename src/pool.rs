@@ -214,6 +214,7 @@ impl PoolManager {
             slot,
             cancel: self.cancel.clone(),
             log_tx: Some(self.log_tx.clone()),
+            vsock_notify: None,
             vcpu_override: self.pool_config.vcpu_count,
             mem_override: self.pool_config.mem_size_mib,
         };
@@ -317,7 +318,7 @@ async fn run_pool_vm(ctx: VmRunContext, repo: &str) -> anyhow::Result<()> {
         &ctx.config.runner.work_dir,
         ctx.config.runner.vm_timeout_secs,
         slot,
-        ctx.cancel,
+        ctx.cancel.clone(),
     );
     if ctx.config.cache_service.enabled {
         vm.cache_service_token = ctx.config.cache_service.token.clone();
@@ -348,5 +349,5 @@ async fn run_pool_vm(ctx: VmRunContext, repo: &str) -> anyhow::Result<()> {
         let cache_url = format!("http://{}:{}/", vm.host_ip, port);
         env_content.push_str(&format!("CACHE_URL={}\nCACHE_TOKEN={}\n", cache_url, token));
     }
-    vm.execute_with_notify(&env_content, None, ctx.log_tx).await
+    vm.execute(&env_content, ctx).await
 }

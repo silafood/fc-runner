@@ -288,6 +288,7 @@ impl Orchestrator {
                 slot,
                 cancel,
                 log_tx: Some(server_state.log_tx.clone()),
+                vsock_notify: None,
                 vcpu_override: None,
                 mem_override: None,
             };
@@ -623,10 +624,11 @@ impl Orchestrator {
                 slot,
                 cancel,
                 log_tx: Some(log_tx),
+                vsock_notify: Some(vsock_tx),
                 vcpu_override: None,
                 mem_override: None,
             };
-            let result = run_warm_vm(ctx, &repo, Some(vsock_tx)).await;
+            let result = run_warm_vm(ctx, &repo).await;
             timer.observe_duration();
             tracing::info!(
                 slot,
@@ -764,7 +766,7 @@ async fn run_jit_job(ctx: VmRunContext, job_id: u64, repo: &str) -> anyhow::Resu
         &ctx.config.runner.work_dir,
         ctx.config.runner.vm_timeout_secs,
         ctx.slot,
-        ctx.cancel,
+        ctx.cancel.clone(),
     );
     if ctx.config.cache_service.enabled {
         vm.cache_service_token = ctx.config.cache_service.token.clone();
@@ -782,7 +784,7 @@ async fn run_jit_job(ctx: VmRunContext, job_id: u64, repo: &str) -> anyhow::Resu
         jit_token, repo_url, vm.vm_id, jit_token, vm.vm_id, ephemeral
     );
     append_cache_env(&ctx.config, &vm, &mut env_content);
-    vm.execute_with_notify(&env_content, None, ctx.log_tx).await
+    vm.execute(&env_content, ctx).await
 }
 
 /// Result of running a warm pool VM: the runner name registered on GitHub.
@@ -790,11 +792,7 @@ struct WarmVmResult {
     runner_name: String,
 }
 
-async fn run_warm_vm(
-    ctx: VmRunContext,
-    repo: &str,
-    vsock_notify: Option<mpsc::Sender<crate::vsock::JobDoneNotification>>,
-) -> anyhow::Result<WarmVmResult> {
+async fn run_warm_vm(ctx: VmRunContext, repo: &str) -> anyhow::Result<WarmVmResult> {
     let is_org = ctx.github.is_org_mode();
     let slot = ctx.slot;
 
@@ -839,7 +837,7 @@ async fn run_warm_vm(
         &ctx.config.runner.work_dir,
         ctx.config.runner.vm_timeout_secs,
         slot,
-        ctx.cancel,
+        ctx.cancel.clone(),
     );
     if ctx.config.cache_service.enabled {
         vm.cache_service_token = ctx.config.cache_service.token.clone();
@@ -864,8 +862,7 @@ async fn run_warm_vm(
         ephemeral,
         "launching warm pool VM"
     );
-    vm.execute_with_notify(&env_content, vsock_notify, ctx.log_tx)
-        .await?;
+    vm.execute(&env_content, ctx).await?;
     tracing::info!(
         slot,
         runner_name = %runner_name,
