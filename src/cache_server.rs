@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
+use anyhow::Context;
 use aws_sdk_s3::Client as S3Client;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
@@ -74,14 +75,18 @@ impl CacheState {
         // Build S3 client for RustFS/MinIO
         let s3 = build_s3_client(config).await;
 
+        // Verify S3 backend is reachable before proceeding
+        check_s3_connectivity(&s3, &config.s3_endpoint).await?;
+
         // Ensure bucket exists
-        if let Err(e) = ensure_bucket(&s3, &config.s3_bucket).await {
-            tracing::warn!(
-                bucket = %config.s3_bucket,
-                error = %e,
-                "failed to create S3 bucket (may already exist)"
-            );
-        }
+        ensure_bucket(&s3, &config.s3_bucket)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to ensure S3 bucket '{}' at {}",
+                    config.s3_bucket, config.s3_endpoint
+                )
+            })?;
 
         let state = Arc::new(Self {
             entries: RwLock::new(entries),
@@ -222,6 +227,15 @@ async fn build_s3_client(config: &CacheServiceConfig) -> S3Client {
         .build();
 
     S3Client::from_conf(s3_config)
+}
+
+/// Verify S3 backend is reachable by listing buckets.
+async fn check_s3_connectivity(s3: &S3Client, endpoint: &str) -> anyhow::Result<()> {
+    s3.list_buckets()
+        .send()
+        .await
+        .with_context(|| format!("cache service S3 backend is not reachable at {endpoint}"))?;
+    Ok(())
 }
 
 /// Create the bucket if it doesn't exist.
