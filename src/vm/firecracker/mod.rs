@@ -76,6 +76,16 @@ impl VmRunContext {
     }
 }
 
+/// S3 configuration to inject into guest VMs for runs-on/cache direct uploads.
+#[derive(Clone, Debug)]
+pub struct S3GuestConfig {
+    pub endpoint: String,
+    pub bucket: String,
+    pub access_key: String,
+    pub secret_key: String,
+    pub region: String,
+}
+
 pub struct MicroVm {
     pub vm_id: String,
     pub job_id: u64,
@@ -95,6 +105,8 @@ pub struct MicroVm {
     pub cache_service_token: Option<String>,
     /// Port the cache service listens on (from server.listen_addr).
     pub cache_service_port: Option<u16>,
+    /// S3 config for runs-on/cache direct uploads (injected via MMDS/mount).
+    pub s3_config: Option<S3GuestConfig>,
     fc_config: FirecrackerConfig,
     vm_timeout_secs: u64,
     cancel: CancellationToken,
@@ -134,6 +146,7 @@ impl MicroVm {
             cache_path,
             cache_service_token: None,
             cache_service_port: None,
+            s3_config: None,
             job_id,
             vm_id,
             fc_config: fc_config.clone(),

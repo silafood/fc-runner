@@ -769,7 +769,7 @@ async fn run_jit_job(ctx: VmRunContext, job_id: u64, repo: &str) -> anyhow::Resu
         "RUNNER_MODE=jit\nRUNNER_TOKEN={}\nREPO_URL={}\nVM_ID={}\nRUNNER_JIT_CONFIG={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\nEPHEMERAL={}\n",
         jit_token, repo_url, vm.vm_id, jit_token, vm.vm_id, ephemeral
     );
-    append_cache_env(&ctx.config, &vm, &mut env_content);
+    append_cache_env(&ctx.config, &mut vm, &mut env_content);
     vm.execute(&env_content, ctx).await
 }
 
@@ -840,7 +840,7 @@ async fn run_warm_vm(ctx: VmRunContext, repo: &str) -> anyhow::Result<WarmVmResu
         "RUNNER_MODE=register\nRUNNER_TOKEN={}\nREPO_URL={}\nRUNNER_NAME={}\nVM_ID={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\nEPHEMERAL={}\n",
         reg_token, registration_url, runner_name, vm.vm_id, vm.vm_id, ephemeral
     );
-    append_cache_env(&ctx.config, &vm, &mut env_content);
+    append_cache_env(&ctx.config, &mut vm, &mut env_content);
     tracing::info!(
         slot,
         vm_id = %vm.vm_id,
@@ -859,8 +859,8 @@ async fn run_warm_vm(ctx: VmRunContext, repo: &str) -> anyhow::Result<WarmVmResu
 
 /// Append cache service env vars to env_content when the cache service is enabled.
 /// These flow through MMDS to the guest agent, which passes them to the runner process
-/// as ACTIONS_CACHE_URL and ACTIONS_RUNTIME_TOKEN.
-fn append_cache_env(config: &AppConfig, vm: &MicroVm, env_content: &mut String) {
+/// as ACTIONS_CACHE_URL, ACTIONS_RUNTIME_TOKEN, and S3 credentials for runs-on/cache.
+fn append_cache_env(config: &AppConfig, vm: &mut MicroVm, env_content: &mut String) {
     if config.cache_service.enabled
         && let (Some(token), Some(port)) = (
             &config.cache_service.token,
@@ -874,5 +874,36 @@ fn append_cache_env(config: &AppConfig, vm: &MicroVm, env_content: &mut String) 
     {
         let cache_url = format!("http://{}:{}/", vm.host_ip, port);
         env_content.push_str(&format!("CACHE_URL={}\nCACHE_TOKEN={}\n", cache_url, token));
+
+        // S3 credentials for runs-on/cache direct uploads.
+        // Rewrite localhost → host IP so URLs are reachable from the VM.
+        let s3_endpoint = config
+            .cache_service
+            .s3_endpoint
+            .replace("localhost", &vm.host_ip)
+            .replace("127.0.0.1", &vm.host_ip);
+        env_content.push_str(&format!("S3_ENDPOINT={}\n", s3_endpoint.clone()));
+        env_content.push_str(&format!("S3_BUCKET={}\n", config.cache_service.s3_bucket));
+        env_content.push_str(&format!("S3_REGION={}\n", config.cache_service.s3_region));
+        if let Some(key) = &config.cache_service.s3_access_key {
+            env_content.push_str(&format!("S3_ACCESS_KEY={}\n", key));
+        }
+        if let Some(key) = &config.cache_service.s3_secret_key {
+            env_content.push_str(&format!("S3_SECRET_KEY={}\n", key));
+        }
+
+        // Also set structured S3 config on the VM for mount-mode injection
+        if let (Some(ak), Some(sk)) = (
+            &config.cache_service.s3_access_key,
+            &config.cache_service.s3_secret_key,
+        ) {
+            vm.s3_config = Some(crate::vm::firecracker::S3GuestConfig {
+                endpoint: s3_endpoint,
+                bucket: config.cache_service.s3_bucket.clone(),
+                access_key: ak.clone(),
+                secret_key: sk.clone(),
+                region: config.cache_service.s3_region.clone(),
+            });
+        }
     }
 }

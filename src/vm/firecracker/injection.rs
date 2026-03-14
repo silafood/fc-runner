@@ -196,15 +196,23 @@ impl MicroVm {
     }
 
     /// Write cache service config to the VM rootfs so the entrypoint can
-    /// set up `ACTIONS_CACHE_URL` and `ACTIONS_RUNTIME_TOKEN` via a runner hook.
+    /// set up `ACTIONS_CACHE_URL`, `ACTIONS_RUNTIME_TOKEN`, and S3 credentials.
     async fn write_cache_service_config(&self, write_base: &std::path::Path) -> anyhow::Result<()> {
         if let (Some(token), Some(port)) = (&self.cache_service_token, self.cache_service_port) {
             let etc_dir = write_base.join("etc");
             tokio::fs::create_dir_all(&etc_dir).await?;
-            let config = format!(
+            let mut config = format!(
                 "FC_CACHE_URL=http://{}:{}/\nFC_CACHE_TOKEN={}\n",
                 self.host_ip, port, token
             );
+            // Append S3 credentials for runs-on/cache direct uploads
+            if let Some(s3) = &self.s3_config {
+                config.push_str(&format!("FC_S3_ENDPOINT={}\n", s3.endpoint));
+                config.push_str(&format!("FC_S3_BUCKET={}\n", s3.bucket));
+                config.push_str(&format!("FC_S3_ACCESS_KEY={}\n", s3.access_key));
+                config.push_str(&format!("FC_S3_SECRET_KEY={}\n", s3.secret_key));
+                config.push_str(&format!("FC_S3_REGION={}\n", s3.region));
+            }
             tokio::fs::write(etc_dir.join("fc-runner-cache"), config).await?;
         }
         Ok(())
