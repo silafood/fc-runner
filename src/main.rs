@@ -49,6 +49,7 @@ async fn run_server(config_path: &str) -> anyhow::Result<()> {
         )
         .init();
 
+    tracing::info!(version = %version::version(), "fc-runner starting");
     tracing::info!(path = %config_path, "loading configuration");
     let mut config =
         config::AppConfig::load(config_path).context("failed to load configuration")?;
