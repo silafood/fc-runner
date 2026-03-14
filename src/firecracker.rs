@@ -1561,20 +1561,26 @@ fi
         }
     }
 
+    #[allow(dead_code)]
     pub async fn execute(self, env_content: &str) -> anyhow::Result<()> {
-        self.execute_with_notify(env_content, None).await
+        self.execute_with_notify(env_content, None, None).await
     }
 
     /// Execute the VM with an optional VSOCK job-completion notification channel.
     /// When provided, the channel receives a notification as soon as the guest agent
     /// reports `JobCompleted`, allowing the orchestrator to begin replacement before
     /// the VM fully shuts down.
+    ///
+    /// If `log_tx` is provided, all agent messages are published for SSE streaming.
     pub async fn execute_with_notify(
         self,
         env_content: &str,
         vsock_notify: Option<tokio::sync::mpsc::Sender<vsock::JobDoneNotification>>,
+        log_tx: Option<tokio::sync::broadcast::Sender<crate::server::VmLogEvent>>,
     ) -> anyhow::Result<()> {
-        let result = self.prepare_and_run(env_content, vsock_notify).await;
+        let result = self
+            .prepare_and_run(env_content, vsock_notify, log_tx)
+            .await;
         self.cleanup().await;
         result
     }
@@ -1583,6 +1589,7 @@ fi
         &self,
         env_content: &str,
         vsock_notify: Option<tokio::sync::mpsc::Sender<vsock::JobDoneNotification>>,
+        log_tx: Option<tokio::sync::broadcast::Sender<crate::server::VmLogEvent>>,
     ) -> anyhow::Result<()> {
         let mmds = self.use_mmds();
         let use_jailer = self.fc_config.jailer_path.is_some();
@@ -1623,6 +1630,7 @@ fi
                 self.vm_id.clone(),
                 self.vsock_socket_path.clone(),
                 vsock_notify,
+                log_tx,
             ))
         } else {
             None

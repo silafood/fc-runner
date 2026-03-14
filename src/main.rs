@@ -229,10 +229,41 @@ async fn run_pools(action: PoolAction) -> anyhow::Result<()> {
 }
 
 async fn run_logs(endpoint: &str, vm_id: &str, follow: bool) -> anyhow::Result<()> {
+    use futures_util::StreamExt;
+
+    let client = api_client::ApiClient::new(endpoint);
+    let vm_filter = if vm_id.is_empty() { None } else { Some(vm_id) };
+
     println!(
-        "logs for VM {} at {} (follow: {}) — not yet implemented",
-        vm_id, endpoint, follow
+        "streaming logs{} from {} (Ctrl+C to stop)",
+        vm_filter
+            .map(|id| format!(" for VM {}", id))
+            .unwrap_or_default(),
+        endpoint
     );
+
+    let resp = client.stream_logs(vm_filter).await?;
+    let mut stream = resp.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("error reading SSE stream")?;
+        let text = String::from_utf8_lossy(&chunk);
+        for line in text.lines() {
+            if let Some(data) = line.strip_prefix("data: ")
+                && let Ok(event) = serde_json::from_str::<serde_json::Value>(data)
+            {
+                let vm = event["vm_id"].as_str().unwrap_or("?");
+                let etype = event["event_type"].as_str().unwrap_or("?");
+                let msg = event["message"].as_str().unwrap_or("");
+                let ts = event["timestamp"].as_str().unwrap_or("");
+                println!("[{}] {} [{}] {}", ts, vm, etype, msg);
+            }
+        }
+        if !follow {
+            break;
+        }
+    }
+
     Ok(())
 }
 

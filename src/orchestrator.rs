@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use tokio::sync::{Mutex, Semaphore, mpsc};
+use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use tokio::time::{Duration, interval};
 use tokio_util::sync::CancellationToken;
 
@@ -10,7 +10,16 @@ use crate::firecracker::MicroVm;
 use crate::github::GitHubClient;
 use crate::metrics;
 use crate::pool::PoolManager;
-use crate::server::ServerState;
+use crate::server::{ServerState, VmLogEvent};
+
+/// Shared context passed to VM runner functions, reducing parameter count.
+struct VmRunContext {
+    config: Arc<AppConfig>,
+    github: Arc<GitHubClient>,
+    slot: usize,
+    cancel: CancellationToken,
+    log_tx: Option<broadcast::Sender<VmLogEvent>>,
+}
 
 pub struct Orchestrator {
     config: Arc<AppConfig>,
@@ -126,6 +135,7 @@ impl Orchestrator {
                 self.github.clone(),
                 self.cancel.clone(),
                 slots_for_pool,
+                self.server_state.log_tx.clone(),
             ));
             pool_managers.insert(pool_config.name.clone(), manager);
         }
@@ -281,11 +291,17 @@ impl Orchestrator {
                 })
                 .await;
 
+            let ctx = VmRunContext {
+                config: config.clone(),
+                github: github.clone(),
+                slot,
+                cancel,
+                log_tx: Some(server_state.log_tx.clone()),
+            };
             let timer = metrics::VM_BOOT_DURATION
                 .with_label_values(&[&repo])
                 .start_timer();
-            let result =
-                run_jit_job(config.clone(), github.clone(), job_id, &repo, slot, cancel).await;
+            let result = run_jit_job(ctx, job_id, &repo).await;
             timer.observe_duration();
 
             server_state.unregister_vm(&vm_id).await;
@@ -566,6 +582,7 @@ impl Orchestrator {
         let github = self.github.clone();
         let active_jobs = self.active_jobs.clone();
         let cancel = self.cancel.clone();
+        let log_tx = self.server_state.log_tx.clone();
 
         tokio::spawn(async move {
             *active_jobs.lock().await += 1;
@@ -607,8 +624,14 @@ impl Orchestrator {
             });
 
             tracing::info!(slot, repo = %repo, "warm pool VM running, waiting for exit...");
-            let result =
-                run_warm_vm(config, github.clone(), slot, &repo, cancel, Some(vsock_tx)).await;
+            let ctx = VmRunContext {
+                config,
+                github: github.clone(),
+                slot,
+                cancel,
+                log_tx: Some(log_tx),
+            };
+            let result = run_warm_vm(ctx, &repo, Some(vsock_tx)).await;
             timer.observe_duration();
             tracing::info!(
                 slot,
@@ -733,44 +756,38 @@ impl Orchestrator {
 
 // ── Job runners ──────────────────────────────────────────────────────
 
-async fn run_jit_job(
-    config: Arc<AppConfig>,
-    github: Arc<GitHubClient>,
-    job_id: u64,
-    repo: &str,
-    slot: usize,
-    cancel: CancellationToken,
-) -> anyhow::Result<()> {
-    tracing::info!(job_id, repo = %repo, slot, "requesting JIT token");
-    let jit_token = github.generate_jit_config(repo, job_id).await?;
+async fn run_jit_job(ctx: VmRunContext, job_id: u64, repo: &str) -> anyhow::Result<()> {
+    tracing::info!(job_id, repo = %repo, slot = ctx.slot, "requesting JIT token");
+    let jit_token = ctx.github.generate_jit_config(repo, job_id).await?;
     tracing::info!(job_id, repo = %repo, "JIT token acquired");
 
-    let repo_url = format!("https://github.com/{}/{}", config.github.owner, repo);
+    let repo_url = format!("https://github.com/{}/{}", ctx.config.github.owner, repo);
     let mut vm = MicroVm::new(
         job_id,
-        &config.firecracker,
-        &config.network,
-        &config.runner.work_dir,
-        config.runner.vm_timeout_secs,
-        slot,
-        cancel,
+        &ctx.config.firecracker,
+        &ctx.config.network,
+        &ctx.config.runner.work_dir,
+        ctx.config.runner.vm_timeout_secs,
+        ctx.slot,
+        ctx.cancel,
     );
-    if config.cache_service.enabled {
-        vm.cache_service_token = config.cache_service.token.clone();
-        vm.cache_service_port = config
+    if ctx.config.cache_service.enabled {
+        vm.cache_service_token = ctx.config.cache_service.token.clone();
+        vm.cache_service_port = ctx
+            .config
             .server
             .listen_addr
             .rsplit(':')
             .next()
             .and_then(|p| p.parse().ok());
     }
-    let ephemeral = config.runner.ephemeral;
+    let ephemeral = ctx.config.runner.ephemeral;
     let mut env_content = format!(
         "RUNNER_MODE=jit\nRUNNER_TOKEN={}\nREPO_URL={}\nVM_ID={}\nRUNNER_JIT_CONFIG={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\nEPHEMERAL={}\n",
         jit_token, repo_url, vm.vm_id, jit_token, vm.vm_id, ephemeral
     );
-    append_cache_env(&config, &vm, &mut env_content);
-    vm.execute(&env_content).await
+    append_cache_env(&ctx.config, &vm, &mut env_content);
+    vm.execute_with_notify(&env_content, None, ctx.log_tx).await
 }
 
 /// Result of running a warm pool VM: the runner name registered on GitHub.
@@ -779,30 +796,33 @@ struct WarmVmResult {
 }
 
 async fn run_warm_vm(
-    config: Arc<AppConfig>,
-    github: Arc<GitHubClient>,
-    slot: usize,
+    ctx: VmRunContext,
     repo: &str,
-    cancel: CancellationToken,
     vsock_notify: Option<mpsc::Sender<crate::vsock::JobDoneNotification>>,
 ) -> anyhow::Result<WarmVmResult> {
-    let is_org = github.is_org_mode();
+    let is_org = ctx.github.is_org_mode();
+    let slot = ctx.slot;
 
     let (reg_token, registration_url) = if is_org {
-        let org = config.github.organization.as_deref().unwrap_or("unknown");
+        let org = ctx
+            .config
+            .github
+            .organization
+            .as_deref()
+            .unwrap_or("unknown");
         tracing::info!(
             slot,
             organization = org,
             "requesting org registration token"
         );
-        let token = github.generate_org_registration_token().await?;
+        let token = ctx.github.generate_org_registration_token().await?;
         let url = format!("https://github.com/{}", org);
         tracing::info!(slot, organization = org, "org registration token acquired");
         (token, url)
     } else {
         tracing::info!(slot, repo = %repo, "requesting registration token");
-        let token = github.generate_registration_token(repo).await?;
-        let url = format!("https://github.com/{}/{}", config.github.owner, repo);
+        let token = ctx.github.generate_registration_token(repo).await?;
+        let url = format!("https://github.com/{}/{}", ctx.config.github.owner, repo);
         tracing::info!(slot, repo = %repo, "registration token acquired");
         (token, url)
     };
@@ -819,28 +839,29 @@ async fn run_warm_vm(
     );
     let mut vm = MicroVm::new(
         0, // no specific job_id for warm pool VMs
-        &config.firecracker,
-        &config.network,
-        &config.runner.work_dir,
-        config.runner.vm_timeout_secs,
+        &ctx.config.firecracker,
+        &ctx.config.network,
+        &ctx.config.runner.work_dir,
+        ctx.config.runner.vm_timeout_secs,
         slot,
-        cancel,
+        ctx.cancel,
     );
-    if config.cache_service.enabled {
-        vm.cache_service_token = config.cache_service.token.clone();
-        vm.cache_service_port = config
+    if ctx.config.cache_service.enabled {
+        vm.cache_service_token = ctx.config.cache_service.token.clone();
+        vm.cache_service_port = ctx
+            .config
             .server
             .listen_addr
             .rsplit(':')
             .next()
             .and_then(|p| p.parse().ok());
     }
-    let ephemeral = config.runner.ephemeral;
+    let ephemeral = ctx.config.runner.ephemeral;
     let mut env_content = format!(
         "RUNNER_MODE=register\nRUNNER_TOKEN={}\nREPO_URL={}\nRUNNER_NAME={}\nVM_ID={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\nEPHEMERAL={}\n",
         reg_token, registration_url, runner_name, vm.vm_id, vm.vm_id, ephemeral
     );
-    append_cache_env(&config, &vm, &mut env_content);
+    append_cache_env(&ctx.config, &vm, &mut env_content);
     tracing::info!(
         slot,
         vm_id = %vm.vm_id,
@@ -848,7 +869,8 @@ async fn run_warm_vm(
         ephemeral,
         "launching warm pool VM"
     );
-    vm.execute_with_notify(&env_content, vsock_notify).await?;
+    vm.execute_with_notify(&env_content, vsock_notify, ctx.log_tx)
+        .await?;
     tracing::info!(
         slot,
         runner_name = %runner_name,

@@ -2,13 +2,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use serde::Serialize;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{AppConfig, PoolConfig};
 use crate::firecracker::MicroVm;
 use crate::github::GitHubClient;
+use crate::server::VmLogEvent;
 
 /// Runtime status of a pool, returned by the management API.
 #[derive(Clone, Serialize)]
@@ -35,6 +36,8 @@ pub struct PoolManager {
     min_ready: Arc<AtomicUsize>,
     /// Runtime-adjustable max_ready
     max_ready: Arc<AtomicUsize>,
+    /// Broadcast channel for SSE log streaming.
+    log_tx: broadcast::Sender<VmLogEvent>,
 }
 
 impl PoolManager {
@@ -44,6 +47,7 @@ impl PoolManager {
         github: Arc<GitHubClient>,
         cancel: CancellationToken,
         slots: Vec<usize>,
+        log_tx: broadcast::Sender<VmLogEvent>,
     ) -> Self {
         let min_ready = pool_config.min_ready;
         let max_ready = pool_config.max_ready;
@@ -57,6 +61,7 @@ impl PoolManager {
             paused: Arc::new(AtomicBool::new(false)),
             min_ready: Arc::new(AtomicUsize::new(min_ready)),
             max_ready: Arc::new(AtomicUsize::new(max_ready)),
+            log_tx,
         }
     }
 
@@ -210,6 +215,7 @@ impl PoolManager {
         let vcpu_override = self.pool_config.vcpu_count;
         let mem_override = self.pool_config.mem_size_mib;
         let cancel = self.cancel.clone();
+        let log_tx = self.log_tx.clone();
 
         tokio::spawn(async move {
             active_count.fetch_add(1, Ordering::Relaxed);
@@ -223,6 +229,7 @@ impl PoolManager {
                 vcpu_override,
                 mem_override,
                 cancel,
+                Some(log_tx),
             )
             .await;
 
@@ -269,6 +276,7 @@ impl PoolManager {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_pool_vm(
     config: Arc<AppConfig>,
     github: Arc<GitHubClient>,
@@ -277,6 +285,7 @@ async fn run_pool_vm(
     vcpu_override: Option<u32>,
     mem_override: Option<u32>,
     cancel: CancellationToken,
+    log_tx: Option<broadcast::Sender<VmLogEvent>>,
 ) -> anyhow::Result<()> {
     let is_org = github.is_org_mode();
 
@@ -348,5 +357,5 @@ async fn run_pool_vm(
         let cache_url = format!("http://{}:{}/", vm.host_ip, port);
         env_content.push_str(&format!("CACHE_URL={}\nCACHE_TOKEN={}\n", cache_url, token));
     }
-    vm.execute(&env_content).await
+    vm.execute_with_notify(&env_content, None, log_tx).await
 }

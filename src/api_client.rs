@@ -145,6 +145,26 @@ impl ApiClient {
         resp.json().await.context("failed to parse response")
     }
 
+    /// Stream VM logs as SSE. If `vm_id` is provided, streams logs for that VM only.
+    /// Otherwise streams all VM logs.
+    pub async fn stream_logs(&self, vm_id: Option<&str>) -> anyhow::Result<reqwest::Response> {
+        let url = match vm_id {
+            Some(id) => format!("{}/api/v1/vms/{}/logs", self.base_url, id),
+            None => format!("{}/api/v1/logs", self.base_url),
+        };
+        let resp = self
+            .client
+            .get(&url)
+            .header("accept", "text/event-stream")
+            .send()
+            .await
+            .context("failed to connect to server")?;
+        if !resp.status().is_success() {
+            bail!("server returned {}", resp.status());
+        }
+        Ok(resp)
+    }
+
     pub async fn resume_pool(&self, name: &str) -> anyhow::Result<ActionResponse> {
         let resp = self
             .client
