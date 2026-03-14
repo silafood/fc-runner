@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, ensure};
 use firecracker_rs_sdk::firecracker::FirecrackerOption;
@@ -8,13 +9,74 @@ use firecracker_rs_sdk::models::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::process::Command;
+use tokio::sync::broadcast;
 use tokio::time::{Duration, timeout};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::config::{FirecrackerConfig, NetworkConfig};
+use crate::config::{AppConfig, FirecrackerConfig, NetworkConfig};
+use crate::github::GitHubClient;
 use crate::netlink;
+use crate::server::VmLogEvent;
 use crate::vsock;
+
+/// Shared context passed to VM runner functions, reducing parameter count.
+pub struct VmRunContext {
+    pub config: Arc<AppConfig>,
+    pub github: Arc<GitHubClient>,
+    pub slot: usize,
+    pub cancel: CancellationToken,
+    pub log_tx: Option<broadcast::Sender<VmLogEvent>>,
+    /// VSOCK notification channel for early job-completion signaling.
+    pub vsock_notify: Option<tokio::sync::mpsc::Sender<vsock::JobDoneNotification>>,
+    /// Per-pool vCPU override (only used by named pools).
+    pub vcpu_override: Option<u32>,
+    /// Per-pool memory override (only used by named pools).
+    pub mem_override: Option<u32>,
+}
+
+impl VmRunContext {
+    pub fn new(
+        config: Arc<AppConfig>,
+        github: Arc<GitHubClient>,
+        slot: usize,
+        cancel: CancellationToken,
+    ) -> Self {
+        Self {
+            config,
+            github,
+            slot,
+            cancel,
+            log_tx: None,
+            vsock_notify: None,
+            vcpu_override: None,
+            mem_override: None,
+        }
+    }
+
+    pub fn log_tx(mut self, tx: broadcast::Sender<VmLogEvent>) -> Self {
+        self.log_tx = Some(tx);
+        self
+    }
+
+    pub fn vsock_notify(
+        mut self,
+        tx: tokio::sync::mpsc::Sender<vsock::JobDoneNotification>,
+    ) -> Self {
+        self.vsock_notify = Some(tx);
+        self
+    }
+
+    pub fn vcpu_override(mut self, vcpu: u32) -> Self {
+        self.vcpu_override = Some(vcpu);
+        self
+    }
+
+    pub fn mem_override(mut self, mem: u32) -> Self {
+        self.mem_override = Some(mem);
+        self
+    }
+}
 
 /// Mount an ext4 image via loop (read-write).
 ///
@@ -1561,36 +1623,19 @@ fi
         }
     }
 
-    #[allow(dead_code)]
-    pub async fn execute(self, env_content: &str) -> anyhow::Result<()> {
-        self.execute_with_notify(env_content, None, None).await
-    }
-
-    /// Execute the VM with an optional VSOCK job-completion notification channel.
-    /// When provided, the channel receives a notification as soon as the guest agent
-    /// reports `JobCompleted`, allowing the orchestrator to begin replacement before
-    /// the VM fully shuts down.
+    /// Execute the VM using the provided run context.
     ///
-    /// If `log_tx` is provided, all agent messages are published for SSE streaming.
-    pub async fn execute_with_notify(
-        self,
-        env_content: &str,
-        vsock_notify: Option<tokio::sync::mpsc::Sender<vsock::JobDoneNotification>>,
-        log_tx: Option<tokio::sync::broadcast::Sender<crate::server::VmLogEvent>>,
-    ) -> anyhow::Result<()> {
-        let result = self
-            .prepare_and_run(env_content, vsock_notify, log_tx)
-            .await;
+    /// The context carries optional VSOCK notification and SSE log broadcast
+    /// channels. When `vsock_notify` is set, the channel receives a notification
+    /// as soon as the guest agent reports `JobCompleted`, allowing the
+    /// orchestrator to begin replacement before the VM fully shuts down.
+    pub async fn execute(self, env_content: &str, ctx: VmRunContext) -> anyhow::Result<()> {
+        let result = self.prepare_and_run(env_content, ctx).await;
         self.cleanup().await;
         result
     }
 
-    async fn prepare_and_run(
-        &self,
-        env_content: &str,
-        vsock_notify: Option<tokio::sync::mpsc::Sender<vsock::JobDoneNotification>>,
-        log_tx: Option<tokio::sync::broadcast::Sender<crate::server::VmLogEvent>>,
-    ) -> anyhow::Result<()> {
+    async fn prepare_and_run(&self, env_content: &str, ctx: VmRunContext) -> anyhow::Result<()> {
         let mmds = self.use_mmds();
         let use_jailer = self.fc_config.jailer_path.is_some();
         tracing::info!(
@@ -1629,8 +1674,8 @@ fi
             Some(vsock::spawn_listener(
                 self.vm_id.clone(),
                 self.vsock_socket_path.clone(),
-                vsock_notify,
-                log_tx,
+                ctx.vsock_notify,
+                ctx.log_tx,
             ))
         } else {
             None
