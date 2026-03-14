@@ -274,10 +274,9 @@ impl Orchestrator {
             let timer = metrics::VM_BOOT_DURATION
                 .with_label_values(&[&repo])
                 .start_timer();
-            let (result, vm_id) = run_jit_job(ctx, job_id, &repo, &server_state).await;
+            let (result, _vm_id) = run_jit_job(ctx, job_id, &repo, &server_state).await;
             timer.observe_duration();
 
-            server_state.unregister_vm(&vm_id).await;
             slot_pool.lock().await.push(slot);
             *active_jobs.lock().await -= 1;
             metrics::JOBS_ACTIVE.dec();
@@ -618,11 +617,6 @@ impl Orchestrator {
             let result = run_warm_vm(ctx, &repo, &server_state).await;
             timer.observe_duration();
 
-            // Unregister VM from server state
-            if let Ok(ref vm_result) = result {
-                server_state.unregister_vm(&vm_result.vm_id).await;
-            }
-
             tracing::info!(
                 slot,
                 repo = %repo,
@@ -801,21 +795,26 @@ async fn run_jit_job(
             jit_token, repo_url, vm_id, jit_token, vm_id, ephemeral
         );
         append_cache_env(&ctx.config, &mut vm, &mut env_content);
-        vm.execute(&env_content, ctx).await?;
+        let exec_result = vm.execute(&env_content, ctx).await;
+
+        // Always unregister — even on failure — to prevent stale entries in `fc-runner ps`
+        server_state.unregister_vm(&vm_id).await;
+
+        exec_result?;
         Ok::<String, anyhow::Error>(vm_id)
     }
     .await;
 
-    match result {
-        Ok(vm_id) => (Ok(()), vm_id),
-        Err(e) => (Err(e), format!("fc-{}-slot{}", job_id, slot)),
-    }
+    let vm_id = match &result {
+        Ok(id) => id.clone(),
+        Err(_) => format!("fc-{}-slot{}", job_id, slot),
+    };
+    (result.map(|_| ()), vm_id)
 }
 
-/// Result of running a warm pool VM: the runner name and VM ID.
+/// Result of running a warm pool VM: the runner name registered on GitHub.
 struct WarmVmResult {
     runner_name: String,
-    vm_id: String,
 }
 
 async fn run_warm_vm(
@@ -908,13 +907,18 @@ async fn run_warm_vm(
         "launching warm pool VM"
     );
     let vm_id = vm.vm_id.clone();
-    vm.execute(&env_content, ctx).await?;
+    let exec_result = vm.execute(&env_content, ctx).await;
+
+    // Always unregister — even on failure — to prevent stale entries in `fc-runner ps`
+    server_state.unregister_vm(&vm_id).await;
+
+    exec_result?;
     tracing::info!(
         slot,
         runner_name = %runner_name,
         "warm pool VM execution finished"
     );
-    Ok(WarmVmResult { runner_name, vm_id })
+    Ok(WarmVmResult { runner_name })
 }
 
 /// Append cache service env vars to env_content when the cache service is enabled.
