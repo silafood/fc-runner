@@ -513,7 +513,7 @@ mod tests {
     #[test]
     fn extract_layer_handles_empty() {
         // Create a valid empty tar.gz
-        let mut builder = tar::Builder::new(Vec::new());
+        let builder = tar::Builder::new(Vec::new());
         let tar_data = builder.into_inner().unwrap();
         let mut gz_data = Vec::new();
         {

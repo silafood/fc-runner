@@ -46,14 +46,16 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Build release binary
+      - name: Build release binaries
         run: cargo build --release
 
-      - name: Upload binary artifact
+      - name: Upload binary artifacts
         uses: actions/upload-artifact@v4
         with:
           name: fc-runner
-          path: target/release/fc-runner
+          path: |
+            target/release/fc-runner
+            target/release/fc-runner-agent
 
   build-kernel:
     name: Build Amazon Linux microVM kernel
@@ -383,7 +385,7 @@ jobs:
 
       - name: Prepare release assets
         run: |
-          chmod +x artifacts/fc-runner
+          chmod +x artifacts/fc-runner artifacts/fc-runner-agent
           # Extract kernel version from Amazon tag (e.g. microvm-kernel-6.1.164-23.303.amzn2023 → 6.1.164)
           KVER=$(echo "${KERNEL_TAG}" | sed 's/microvm-kernel-//' | cut -d- -f1)
           mv artifacts/vmlinux "artifacts/vmlinux-${KVER}"
@@ -397,6 +399,7 @@ jobs:
             --title "fc-runner ${RELEASE_TAG}" \
             --generate-notes \
             artifacts/fc-runner \
+            artifacts/fc-runner-agent \
             artifacts/vmlinux-* \
             artifacts/runner-rootfs-golden.ext4.zst \
             config.toml.example \
