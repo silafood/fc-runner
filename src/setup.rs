@@ -959,11 +959,10 @@ export PATH="/home/runner/.cargo/bin:$PATH"
 # Set up Actions cache service if configured by fc-runner host
 if [ -f /etc/fc-runner-cache ]; then
     . /etc/fc-runner-cache
-    # Export directly so the runner process inherits them via sudo -E.
-    # @actions/cache reads ACTIONS_CACHE_URL from the process environment,
-    # not from $GITHUB_ENV (which only affects subsequent steps).
-    export ACTIONS_CACHE_URL="${FC_CACHE_URL}"
-    export ACTIONS_RUNTIME_TOKEN="${FC_CACHE_TOKEN}"
+    # Write to the runner's .env file — the runner reads this at startup
+    # and injects these into every action's environment.
+    echo "ACTIONS_CACHE_URL=${FC_CACHE_URL}" >> /home/runner/.env
+    echo "ACTIONS_RUNTIME_TOKEN=${FC_CACHE_TOKEN}" >> /home/runner/.env
     echo "Cache service configured: ${FC_CACHE_URL}"
 fi
 
