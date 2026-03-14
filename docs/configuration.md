@@ -398,8 +398,6 @@ S3-backed GitHub Actions cache service. When enabled, S3 credentials are automat
     key: rust-${{ hashFiles('Cargo.lock') }}
 ```
 
-See [docs/fork-rust-cache-s3.md](fork-rust-cache-s3.md) for details on the rust-cache-s3 action.
-
 ## Environment Variables
 
 | Variable | Description |
