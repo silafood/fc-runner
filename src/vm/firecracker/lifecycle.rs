@@ -75,18 +75,33 @@ impl MicroVm {
 
         tracing::info!(vm_id = %self.vm_id, "launching firecracker");
 
+        // Helper: abort VSOCK listener and return an error.
+        // Ensures the listener is always cleaned up, even on early return.
+        let abort_vsock = |handle: &Option<tokio::task::JoinHandle<()>>| {
+            if let Some(h) = handle {
+                h.abort();
+            }
+        };
+
         let run_result = if mmds {
             // MMDS mode: use SDK for process management and API calls
             self.run_with_sdk(env_content).await
         } else {
             // No-API mode: use config file + tokio process (SDK requires API socket)
             if use_jailer {
-                self.setup_jailer_chroot().await?;
+                if let Err(e) = self.setup_jailer_chroot().await {
+                    abort_vsock(&vsock_handle);
+                    return Err(e);
+                }
             } else {
-                self.write_vm_config().await?;
-                tokio::fs::write(&self.log_path, "")
-                    .await
-                    .context("creating log file")?;
+                if let Err(e) = self.write_vm_config().await {
+                    abort_vsock(&vsock_handle);
+                    return Err(e);
+                }
+                if let Err(e) = tokio::fs::write(&self.log_path, "").await {
+                    abort_vsock(&vsock_handle);
+                    return Err(anyhow::Error::new(e).context("creating log file"));
+                }
             }
             match self.run_no_api().await {
                 Ok(exit_status) => {
@@ -113,10 +128,8 @@ impl MicroVm {
             }
         };
 
-        // Abort VSOCK listener when VM exits
-        if let Some(handle) = vsock_handle {
-            handle.abort();
-        }
+        // Abort VSOCK listener when VM exits (or on any path reaching here)
+        abort_vsock(&vsock_handle);
 
         // Always dump guest log, regardless of how the VM exited
         self.dump_guest_log().await;
@@ -143,12 +156,18 @@ impl MicroVm {
             "creating per-VM TAP device"
         );
 
-        // Delete if exists from a previous crashed VM
+        // Delete if exists from a previous crashed VM, then create.
+        // Retry once after a brief delay in case the delete is still in progress.
         let _ = netlink::delete_link(&self.tap_name).await;
 
-        netlink::create_tap(&self.tap_name)
-            .await
-            .context("creating TAP device")?;
+        let tap_result = netlink::create_tap(&self.tap_name).await;
+        if tap_result.is_err() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let _ = netlink::delete_link(&self.tap_name).await;
+            netlink::create_tap(&self.tap_name)
+                .await
+                .context("creating TAP device (retry)")?;
+        }
 
         let ip: std::net::Ipv4Addr = self.host_ip.parse().context("parsing host IP")?;
         netlink::add_address_v4(&self.tap_name, ip, 24)
@@ -475,9 +494,13 @@ impl MicroVm {
                 tracing::warn!(vm_id = %self.vm_id, path = %path.display(), error = %e, "CLEANUP_FAILED");
             }
         }
-        let _ = tokio::fs::remove_dir(&self.mount_point).await;
+        if let Err(e) = tokio::fs::remove_dir(&self.mount_point).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(vm_id = %self.vm_id, path = %self.mount_point.display(), error = %e, "mount point cleanup failed");
+        }
 
-        // Clean up jailer chroot if jailer was used
+        // Clean up jailer chroot if jailer was used (retry once if busy)
         if self.fc_config.jailer_path.is_some() {
             let chroot_dir = PathBuf::from(&self.fc_config.jailer_chroot_base)
                 .join("firecracker")
@@ -485,7 +508,13 @@ impl MicroVm {
             if let Err(e) = tokio::fs::remove_dir_all(&chroot_dir).await
                 && e.kind() != std::io::ErrorKind::NotFound
             {
-                tracing::warn!(vm_id = %self.vm_id, path = %chroot_dir.display(), error = %e, "jailer chroot cleanup failed");
+                tracing::debug!(vm_id = %self.vm_id, error = %e, "jailer chroot cleanup failed, retrying after delay");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if let Err(e2) = tokio::fs::remove_dir_all(&chroot_dir).await
+                    && e2.kind() != std::io::ErrorKind::NotFound
+                {
+                    tracing::warn!(vm_id = %self.vm_id, path = %chroot_dir.display(), error = %e2, "jailer chroot cleanup failed after retry");
+                }
             }
         }
     }
