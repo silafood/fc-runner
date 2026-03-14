@@ -575,18 +575,31 @@ impl Orchestrator {
             let early_repo = repo.clone();
             let early_slot = slot;
 
+            // Shared flag to prevent double-signaling: only one of the VSOCK
+            // early path or the post-exit path should send a replacement signal.
+            let signaled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let signaled_clone = signaled.clone();
+
             // Listen for early completion signal from VSOCK
             let early_handle = tokio::spawn(async move {
                 if let Some(notification) = vsock_rx.recv().await {
-                    tracing::info!(
-                        slot = early_slot,
-                        vm_id = %notification.vm_id,
-                        exit_code = notification.exit_code,
-                        "VSOCK: job completed, signaling early replacement"
-                    );
-                    // Signal the warm pool to start creating a replacement immediately
-                    let _ = early_done_tx.send((early_slot, early_repo)).await;
-                    true
+                    // Only signal if nobody else has yet
+                    if !signaled_clone.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        tracing::info!(
+                            slot = early_slot,
+                            vm_id = %notification.vm_id,
+                            exit_code = notification.exit_code,
+                            "VSOCK: job completed, signaling early replacement"
+                        );
+                        let _ = early_done_tx.send((early_slot, early_repo)).await;
+                        true
+                    } else {
+                        tracing::debug!(
+                            slot = early_slot,
+                            "VSOCK: job completed but replacement already signaled"
+                        );
+                        false
+                    }
                 } else {
                     tracing::debug!(
                         slot = early_slot,
@@ -618,7 +631,7 @@ impl Orchestrator {
             // Check if VSOCK already sent the early replacement signal.
             // Use a timeout to prevent deadlock if the VSOCK channel isn't
             // cleaned up properly (e.g. listener task stuck on accept).
-            let early_signaled =
+            let _early_signaled =
                 match tokio::time::timeout(Duration::from_secs(5), early_handle).await {
                     Ok(Ok(signaled)) => {
                         tracing::debug!(slot, early_signaled = signaled, "early_handle resolved");
@@ -679,8 +692,8 @@ impl Orchestrator {
             metrics::JOBS_ACTIVE.dec();
             metrics::POOL_SLOTS_AVAILABLE.inc();
 
-            // Only signal done_tx if VSOCK didn't already send an early signal
-            if !early_signaled {
+            // Only signal done_tx if nobody has signaled yet (atomic swap prevents double-send)
+            if !signaled.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 tracing::info!(
                     slot,
                     repo = %repo,

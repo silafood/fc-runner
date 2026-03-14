@@ -213,9 +213,12 @@ async fn delete_vm_handler(
 
     tracing::warn!(vm_id = %vm_id, "VM kill requested via management API (not yet implemented)");
 
-    Ok(Json(DeleteVmResponse {
-        message: format!("VM {} kill requested", vm_id),
-    }))
+    Ok((
+        StatusCode::NOT_IMPLEMENTED,
+        Json(DeleteVmResponse {
+            message: format!("VM {} exists but kill is not yet implemented", vm_id),
+        }),
+    ))
 }
 
 // ── Pool management handlers ──────────────────────────────────────────
@@ -565,7 +568,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
     }
 
     #[tokio::test]
