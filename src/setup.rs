@@ -1290,11 +1290,9 @@ if [ -n "$cache_dev" ] && [ -b "/dev/$cache_dev" ]; then
     # Set RUNNER_TOOL_CACHE to persistent cache
     mkdir -p /cache/tool-cache
     echo "RUNNER_TOOL_CACHE=/cache/tool-cache" >> /etc/environment
-    echo "CARGO_TARGET_DIR=/cache/cargo/target" >> /etc/environment
     # GitHub Actions runner reads .env from its install directory, not /etc/environment
     RUNNER_HOME="/home/runner"
     echo "RUNNER_TOOL_CACHE=/cache/tool-cache" >> "$RUNNER_HOME/.env"
-    echo "CARGO_TARGET_DIR=/cache/cargo/target" >> "$RUNNER_HOME/.env"
 
     echo "overlay-init: cache volume mounted at /cache"
 else
