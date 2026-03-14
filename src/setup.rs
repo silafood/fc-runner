@@ -959,8 +959,11 @@ export PATH="/home/runner/.cargo/bin:$PATH"
 # Set up Actions cache service if configured by fc-runner host
 if [ -f /etc/fc-runner-cache ]; then
     . /etc/fc-runner-cache
-    # Write to the runner's .env file — the runner reads this at startup
-    # and injects these into every action's environment.
+    export ACTIONS_CACHE_URL="${FC_CACHE_URL}"
+    export ACTIONS_RUNTIME_TOKEN="${FC_CACHE_TOKEN}"
+    # Ensure sudo -E preserves these vars (env_reset may strip them)
+    echo 'Defaults env_keep += "ACTIONS_CACHE_URL ACTIONS_RUNTIME_TOKEN"' > /etc/sudoers.d/fc-cache
+    # Also write to runner .env as a fallback
     echo "ACTIONS_CACHE_URL=${FC_CACHE_URL}" >> /home/runner/.env
     echo "ACTIONS_RUNTIME_TOKEN=${FC_CACHE_TOKEN}" >> /home/runner/.env
     echo "Cache service configured: ${FC_CACHE_URL}"
