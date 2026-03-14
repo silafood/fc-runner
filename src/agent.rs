@@ -48,6 +48,12 @@ struct Metadata {
     shutdown_on_exit: bool,
     #[serde(default = "default_ephemeral")]
     ephemeral: bool,
+    /// Actions cache service URL (set when cache_service is enabled on the host).
+    #[serde(default)]
+    cache_url: Option<String>,
+    /// Actions cache service bearer token.
+    #[serde(default)]
+    cache_token: Option<String>,
 }
 
 fn default_ephemeral() -> bool {
@@ -273,13 +279,27 @@ async fn verify_container_runtime() {
 
 /// Build the explicit environment for the runner process.
 /// Starts empty (like fireactions) and only sets known-good variables.
-fn runner_env() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("PATH", RUNNER_PATH),
-        ("HOME", "/home/runner"),
-        ("USER", RUNNER_USER),
-        ("LOGNAME", RUNNER_USER),
-    ]
+/// Includes ACTIONS_CACHE_URL and ACTIONS_RUNTIME_TOKEN when the host
+/// cache service is enabled (passed via MMDS metadata).
+fn runner_env(metadata: &Metadata) -> Vec<(&str, String)> {
+    let mut env: Vec<(&str, String)> = vec![
+        ("PATH", RUNNER_PATH.to_string()),
+        ("HOME", "/home/runner".to_string()),
+        ("USER", RUNNER_USER.to_string()),
+        ("LOGNAME", RUNNER_USER.to_string()),
+    ];
+    if let Some(url) = &metadata.cache_url
+        && !url.is_empty()
+    {
+        env.push(("ACTIONS_CACHE_URL", url.clone()));
+        tracing::info!(url, "cache service configured");
+    }
+    if let Some(token) = &metadata.cache_token
+        && !token.is_empty()
+    {
+        env.push(("ACTIONS_RUNTIME_TOKEN", token.clone()));
+    }
+    env
 }
 
 /// Look up the UID, primary GID, and supplementary group GIDs for the runner user.
@@ -385,7 +405,7 @@ async fn run_runner_jit(metadata: &Metadata) -> i32 {
         .arg(jit_config)
         .current_dir(RUNNER_DIR)
         .env_clear()
-        .envs(runner_env())
+        .envs(runner_env(metadata))
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     #[cfg(unix)]
@@ -454,7 +474,7 @@ async fn run_runner_registered(metadata: &Metadata) -> i32 {
     cmd.args(&args)
         .current_dir(RUNNER_DIR)
         .env_clear()
-        .envs(runner_env())
+        .envs(runner_env(metadata))
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     #[cfg(unix)]
@@ -478,7 +498,7 @@ async fn run_runner_registered(metadata: &Metadata) -> i32 {
     let mut cmd = tokio::process::Command::new(&run_sh);
     cmd.current_dir(RUNNER_DIR)
         .env_clear()
-        .envs(runner_env())
+        .envs(runner_env(metadata))
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     #[cfg(unix)]
@@ -634,12 +654,36 @@ mod tests {
 
     #[test]
     fn runner_env_has_required_vars() {
-        let env = runner_env();
+        let meta: Metadata = serde_json::from_str(r#"{"hostname":"fc-0"}"#).unwrap();
+        let env = runner_env(&meta);
         let keys: Vec<&str> = env.iter().map(|(k, _)| *k).collect();
         assert!(keys.contains(&"PATH"));
         assert!(keys.contains(&"HOME"));
         assert!(keys.contains(&"USER"));
         assert!(keys.contains(&"LOGNAME"));
+    }
+
+    #[test]
+    fn runner_env_includes_cache_vars_when_set() {
+        let json =
+            r#"{"hostname":"fc-0","cache_url":"http://172.16.0.1:9090/","cache_token":"tok123"}"#;
+        let meta: Metadata = serde_json::from_str(json).unwrap();
+        let env = runner_env(&meta);
+        let keys: Vec<&str> = env.iter().map(|(k, _)| *k).collect();
+        assert!(keys.contains(&"ACTIONS_CACHE_URL"));
+        assert!(keys.contains(&"ACTIONS_RUNTIME_TOKEN"));
+        let cache_url = env.iter().find(|(k, _)| *k == "ACTIONS_CACHE_URL").unwrap();
+        assert_eq!(cache_url.1, "http://172.16.0.1:9090/");
+    }
+
+    #[test]
+    fn runner_env_no_cache_vars_when_unset() {
+        let json = r#"{"hostname":"fc-0"}"#;
+        let meta: Metadata = serde_json::from_str(json).unwrap();
+        let env = runner_env(&meta);
+        let keys: Vec<&str> = env.iter().map(|(k, _)| *k).collect();
+        assert!(!keys.contains(&"ACTIONS_CACHE_URL"));
+        assert!(!keys.contains(&"ACTIONS_RUNTIME_TOKEN"));
     }
 
     #[tokio::test]

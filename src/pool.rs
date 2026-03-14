@@ -330,9 +330,23 @@ async fn run_pool_vm(
             .and_then(|p| p.parse().ok());
     }
     let ephemeral = config.runner.ephemeral;
-    let env_content = format!(
+    let mut env_content = format!(
         "RUNNER_MODE=register\nRUNNER_TOKEN={}\nREPO_URL={}\nRUNNER_NAME={}\nVM_ID={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\nEPHEMERAL={}\n",
         reg_token, registration_url, runner_name, vm.vm_id, vm.vm_id, ephemeral
     );
+    if config.cache_service.enabled
+        && let (Some(token), Some(port)) = (
+            &config.cache_service.token,
+            config
+                .server
+                .listen_addr
+                .rsplit(':')
+                .next()
+                .and_then(|p| p.parse::<u16>().ok()),
+        )
+    {
+        let cache_url = format!("http://{}:{}/", vm.host_ip, port);
+        env_content.push_str(&format!("CACHE_URL={}\nCACHE_TOKEN={}\n", cache_url, token));
+    }
     vm.execute(&env_content).await
 }

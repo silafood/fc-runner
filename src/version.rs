@@ -9,10 +9,10 @@ pub fn version() -> &'static str {
     static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     VERSION.get_or_init(|| {
         // Runtime override
-        if let Ok(v) = std::env::var("FC_RUNNER_VERSION") {
-            if !v.is_empty() {
-                return v;
-            }
+        if let Ok(v) = std::env::var("FC_RUNNER_VERSION")
+            && !v.is_empty()
+        {
+            return v;
         }
 
         let tag = env!("FC_GIT_TAG");
