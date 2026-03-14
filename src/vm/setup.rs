@@ -1343,9 +1343,9 @@ async fn ensure_network(network: &NetworkConfig) -> anyhow::Result<()> {
 async fn cleanup_stale_taps() {
     for i in 0..16 {
         let tap_name = format!("tap-fc{}", i);
-        if crate::netlink::link_exists(&tap_name).await {
+        if crate::vm::netlink::link_exists(&tap_name).await {
             tracing::info!(tap = %tap_name, "cleaning up stale TAP device from previous run");
-            let _ = crate::netlink::delete_link(&tap_name).await;
+            let _ = crate::vm::netlink::delete_link(&tap_name).await;
         }
     }
 }

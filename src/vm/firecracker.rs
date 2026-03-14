@@ -14,11 +14,11 @@ use tokio::time::{Duration, timeout};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::api::VmLogEvent;
 use crate::config::{AppConfig, FirecrackerConfig, NetworkConfig};
 use crate::github::GitHubClient;
-use crate::netlink;
-use crate::server::VmLogEvent;
-use crate::vsock;
+use crate::vm::netlink;
+use crate::vm::vsock;
 
 /// Shared context passed to VM runner functions, reducing parameter count.
 pub struct VmRunContext {

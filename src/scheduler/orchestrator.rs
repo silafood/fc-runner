@@ -5,12 +5,12 @@ use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio::time::{Duration, interval};
 use tokio_util::sync::CancellationToken;
 
+use crate::api::ServerState;
 use crate::config::AppConfig;
-use crate::firecracker::{MicroVm, VmRunContext};
 use crate::github::GitHubClient;
 use crate::metrics;
-use crate::pool::PoolManager;
-use crate::server::ServerState;
+use crate::scheduler::PoolManager;
+use crate::vm::{MicroVm, VmRunContext};
 
 pub struct Orchestrator {
     config: Arc<AppConfig>,
@@ -269,7 +269,7 @@ impl Orchestrator {
 
             let vm_id = format!("fc-{}-slot{}", job_id, slot);
             server_state
-                .register_vm(crate::server::VmInfo {
+                .register_vm(crate::api::VmInfo {
                     vm_id: vm_id.clone(),
                     job_id,
                     repo: repo.clone(),
@@ -583,7 +583,8 @@ impl Orchestrator {
             // Create a VSOCK notification channel so the orchestrator can start
             // a replacement as soon as the guest agent reports job completion,
             // before the VM fully shuts down.
-            let (vsock_tx, mut vsock_rx) = mpsc::channel::<crate::vsock::JobDoneNotification>(1);
+            let (vsock_tx, mut vsock_rx) =
+                mpsc::channel::<crate::vm::vsock::JobDoneNotification>(1);
             let early_done_tx = done_tx.clone();
             let early_repo = repo.clone();
             let early_slot = slot;

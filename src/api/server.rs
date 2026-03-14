@@ -15,10 +15,10 @@ use tokio::sync::{Mutex, broadcast};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
-use crate::cache_server::CacheState;
+use crate::api::cache_server::CacheState;
 use crate::config::ServerConfig;
 use crate::metrics;
-use crate::pool::PoolManager;
+use crate::scheduler::PoolManager;
 use crate::version;
 
 // ── Shared state ───────────────────────────────────────────────────────
@@ -114,7 +114,7 @@ pub async fn start(
 
     // Merge cache service routes if enabled
     if let Some(cs) = cache_state {
-        app = app.merge(crate::cache_server::router(cs));
+        app = app.merge(crate::api::cache_server::router(cs));
     }
 
     tracing::info!(%listen_addr, "starting management HTTP server");
@@ -433,7 +433,7 @@ mod tests {
 
     #[allow(dead_code)]
     fn app_with_cache(state: Arc<ServerState>, cache: Arc<CacheState>) -> Router {
-        app(state).merge(crate::cache_server::router(cache))
+        app(state).merge(crate::api::cache_server::router(cache))
     }
 
     #[tokio::test]

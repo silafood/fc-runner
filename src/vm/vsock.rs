@@ -11,7 +11,7 @@
 use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc};
 
-use crate::server::VmLogEvent;
+use crate::api::VmLogEvent;
 
 /// Guest agent message types (NDJSON protocol).
 #[derive(Debug, Deserialize)]
