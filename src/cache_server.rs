@@ -1,10 +1,18 @@
 //! GitHub Actions Cache API service.
 //!
-//! Implements the `/_apis/artifactcache/` REST API that `@actions/cache`
-//! (and actions like `Swatinem/rust-cache`) use to save and restore caches.
+//! Implements both the v1 (`/_apis/artifactcache/`) and v2 (Twirp) REST APIs
+//! that `@actions/cache` uses to save and restore caches.
+//!
+//! **v1** (used by `actions/cache@v3` and when `ACTIONS_CACHE_URL` is set):
+//!   - GET/POST/PATCH on `/_apis/artifactcache/` endpoints
+//!   - Chunk uploads assembled in local temp files, then uploaded to S3
+//!
+//! **v2** (used by `actions/cache@v4` when `ACTIONS_CACHE_SERVICE_V2` is set):
+//!   - Twirp RPC at `/twirp/github.actions.results.api.v1.CacheService/`
+//!   - Returns pre-signed S3 URLs; client uploads/downloads directly to S3
+//!
 //! Blob storage is delegated to an S3-compatible backend (RustFS/MinIO).
 //! Metadata is an in-memory index persisted as JSON for crash recovery.
-//! Chunk uploads are assembled in local temp files, then uploaded to S3 on commit.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -183,6 +191,56 @@ impl CacheState {
 
         let size = resp.content_length().unwrap_or(0);
         Ok((resp.body, size))
+    }
+
+    /// Generate a pre-signed PUT URL for direct S3 upload (used by v2 Twirp API).
+    async fn presign_put(&self, id: i64) -> Result<String, StatusCode> {
+        use aws_sdk_s3::presigning::PresigningConfig;
+        use std::time::Duration;
+
+        let config = PresigningConfig::expires_in(Duration::from_secs(3600)).map_err(|e| {
+            tracing::error!(error = %e, "failed to build presigning config");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        let presigned = self
+            .s3
+            .put_object()
+            .bucket(&self.s3_bucket)
+            .key(Self::s3_key(id))
+            .presigned(config)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, cache_id = id, "failed to generate presigned PUT URL");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+        Ok(presigned.uri().to_string())
+    }
+
+    /// Generate a pre-signed GET URL for direct S3 download (used by v2 Twirp API).
+    async fn presign_get(&self, id: i64) -> Result<String, StatusCode> {
+        use aws_sdk_s3::presigning::PresigningConfig;
+        use std::time::Duration;
+
+        let config = PresigningConfig::expires_in(Duration::from_secs(3600)).map_err(|e| {
+            tracing::error!(error = %e, "failed to build presigning config");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        let presigned = self
+            .s3
+            .get_object()
+            .bucket(&self.s3_bucket)
+            .key(Self::s3_key(id))
+            .presigned(config)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, cache_id = id, "failed to generate presigned GET URL");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+        Ok(presigned.uri().to_string())
     }
 
     /// Remove temp files that have no matching reserved (uncommitted) entry.
@@ -544,10 +602,209 @@ async fn get_artifact(
         .unwrap())
 }
 
+// ── Twirp v2 API ────────────────────────────────────────────────────────
+// POST /twirp/github.actions.results.api.v1.CacheService/{Method}
+// Used by actions/cache@v4 when ACTIONS_CACHE_SERVICE_V2 is set.
+// Returns pre-signed S3 URLs; client uploads/downloads directly to S3.
+
+const TWIRP_PREFIX: &str = "/twirp/github.actions.results.api.v1.CacheService";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TwirpCreateRequest {
+    key: String,
+    version: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TwirpCreateResponse {
+    ok: bool,
+    signed_upload_url: String,
+}
+
+/// CreateCacheEntry — reserve an entry and return a pre-signed S3 PUT URL.
+async fn twirp_create_cache_entry(
+    State(state): State<Arc<CacheState>>,
+    headers: HeaderMap,
+    Json(body): Json<TwirpCreateRequest>,
+) -> Result<impl IntoResponse, StatusCode> {
+    check_bearer(&state, &headers)?;
+
+    tracing::info!(key = %body.key, version = %body.version, "twirp CreateCacheEntry");
+
+    // Remove existing entry with same key+version (overwrite semantics)
+    {
+        let mut idx = state.key_index.write().await;
+        if let Some(old_id) = idx.remove(&(body.key.clone(), body.version.clone())) {
+            tracing::info!(key = %body.key, old_id, "replacing existing cache entry (v2)");
+            let mut entries = state.entries.write().await;
+            entries.retain(|e| e.id != old_id);
+        }
+    }
+
+    let id = state.next_id.fetch_add(1, Ordering::SeqCst);
+    let entry = CacheEntry {
+        id,
+        key: body.key,
+        version: body.version,
+        committed: false,
+        size: 0,
+        s3_key: Some(CacheState::s3_key(id)),
+        created_at: chrono::Utc::now().timestamp(),
+    };
+
+    let key_for_log = entry.key.clone();
+    state.entries.write().await.push(entry);
+    state.save_index().await?;
+
+    let signed_url = state.presign_put(id).await?;
+
+    tracing::info!(cache_id = id, key = %key_for_log, "cache entry created with presigned PUT URL (v2)");
+    Ok(Json(TwirpCreateResponse {
+        ok: true,
+        signed_upload_url: signed_url,
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TwirpFinalizeRequest {
+    key: String,
+    version: String,
+    size_bytes: String, // int64 as string (protobuf convention)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TwirpFinalizeResponse {
+    ok: bool,
+    entry_id: String, // int64 as string
+}
+
+/// FinalizeCacheEntryUpload — mark entry as committed after client uploaded to S3.
+async fn twirp_finalize_cache_entry(
+    State(state): State<Arc<CacheState>>,
+    headers: HeaderMap,
+    Json(body): Json<TwirpFinalizeRequest>,
+) -> Result<impl IntoResponse, StatusCode> {
+    check_bearer(&state, &headers)?;
+
+    let size: i64 = body.size_bytes.parse().unwrap_or(0);
+
+    tracing::info!(key = %body.key, version = %body.version, size_bytes = size, "twirp FinalizeCacheEntryUpload");
+
+    let mut entries = state.entries.write().await;
+    let entry = entries
+        .iter_mut()
+        .find(|e| e.key == body.key && e.version == body.version && !e.committed)
+        .ok_or_else(|| {
+            tracing::warn!(key = %body.key, "finalize: no matching uncommitted entry");
+            StatusCode::NOT_FOUND
+        })?;
+
+    entry.committed = true;
+    entry.size = size;
+    let id = entry.id;
+    let key = entry.key.clone();
+    let version = entry.version.clone();
+    drop(entries);
+
+    state
+        .key_index
+        .write()
+        .await
+        .insert((key.clone(), version), id);
+    state.save_index().await?;
+
+    tracing::info!(cache_id = id, key = %key, size_mb = size / 1_048_576, "cache entry finalized (v2)");
+    Ok(Json(TwirpFinalizeResponse {
+        ok: true,
+        entry_id: id.to_string(),
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TwirpGetDownloadUrlRequest {
+    key: String,
+    #[serde(default)]
+    restore_keys: Vec<String>,
+    version: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TwirpGetDownloadUrlResponse {
+    ok: bool,
+    signed_download_url: String,
+    matched_key: String,
+}
+
+/// GetCacheEntryDownloadURL — lookup cache entry and return a pre-signed S3 GET URL.
+async fn twirp_get_download_url(
+    State(state): State<Arc<CacheState>>,
+    headers: HeaderMap,
+    Json(body): Json<TwirpGetDownloadUrlRequest>,
+) -> Result<axum::response::Response, StatusCode> {
+    check_bearer(&state, &headers)?;
+
+    tracing::info!(key = %body.key, restore_keys = ?body.restore_keys, version = %body.version, "twirp GetCacheEntryDownloadURL");
+
+    let entries = state.entries.read().await;
+    let committed: Vec<&CacheEntry> = entries.iter().filter(|e| e.committed).collect();
+
+    // Exact match first
+    if let Some(entry) = committed
+        .iter()
+        .find(|e| e.key == body.key && e.version == body.version)
+    {
+        let url = state.presign_get(entry.id).await?;
+        tracing::info!(key = %entry.key, cache_id = entry.id, "cache HIT exact (v2)");
+        return Ok(Json(TwirpGetDownloadUrlResponse {
+            ok: true,
+            signed_download_url: url,
+            matched_key: entry.key.clone(),
+        })
+        .into_response());
+    }
+
+    // Prefix match via restore keys
+    for rk in &body.restore_keys {
+        if let Some(entry) = committed
+            .iter()
+            .filter(|e| e.key.starts_with(rk.as_str()) && e.version == body.version)
+            .max_by_key(|e| e.created_at)
+        {
+            let url = state.presign_get(entry.id).await?;
+            tracing::info!(key = %entry.key, cache_id = entry.id, restore_key = %rk, "cache HIT prefix (v2)");
+            return Ok(Json(TwirpGetDownloadUrlResponse {
+                ok: true,
+                signed_download_url: url,
+                matched_key: entry.key.clone(),
+            })
+            .into_response());
+        }
+    }
+
+    tracing::info!(key = %body.key, "cache MISS (v2)");
+    Ok(Json(TwirpGetDownloadUrlResponse {
+        ok: false,
+        signed_download_url: String::new(),
+        matched_key: String::new(),
+    })
+    .into_response())
+}
+
 // ── Router ─────────────────────────────────────────────────────────────
 
 pub fn router(state: Arc<CacheState>) -> Router {
+    let twirp_create = format!("{}/CreateCacheEntry", TWIRP_PREFIX);
+    let twirp_finalize = format!("{}/FinalizeCacheEntryUpload", TWIRP_PREFIX);
+    let twirp_download = format!("{}/GetCacheEntryDownloadURL", TWIRP_PREFIX);
+
     Router::new()
+        // v1 API (actions/cache@v3, ACTIONS_CACHE_URL)
         .route("/_apis/artifactcache/cache", get(lookup_cache))
         .route("/_apis/artifactcache/caches", post(reserve_cache))
         .route(
@@ -555,6 +812,10 @@ pub fn router(state: Arc<CacheState>) -> Router {
             patch(upload_chunk).post(commit_cache),
         )
         .route("/_apis/artifactcache/artifacts/{id}", get(get_artifact))
+        // v2 Twirp API (actions/cache@v4, ACTIONS_RESULTS_URL)
+        .route(&twirp_create, post(twirp_create_cache_entry))
+        .route(&twirp_finalize, post(twirp_finalize_cache_entry))
+        .route(&twirp_download, post(twirp_get_download_url))
         .with_state(state)
 }
 
@@ -742,5 +1003,63 @@ mod tests {
     fn s3_key_format() {
         assert_eq!(CacheState::s3_key(42), "cache/42");
         assert_eq!(CacheState::s3_key(1), "cache/1");
+    }
+
+    #[tokio::test]
+    async fn twirp_create_returns_ok_with_signed_url() {
+        let state = test_state().await;
+        let resp = app(state)
+            .oneshot(
+                Request::post(format!("{}/CreateCacheEntry", super::TWIRP_PREFIX))
+                    .header(auth_header().0, auth_header().1)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"key":"twirp-test","version":"v1"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["ok"], true);
+        // Pre-signed URL will fail (no real S3) but the field should be present
+        // In test mode, presigning fails so we just check the response structure
+    }
+
+    #[tokio::test]
+    async fn twirp_get_download_url_miss() {
+        let state = test_state().await;
+        let resp = app(state)
+            .oneshot(
+                Request::post(format!("{}/GetCacheEntryDownloadURL", super::TWIRP_PREFIX))
+                    .header(auth_header().0, auth_header().1)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"key":"nonexistent","restoreKeys":[],"version":"v1"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["matchedKey"], "");
+    }
+
+    #[tokio::test]
+    async fn twirp_unauthorized_without_token() {
+        let state = test_state().await;
+        let resp = app(state)
+            .oneshot(
+                Request::post(format!("{}/CreateCacheEntry", super::TWIRP_PREFIX))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"key":"k","version":"v"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

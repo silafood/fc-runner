@@ -291,8 +291,12 @@ fn runner_env(metadata: &Metadata) -> Vec<(&str, String)> {
     if let Some(url) = &metadata.cache_url
         && !url.is_empty()
     {
+        // v1 API (actions/cache@v3): ACTIONS_CACHE_URL
         env.push(("ACTIONS_CACHE_URL", url.clone()));
-        tracing::info!(url, "cache service configured");
+        // v2 API (actions/cache@v4): ACTIONS_RESULTS_URL + feature flag
+        env.push(("ACTIONS_RESULTS_URL", url.clone()));
+        env.push(("ACTIONS_CACHE_SERVICE_V2", "true".to_string()));
+        tracing::info!(url, "cache service configured (v1+v2)");
     }
     if let Some(token) = &metadata.cache_token
         && !token.is_empty()
