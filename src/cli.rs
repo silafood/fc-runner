@@ -52,19 +52,15 @@ pub enum Commands {
         action: PoolAction,
     },
 
-    /// Stream logs from a VM
+    /// Stream logs from VMs (SSE)
     Logs {
         /// Server endpoint
         #[arg(short, long, default_value = "http://localhost:9090")]
         endpoint: String,
 
-        /// VM ID to stream logs from
+        /// VM ID to filter logs (omit for all VMs)
         #[arg(long)]
-        vm_id: String,
-
-        /// Follow log output
-        #[arg(short, long)]
-        follow: bool,
+        vm_id: Option<String>,
     },
 }
 
@@ -295,16 +291,11 @@ mod tests {
     }
 
     #[test]
-    fn cli_parse_logs() {
-        let cli = Cli::parse_from(["fc-runner", "logs", "--vm-id", "fc-123-slot0", "--follow"]);
+    fn cli_parse_logs_with_vm_id() {
+        let cli = Cli::parse_from(["fc-runner", "logs", "--vm-id", "fc-123-slot0"]);
         match cli.command {
-            Commands::Logs {
-                vm_id,
-                follow,
-                endpoint,
-            } => {
-                assert_eq!(vm_id, "fc-123-slot0");
-                assert!(follow);
+            Commands::Logs { vm_id, endpoint } => {
+                assert_eq!(vm_id, Some("fc-123-slot0".to_string()));
                 assert_eq!(endpoint, "http://localhost:9090");
             }
             _ => panic!("expected Logs command"),
@@ -312,10 +303,10 @@ mod tests {
     }
 
     #[test]
-    fn cli_logs_no_follow() {
-        let cli = Cli::parse_from(["fc-runner", "logs", "--vm-id", "fc-456"]);
+    fn cli_logs_all_vms() {
+        let cli = Cli::parse_from(["fc-runner", "logs"]);
         match cli.command {
-            Commands::Logs { follow, .. } => assert!(!follow),
+            Commands::Logs { vm_id, .. } => assert_eq!(vm_id, None),
             _ => panic!("expected Logs command"),
         }
     }
@@ -345,8 +336,8 @@ mod tests {
     }
 
     #[test]
-    fn cli_logs_requires_vm_id() {
+    fn cli_logs_no_vm_id_is_valid() {
         let result = Cli::try_parse_from(["fc-runner", "logs"]);
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 }

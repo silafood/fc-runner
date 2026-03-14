@@ -267,27 +267,12 @@ impl Orchestrator {
             metrics::POOL_SLOTS_AVAILABLE.dec();
             tracing::info!(job_id, repo = %repo, slot, "job started (permit acquired, slot assigned)");
 
-            let vm_id = format!("fc-{}-slot{}", job_id, slot);
-            server_state
-                .register_vm(crate::api::VmInfo {
-                    vm_id: vm_id.clone(),
-                    job_id,
-                    repo: repo.clone(),
-                    slot,
-                    started_at: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs()
-                        .to_string(),
-                })
-                .await;
-
             let ctx = VmRunContext::new(config.clone(), github.clone(), slot, cancel)
                 .log_tx(server_state.log_tx.clone());
             let timer = metrics::VM_BOOT_DURATION
                 .with_label_values(&[&repo])
                 .start_timer();
-            let result = run_jit_job(ctx, job_id, &repo).await;
+            let (result, vm_id) = run_jit_job(ctx, job_id, &repo, &server_state).await;
             timer.observe_duration();
 
             server_state.unregister_vm(&vm_id).await;
@@ -569,6 +554,7 @@ impl Orchestrator {
         let active_jobs = self.active_jobs.clone();
         let cancel = self.cancel.clone();
         let log_tx = self.server_state.log_tx.clone();
+        let server_state = self.server_state.clone();
 
         tokio::spawn(async move {
             *active_jobs.lock().await += 1;
@@ -614,8 +600,14 @@ impl Orchestrator {
             let ctx = VmRunContext::new(config, github.clone(), slot, cancel)
                 .log_tx(log_tx)
                 .vsock_notify(vsock_tx);
-            let result = run_warm_vm(ctx, &repo).await;
+            let result = run_warm_vm(ctx, &repo, &server_state).await;
             timer.observe_duration();
+
+            // Unregister VM from server state
+            if let Ok(ref vm_result) = result {
+                server_state.unregister_vm(&vm_result.vm_id).await;
+            }
+
             tracing::info!(
                 slot,
                 repo = %repo,
@@ -739,46 +731,83 @@ impl Orchestrator {
 
 // ── Job runners ──────────────────────────────────────────────────────
 
-async fn run_jit_job(ctx: VmRunContext, job_id: u64, repo: &str) -> anyhow::Result<()> {
-    tracing::info!(job_id, repo = %repo, slot = ctx.slot, "requesting JIT token");
-    let jit_token = ctx.github.generate_jit_config(repo, job_id).await?;
-    tracing::info!(job_id, repo = %repo, "JIT token acquired");
+async fn run_jit_job(
+    ctx: VmRunContext,
+    job_id: u64,
+    repo: &str,
+    server_state: &Arc<crate::api::ServerState>,
+) -> (anyhow::Result<()>, String) {
+    let slot = ctx.slot;
+    let result = async {
+        tracing::info!(job_id, repo = %repo, slot, "requesting JIT token");
+        let jit_token = ctx.github.generate_jit_config(repo, job_id).await?;
+        tracing::info!(job_id, repo = %repo, "JIT token acquired");
 
-    let repo_url = format!("https://github.com/{}/{}", ctx.config.github.owner, repo);
-    let mut vm = MicroVm::new(
-        job_id,
-        &ctx.config.firecracker,
-        &ctx.config.network,
-        &ctx.config.runner.work_dir,
-        ctx.config.runner.vm_timeout_secs,
-        ctx.slot,
-        ctx.cancel.clone(),
-    );
-    if ctx.config.cache_service.enabled {
-        vm.cache_service_token = ctx.config.cache_service.token.clone();
-        vm.cache_service_port = ctx
-            .config
-            .server
-            .listen_addr
-            .rsplit(':')
-            .next()
-            .and_then(|p| p.parse().ok());
+        let repo_url = format!("https://github.com/{}/{}", ctx.config.github.owner, repo);
+        let mut vm = MicroVm::new(
+            job_id,
+            &ctx.config.firecracker,
+            &ctx.config.network,
+            &ctx.config.runner.work_dir,
+            ctx.config.runner.vm_timeout_secs,
+            ctx.slot,
+            ctx.cancel.clone(),
+        );
+        if ctx.config.cache_service.enabled {
+            vm.cache_service_token = ctx.config.cache_service.token.clone();
+            vm.cache_service_port = ctx
+                .config
+                .server
+                .listen_addr
+                .rsplit(':')
+                .next()
+                .and_then(|p| p.parse().ok());
+        }
+        let vm_id = vm.vm_id.clone();
+
+        // Register with real VM ID so `fc-runner ps` shows it
+        server_state
+            .register_vm(crate::api::VmInfo {
+                vm_id: vm_id.clone(),
+                job_id,
+                repo: repo.to_string(),
+                slot,
+                started_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .to_string(),
+            })
+            .await;
+
+        let ephemeral = ctx.config.runner.ephemeral;
+        let mut env_content = format!(
+            "RUNNER_MODE=jit\nRUNNER_TOKEN={}\nREPO_URL={}\nVM_ID={}\nRUNNER_JIT_CONFIG={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\nEPHEMERAL={}\n",
+            jit_token, repo_url, vm_id, jit_token, vm_id, ephemeral
+        );
+        append_cache_env(&ctx.config, &mut vm, &mut env_content);
+        vm.execute(&env_content, ctx).await?;
+        Ok::<String, anyhow::Error>(vm_id)
     }
-    let ephemeral = ctx.config.runner.ephemeral;
-    let mut env_content = format!(
-        "RUNNER_MODE=jit\nRUNNER_TOKEN={}\nREPO_URL={}\nVM_ID={}\nRUNNER_JIT_CONFIG={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\nEPHEMERAL={}\n",
-        jit_token, repo_url, vm.vm_id, jit_token, vm.vm_id, ephemeral
-    );
-    append_cache_env(&ctx.config, &mut vm, &mut env_content);
-    vm.execute(&env_content, ctx).await
+    .await;
+
+    match result {
+        Ok(vm_id) => (Ok(()), vm_id),
+        Err(e) => (Err(e), format!("fc-{}-slot{}", job_id, slot)),
+    }
 }
 
-/// Result of running a warm pool VM: the runner name registered on GitHub.
+/// Result of running a warm pool VM: the runner name and VM ID.
 struct WarmVmResult {
     runner_name: String,
+    vm_id: String,
 }
 
-async fn run_warm_vm(ctx: VmRunContext, repo: &str) -> anyhow::Result<WarmVmResult> {
+async fn run_warm_vm(
+    ctx: VmRunContext,
+    repo: &str,
+    server_state: &Arc<crate::api::ServerState>,
+) -> anyhow::Result<WarmVmResult> {
     let is_org = ctx.github.is_org_mode();
     let slot = ctx.slot;
 
@@ -835,6 +864,21 @@ async fn run_warm_vm(ctx: VmRunContext, repo: &str) -> anyhow::Result<WarmVmResu
             .next()
             .and_then(|p| p.parse().ok());
     }
+    // Register with real VM ID so `fc-runner ps` shows it
+    server_state
+        .register_vm(crate::api::VmInfo {
+            vm_id: vm.vm_id.clone(),
+            job_id: 0,
+            repo: repo.to_string(),
+            slot,
+            started_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                .to_string(),
+        })
+        .await;
+
     let ephemeral = ctx.config.runner.ephemeral;
     let mut env_content = format!(
         "RUNNER_MODE=register\nRUNNER_TOKEN={}\nREPO_URL={}\nRUNNER_NAME={}\nVM_ID={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\nEPHEMERAL={}\n",
@@ -848,13 +892,14 @@ async fn run_warm_vm(ctx: VmRunContext, repo: &str) -> anyhow::Result<WarmVmResu
         ephemeral,
         "launching warm pool VM"
     );
+    let vm_id = vm.vm_id.clone();
     vm.execute(&env_content, ctx).await?;
     tracing::info!(
         slot,
         runner_name = %runner_name,
         "warm pool VM execution finished"
     );
-    Ok(WarmVmResult { runner_name })
+    Ok(WarmVmResult { runner_name, vm_id })
 }
 
 /// Append cache service env vars to env_content when the cache service is enabled.

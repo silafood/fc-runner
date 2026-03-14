@@ -49,6 +49,26 @@ pub(crate) fn kill_process(pid: u32) {
     }
 }
 
+/// Reap all zombie child processes to prevent buildup.
+/// The SDK spawns firecracker/jailer as children but may not waitpid() on exit.
+pub(crate) fn reap_zombies() {
+    #[cfg(target_os = "linux")]
+    {
+        use nix::sys::wait::{WaitPidFlag, waitpid};
+        use nix::unistd::Pid;
+
+        loop {
+            match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+                Ok(nix::sys::wait::WaitStatus::StillAlive) => break,
+                Ok(status) => {
+                    tracing::debug!(?status, "reaped zombie child process");
+                }
+                Err(_) => break, // ECHILD = no more children
+            }
+        }
+    }
+}
+
 /// Convert a PathBuf to &str with a descriptive error instead of panicking.
 pub(crate) fn path_str(path: &std::path::Path) -> anyhow::Result<&str> {
     path.to_str()
