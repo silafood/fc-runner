@@ -15,6 +15,7 @@ use crate::cache_server::CacheState;
 use crate::config::ServerConfig;
 use crate::metrics;
 use crate::pool::PoolManager;
+use crate::version;
 
 // ── Shared state ───────────────────────────────────────────────────────
 
@@ -43,7 +44,7 @@ impl ServerState {
     pub fn new(server_config: &ServerConfig) -> Self {
         Self {
             start_time: Instant::now(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: version::version().to_string(),
             api_key: server_config.api_key.clone(),
             active_vms: Mutex::new(Vec::new()),
             mode: Mutex::new("starting".to_string()),
@@ -77,6 +78,7 @@ pub async fn start(
     cache_state: Option<Arc<CacheState>>,
 ) -> anyhow::Result<()> {
     let mut app = Router::new()
+        .route("/", get(root_handler))
         .route("/metrics", get(metrics_handler))
         .route("/healthz", get(healthz_handler))
         .route("/api/v1/status", get(status_handler))
@@ -130,6 +132,14 @@ async fn metrics_handler(State(state): State<Arc<ServerState>>) -> impl IntoResp
         [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
         metrics::gather(),
     )
+}
+
+async fn root_handler(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "service": "fc-runner",
+        "version": state.version,
+        "uptime_seconds": state.start_time.elapsed().as_secs(),
+    }))
 }
 
 async fn healthz_handler() -> impl IntoResponse {
@@ -307,6 +317,7 @@ mod tests {
 
     fn app(state: Arc<ServerState>) -> Router {
         Router::new()
+            .route("/", get(root_handler))
             .route("/metrics", get(metrics_handler))
             .route("/healthz", get(healthz_handler))
             .route("/api/v1/status", get(status_handler))
@@ -323,6 +334,21 @@ mod tests {
     #[allow(dead_code)]
     fn app_with_cache(state: Arc<ServerState>, cache: Arc<CacheState>) -> Router {
         app(state).merge(crate::cache_server::router(cache))
+    }
+
+    #[tokio::test]
+    async fn root_returns_service_info() {
+        let state = test_state();
+        let resp = app(state)
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 10000).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["service"], "fc-runner");
+        assert!(json["version"].is_string());
+        assert!(json["uptime_seconds"].is_number());
     }
 
     #[tokio::test]
