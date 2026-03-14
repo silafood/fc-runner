@@ -961,11 +961,24 @@ if [ -f /etc/fc-runner-cache ]; then
     . /etc/fc-runner-cache
     export ACTIONS_CACHE_URL="${FC_CACHE_URL}"
     export ACTIONS_RUNTIME_TOKEN="${FC_CACHE_TOKEN}"
+    # S3 credentials for runs-on/cache direct uploads
+    [ -n "${FC_S3_ENDPOINT}" ] && export RUNS_ON_S3_BUCKET_ENDPOINT="${FC_S3_ENDPOINT}"
+    [ -n "${FC_S3_BUCKET}" ] && export RUNS_ON_S3_BUCKET_CACHE="${FC_S3_BUCKET}"
+    [ -n "${FC_S3_ACCESS_KEY}" ] && export AWS_ACCESS_KEY_ID="${FC_S3_ACCESS_KEY}"
+    [ -n "${FC_S3_SECRET_KEY}" ] && export AWS_SECRET_ACCESS_KEY="${FC_S3_SECRET_KEY}"
+    [ -n "${FC_S3_REGION}" ] && export AWS_REGION="${FC_S3_REGION}"
+    [ -n "${FC_S3_ENDPOINT}" ] && export RUNS_ON_S3_FORCE_PATH_STYLE="true"
     # Ensure sudo -E preserves these vars (env_reset may strip them)
-    echo 'Defaults env_keep += "ACTIONS_CACHE_URL ACTIONS_RUNTIME_TOKEN"' > /etc/sudoers.d/fc-cache
+    echo 'Defaults env_keep += "ACTIONS_CACHE_URL ACTIONS_RUNTIME_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_REGION RUNS_ON_S3_BUCKET_CACHE RUNS_ON_S3_BUCKET_ENDPOINT RUNS_ON_S3_FORCE_PATH_STYLE"' > /etc/sudoers.d/fc-cache
     # Also write to runner .env as a fallback
     echo "ACTIONS_CACHE_URL=${FC_CACHE_URL}" >> /home/runner/.env
     echo "ACTIONS_RUNTIME_TOKEN=${FC_CACHE_TOKEN}" >> /home/runner/.env
+    [ -n "${FC_S3_ENDPOINT}" ] && echo "RUNS_ON_S3_BUCKET_ENDPOINT=${FC_S3_ENDPOINT}" >> /home/runner/.env
+    [ -n "${FC_S3_BUCKET}" ] && echo "RUNS_ON_S3_BUCKET_CACHE=${FC_S3_BUCKET}" >> /home/runner/.env
+    [ -n "${FC_S3_ACCESS_KEY}" ] && echo "AWS_ACCESS_KEY_ID=${FC_S3_ACCESS_KEY}" >> /home/runner/.env
+    [ -n "${FC_S3_SECRET_KEY}" ] && echo "AWS_SECRET_ACCESS_KEY=${FC_S3_SECRET_KEY}" >> /home/runner/.env
+    [ -n "${FC_S3_REGION}" ] && echo "AWS_REGION=${FC_S3_REGION}" >> /home/runner/.env
+    [ -n "${FC_S3_ENDPOINT}" ] && echo "RUNS_ON_S3_FORCE_PATH_STYLE=true" >> /home/runner/.env
     echo "Cache service configured: ${FC_CACHE_URL}"
 fi
 

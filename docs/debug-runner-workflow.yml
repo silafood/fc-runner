@@ -1,0 +1,72 @@
+name: Debug Runner
+on:
+  workflow_dispatch:
+
+jobs:
+  debug:
+    runs-on: [self-hosted, linux, firecracker]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show cache env vars
+        run: |
+          echo "ACTIONS_CACHE_SERVICE_V2=${ACTIONS_CACHE_SERVICE_V2:-<not set>}"
+          echo "ACTIONS_RESULTS_URL=${ACTIONS_RESULTS_URL:-<not set>}"
+          echo "ACTIONS_CACHE_URL=${ACTIONS_CACHE_URL:-<not set>}"
+          echo "RUNS_ON_S3_BUCKET_CACHE=${RUNS_ON_S3_BUCKET_CACHE:-<not set>}"
+          echo "RUNS_ON_S3_BUCKET_ENDPOINT=${RUNS_ON_S3_BUCKET_ENDPOINT:-<not set>}"
+          echo "AWS_REGION=${AWS_REGION:-<not set>}"
+          echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:+<set>}"
+          echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:+<set>}"
+
+      - name: Show all env
+        run: env | sort
+
+      - name: Show MMDS metadata
+        run: |
+          TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-metadata-token-ttl-seconds: 60" 2>/dev/null) || true
+          curl -s -H "X-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/fc-runner 2>/dev/null | python3 -m json.tool || echo "MMDS not available"
+
+      - name: Test connectivity
+        run: |
+          curl -s http://172.16.0.1:9090/ 2>/dev/null || echo "fc-runner server unreachable"
+          curl -s http://172.16.0.1:9000/minio/health/live 2>/dev/null && echo "S3 reachable" || echo "S3 unreachable on 172.16.0.1:9000"
+
+      # ── Cache test (runs-on/cache → RustFS via MMDS-injected S3 creds) ─
+
+      - name: Create test data
+        run: |
+          mkdir -p /tmp/cache-test
+          echo "hello from fc-runner cache $(date)" > /tmp/cache-test/data.txt
+          cat /tmp/cache-test/data.txt
+
+      - name: Save cache (runs-on/cache → S3)
+        uses: runs-on/cache/save@v4
+        with:
+          path: /tmp/cache-test
+          key: fc-test-${{ github.run_id }}
+
+      - name: Delete test data
+        run: rm -rf /tmp/cache-test
+
+      - name: Restore cache (runs-on/cache → S3)
+        uses: runs-on/cache/restore@v4
+        with:
+          path: /tmp/cache-test
+          key: fc-test-${{ github.run_id }}
+
+      - name: Verify cache roundtrip
+        run: |
+          cat /tmp/cache-test/data.txt
+          echo "Cache round-trip via S3 successful!"
+
+      # ── System info ────────────────────────────────────────────────
+
+      - name: System info
+        run: |
+          echo "Hostname: $(hostname)"
+          echo "OS: $(uname -a)"
+          echo "User: $(whoami)"
+          echo "Docker: $(podman --version 2>/dev/null || echo 'not available')"
+          echo "Disk: $(df -h / | tail -1)"
+          echo "Memory: $(free -h | grep Mem)"

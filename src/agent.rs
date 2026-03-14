@@ -54,6 +54,21 @@ struct Metadata {
     /// Actions cache service bearer token.
     #[serde(default)]
     cache_token: Option<String>,
+    /// S3-compatible endpoint for runs-on/cache direct uploads.
+    #[serde(default)]
+    s3_endpoint: Option<String>,
+    /// S3 bucket name for cache blobs.
+    #[serde(default)]
+    s3_bucket: Option<String>,
+    /// S3 access key ID.
+    #[serde(default)]
+    s3_access_key: Option<String>,
+    /// S3 secret access key.
+    #[serde(default)]
+    s3_secret_key: Option<String>,
+    /// S3 region for signature.
+    #[serde(default)]
+    s3_region: Option<String>,
 }
 
 fn default_ephemeral() -> bool {
@@ -302,6 +317,34 @@ fn runner_env(metadata: &Metadata) -> Vec<(&str, String)> {
         && !token.is_empty()
     {
         env.push(("ACTIONS_RUNTIME_TOKEN", token.clone()));
+    }
+    // S3 credentials for runs-on/cache direct uploads to RustFS/MinIO
+    if let Some(endpoint) = &metadata.s3_endpoint
+        && !endpoint.is_empty()
+    {
+        env.push(("RUNS_ON_S3_BUCKET_ENDPOINT", endpoint.clone()));
+        env.push(("RUNS_ON_S3_FORCE_PATH_STYLE", "true".to_string()));
+        tracing::info!(endpoint, "S3 cache endpoint configured for runs-on/cache");
+    }
+    if let Some(bucket) = &metadata.s3_bucket
+        && !bucket.is_empty()
+    {
+        env.push(("RUNS_ON_S3_BUCKET_CACHE", bucket.clone()));
+    }
+    if let Some(key) = &metadata.s3_access_key
+        && !key.is_empty()
+    {
+        env.push(("AWS_ACCESS_KEY_ID", key.clone()));
+    }
+    if let Some(key) = &metadata.s3_secret_key
+        && !key.is_empty()
+    {
+        env.push(("AWS_SECRET_ACCESS_KEY", key.clone()));
+    }
+    if let Some(region) = &metadata.s3_region
+        && !region.is_empty()
+    {
+        env.push(("AWS_REGION", region.clone()));
     }
     env
 }
