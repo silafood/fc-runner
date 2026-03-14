@@ -225,7 +225,7 @@ pub struct MicroVm {
     cancel: CancellationToken,
     // Per-VM networking
     tap_name: String,
-    host_ip: String,
+    pub host_ip: String,
     guest_ip: String,
     guest_mac: String,
     network_dns: Vec<String>,

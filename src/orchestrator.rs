@@ -765,10 +765,11 @@ async fn run_jit_job(
             .and_then(|p| p.parse().ok());
     }
     let ephemeral = config.runner.ephemeral;
-    let env_content = format!(
+    let mut env_content = format!(
         "RUNNER_MODE=jit\nRUNNER_TOKEN={}\nREPO_URL={}\nVM_ID={}\nRUNNER_JIT_CONFIG={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\nEPHEMERAL={}\n",
         jit_token, repo_url, vm.vm_id, jit_token, vm.vm_id, ephemeral
     );
+    append_cache_env(&config, &vm, &mut env_content);
     vm.execute(&env_content).await
 }
 
@@ -835,10 +836,11 @@ async fn run_warm_vm(
             .and_then(|p| p.parse().ok());
     }
     let ephemeral = config.runner.ephemeral;
-    let env_content = format!(
+    let mut env_content = format!(
         "RUNNER_MODE=register\nRUNNER_TOKEN={}\nREPO_URL={}\nRUNNER_NAME={}\nVM_ID={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\nEPHEMERAL={}\n",
         reg_token, registration_url, runner_name, vm.vm_id, vm.vm_id, ephemeral
     );
+    append_cache_env(&config, &vm, &mut env_content);
     tracing::info!(
         slot,
         vm_id = %vm.vm_id,
@@ -853,4 +855,24 @@ async fn run_warm_vm(
         "warm pool VM execution finished"
     );
     Ok(WarmVmResult { runner_name })
+}
+
+/// Append cache service env vars to env_content when the cache service is enabled.
+/// These flow through MMDS to the guest agent, which passes them to the runner process
+/// as ACTIONS_CACHE_URL and ACTIONS_RUNTIME_TOKEN.
+fn append_cache_env(config: &AppConfig, vm: &MicroVm, env_content: &mut String) {
+    if config.cache_service.enabled
+        && let (Some(token), Some(port)) = (
+            &config.cache_service.token,
+            config
+                .server
+                .listen_addr
+                .rsplit(':')
+                .next()
+                .and_then(|p| p.parse::<u16>().ok()),
+        )
+    {
+        let cache_url = format!("http://{}:{}/", vm.host_ip, port);
+        env_content.push_str(&format!("CACHE_URL={}\nCACHE_TOKEN={}\n", cache_url, token));
+    }
 }
