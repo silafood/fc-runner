@@ -22,11 +22,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Validate { config } => run_validate(&config),
         Commands::Ps { endpoint } => run_ps(&endpoint).await,
         Commands::Pools { action } => run_pools(action).await,
-        Commands::Logs {
-            endpoint,
-            vm_id,
-            follow,
-        } => run_logs(&endpoint, &vm_id, follow).await,
+        Commands::Logs { endpoint, vm_id } => run_logs(&endpoint, vm_id.as_deref()).await,
     }
 }
 
@@ -217,21 +213,20 @@ async fn run_pools(action: PoolAction) -> anyhow::Result<()> {
     }
 }
 
-async fn run_logs(endpoint: &str, vm_id: &str, follow: bool) -> anyhow::Result<()> {
+async fn run_logs(endpoint: &str, vm_id: Option<&str>) -> anyhow::Result<()> {
     use futures_util::StreamExt;
 
     let client = api::client::ApiClient::new(endpoint);
-    let vm_filter = if vm_id.is_empty() { None } else { Some(vm_id) };
 
     println!(
         "streaming logs{} from {} (Ctrl+C to stop)",
-        vm_filter
+        vm_id
             .map(|id| format!(" for VM {}", id))
             .unwrap_or_default(),
         endpoint
     );
 
-    let resp = client.stream_logs(vm_filter).await?;
+    let resp = client.stream_logs(vm_id).await?;
     let mut stream = resp.bytes_stream();
 
     while let Some(chunk) = stream.next().await {
@@ -247,9 +242,6 @@ async fn run_logs(endpoint: &str, vm_id: &str, follow: bool) -> anyhow::Result<(
                 let ts = event["timestamp"].as_str().unwrap_or("");
                 println!("[{}] {} [{}] {}", ts, vm, etype, msg);
             }
-        }
-        if !follow {
-            break;
         }
     }
 
