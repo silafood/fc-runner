@@ -339,6 +339,9 @@ pub(crate) fn log_level_from_str(s: &str) -> LogLevel {
         "warning" | "warn" => LogLevel::Warning,
         "info" => LogLevel::Info,
         "debug" => LogLevel::Debug,
-        _ => LogLevel::Warning,
+        other => {
+            tracing::warn!(value = other, "unknown log_level, defaulting to Warning");
+            LogLevel::Warning
+        }
     }
 }

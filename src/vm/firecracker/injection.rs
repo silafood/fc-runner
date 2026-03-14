@@ -63,7 +63,9 @@ impl MicroVm {
             );
             tokio::fs::remove_file(cache_path).await?;
         }
-        let cache_dir = cache_path.parent().unwrap();
+        let cache_dir = cache_path
+            .parent()
+            .context("cache_path has no parent directory")?;
         tokio::fs::create_dir_all(cache_dir)
             .await
             .with_context(|| format!("creating cache directory: {}", cache_dir.display()))?;
