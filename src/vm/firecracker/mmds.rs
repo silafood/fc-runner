@@ -2,8 +2,12 @@ use anyhow::Context;
 use firecracker_rs_sdk::models::MmdsContentsObject;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use tokio::time::{Duration, timeout};
 
 use super::MicroVm;
+
+/// Timeout for Firecracker API socket operations (connect + request/response).
+const SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Send MMDS metadata directly via raw HTTP on the Firecracker API socket.
 ///
@@ -14,8 +18,9 @@ pub(crate) async fn put_mmds_raw(
     socket_path: &std::path::Path,
     json_body: &str,
 ) -> anyhow::Result<()> {
-    let mut stream = UnixStream::connect(socket_path)
+    let mut stream = timeout(SOCKET_TIMEOUT, UnixStream::connect(socket_path))
         .await
+        .context("MMDS socket connect timed out")?
         .with_context(|| format!("connecting to API socket: {}", socket_path.display()))?;
 
     let request = format!(
@@ -23,15 +28,15 @@ pub(crate) async fn put_mmds_raw(
         json_body.len(),
         json_body
     );
-    stream
-        .write_all(request.as_bytes())
+    timeout(SOCKET_TIMEOUT, stream.write_all(request.as_bytes()))
         .await
+        .context("MMDS write timed out")?
         .context("writing MMDS PUT request")?;
 
     let mut response = vec![0u8; 1024];
-    let n = stream
-        .read(&mut response)
+    let n = timeout(SOCKET_TIMEOUT, stream.read(&mut response))
         .await
+        .context("MMDS read timed out")?
         .context("reading MMDS PUT response")?;
     let response_str = String::from_utf8_lossy(&response[..n]);
 
@@ -51,8 +56,9 @@ pub(crate) async fn put_vsock_raw(
     socket_path: &std::path::Path,
     json_body: &str,
 ) -> anyhow::Result<()> {
-    let mut stream = UnixStream::connect(socket_path)
+    let mut stream = timeout(SOCKET_TIMEOUT, UnixStream::connect(socket_path))
         .await
+        .context("VSOCK socket connect timed out")?
         .with_context(|| format!("connecting to API socket: {}", socket_path.display()))?;
 
     let request = format!(
@@ -60,15 +66,15 @@ pub(crate) async fn put_vsock_raw(
         json_body.len(),
         json_body
     );
-    stream
-        .write_all(request.as_bytes())
+    timeout(SOCKET_TIMEOUT, stream.write_all(request.as_bytes()))
         .await
+        .context("VSOCK write timed out")?
         .context("writing VSOCK PUT request")?;
 
     let mut response = vec![0u8; 1024];
-    let n = stream
-        .read(&mut response)
+    let n = timeout(SOCKET_TIMEOUT, stream.read(&mut response))
         .await
+        .context("VSOCK read timed out")?
         .context("reading VSOCK PUT response")?;
     let response_str = String::from_utf8_lossy(&response[..n]);
 

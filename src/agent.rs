@@ -239,6 +239,20 @@ async fn read_mmds(client: &reqwest::Client) -> anyhow::Result<Metadata> {
 
 /// Set the system hostname and update /etc/hosts.
 async fn set_hostname(hostname: &str) {
+    // Sanitize hostname: only allow alphanumeric, hyphens, and dots
+    let sanitized: String = hostname
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '.')
+        .collect();
+    if sanitized != hostname {
+        tracing::warn!(
+            original = hostname,
+            sanitized = %sanitized,
+            "hostname contained invalid characters, sanitized"
+        );
+    }
+    let hostname = &sanitized;
+
     if let Err(e) = tokio::process::Command::new("hostname")
         .arg(hostname)
         .status()
