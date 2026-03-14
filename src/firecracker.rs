@@ -195,10 +195,7 @@ async fn put_vsock_raw(socket_path: &std::path::Path, json_body: &str) -> anyhow
     let response_str = String::from_utf8_lossy(&response[..n]);
 
     if !response_str.contains("204") && !response_str.contains("200") {
-        anyhow::bail!(
-            "VSOCK PUT failed: {}",
-            response_str.trim()
-        );
+        anyhow::bail!("VSOCK PUT failed: {}", response_str.trim());
     }
 
     Ok(())
@@ -219,6 +216,10 @@ pub struct MicroVm {
     vsock_socket_path: PathBuf,
     /// Per-slot persistent cache ext4 image (used only when cache_enabled = true).
     cache_path: Option<PathBuf>,
+    /// Token for the Actions cache service (set when cache_service is enabled).
+    pub cache_service_token: Option<String>,
+    /// Port the cache service listens on (from server.listen_addr).
+    pub cache_service_port: Option<u16>,
     fc_config: FirecrackerConfig,
     vm_timeout_secs: u64,
     cancel: CancellationToken,
@@ -270,6 +271,8 @@ impl MicroVm {
             overlay_path: base.join(format!("{}.overlay.ext4", vm_id)),
             vsock_socket_path: base.join(format!("{}.vsock", vm_id)),
             cache_path,
+            cache_service_token: None,
+            cache_service_port: None,
             job_id,
             vm_id,
             fc_config: fc_config.clone(),
@@ -301,11 +304,7 @@ impl MicroVm {
     /// In overlay mode: vda=squashfs, vdb=overlay, vdc=cache
     /// In legacy mode: vda=rootfs, vdb=cache
     fn cache_device_name(&self) -> &str {
-        if self.use_overlay() {
-            "vdc"
-        } else {
-            "vdb"
-        }
+        if self.use_overlay() { "vdc" } else { "vdb" }
     }
 
     /// Create a per-VM sparse overlay ext4 file for OverlayFS COW mode.
@@ -468,6 +467,7 @@ impl MicroVm {
 
         // Write per-VM guest network config (unique IP/gateway per slot)
         self.write_network_config_to(&write_base).await?;
+        self.write_cache_service_config(&write_base).await?;
 
         if self.use_overlay() {
             // Override fstab (root is overlayfs, not ext4 block device)
@@ -506,6 +506,7 @@ impl MicroVm {
         };
 
         self.write_network_config_to(&write_base).await?;
+        self.write_cache_service_config(&write_base).await?;
 
         if self.use_overlay() {
             self.write_overlay_fstab(&write_base).await?;
@@ -514,6 +515,21 @@ impl MicroVm {
 
         self.umount_with_retry().await?;
         let _ = tokio::fs::remove_dir(&self.mount_point).await;
+        Ok(())
+    }
+
+    /// Write cache service config to the VM rootfs so the entrypoint can
+    /// set up `ACTIONS_CACHE_URL` and `ACTIONS_RUNTIME_TOKEN` via a runner hook.
+    async fn write_cache_service_config(&self, write_base: &std::path::Path) -> anyhow::Result<()> {
+        if let (Some(token), Some(port)) = (&self.cache_service_token, self.cache_service_port) {
+            let etc_dir = write_base.join("etc");
+            tokio::fs::create_dir_all(&etc_dir).await?;
+            let config = format!(
+                "FC_CACHE_URL=http://{}:{}/\nFC_CACHE_TOKEN={}\n",
+                self.host_ip, port, token
+            );
+            tokio::fs::write(etc_dir.join("fc-runner-cache"), config).await?;
+        }
         Ok(())
     }
 
@@ -1835,7 +1851,12 @@ mod tests {
     fn cache_path_set_when_enabled() {
         let vm = create_test_vm_with_cache(true);
         assert!(vm.cache_path.is_some());
-        assert!(vm.cache_path.unwrap().to_string_lossy().contains("slot-0.ext4"));
+        assert!(
+            vm.cache_path
+                .unwrap()
+                .to_string_lossy()
+                .contains("slot-0.ext4")
+        );
     }
 
     #[test]

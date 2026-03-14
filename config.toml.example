@@ -141,3 +141,13 @@ dns = ["8.8.8.8", "1.1.1.1"]
 # listen_addr = "0.0.0.0:9090"
 # Optional API key for management endpoints (X-Api-Key header)
 # api_key = "your-secret-key"
+
+# GitHub Actions cache service (drop-in replacement for GitHub's hosted cache).
+# When enabled, @actions/cache and actions like Swatinem/rust-cache store
+# cache archives locally instead of uploading to GitHub. Runs on the same
+# HTTP server as metrics/management API.
+[cache_service]
+# enabled = true
+# dir = "/var/lib/fc-runner/cache-service"
+# Bearer token for cache API auth. If omitted, a random token is generated.
+# token = "your-cache-token"

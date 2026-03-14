@@ -1,5 +1,6 @@
 mod agent;
 mod api_client;
+mod cache_server;
 mod cli;
 mod config;
 mod firecracker;
@@ -66,6 +67,22 @@ async fn run_server(config_path: &str) -> anyhow::Result<()> {
         cancel_clone.cancel();
     });
 
+    // Initialize cache service if enabled
+    let cache_state = if config.cache_service.enabled {
+        let token = config
+            .cache_service
+            .token
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let dir = std::path::PathBuf::from(&config.cache_service.dir);
+        let cs = cache_server::CacheState::new(dir, token)
+            .await
+            .context("failed to initialize cache service")?;
+        Some(cs)
+    } else {
+        None
+    };
+
     let server_state = Arc::new(server::ServerState::new(&config.server));
     if config.server.enabled {
         let listen_addr: std::net::SocketAddr = config
@@ -74,8 +91,9 @@ async fn run_server(config_path: &str) -> anyhow::Result<()> {
             .parse()
             .context("invalid server.listen_addr")?;
         let state = server_state.clone();
+        let cs = cache_state.clone();
         tokio::spawn(async move {
-            if let Err(e) = server::start(listen_addr, state).await {
+            if let Err(e) = server::start(listen_addr, state, cs).await {
                 tracing::error!(error = %e, "management server failed");
             }
         });

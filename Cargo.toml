@@ -14,7 +14,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 thiserror = "2"
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["io"] }
 secrecy = { version = "0.10.3", features = ["serde"] }
 axum = "0.8"
 prometheus = { version = "0.13", default-features = false }

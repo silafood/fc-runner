@@ -956,6 +956,20 @@ cd /home/runner
 # Source Rust environment for CI jobs
 export PATH="/home/runner/.cargo/bin:$PATH"
 
+# Set up Actions cache service hook if configured by fc-runner host
+if [ -f /etc/fc-runner-cache ]; then
+    . /etc/fc-runner-cache
+    cat > /home/runner/cache-hook.sh << CACHEEOF
+#!/bin/bash
+echo "ACTIONS_CACHE_URL=${FC_CACHE_URL}" >> "\$GITHUB_ENV"
+echo "ACTIONS_RUNTIME_TOKEN=${FC_CACHE_TOKEN}" >> "\$GITHUB_ENV"
+CACHEEOF
+    chmod +x /home/runner/cache-hook.sh
+    chown runner:runner /home/runner/cache-hook.sh
+    export ACTIONS_RUNNER_HOOK_JOB_STARTED=/home/runner/cache-hook.sh
+    echo "Cache service configured: ${FC_CACHE_URL}"
+fi
+
 if [ "${RUNNER_MODE:-jit}" = "jit" ]; then
     echo "Starting runner (JIT mode)..."
     sudo -E -u runner ./run.sh --jitconfig "${RUNNER_TOKEN}"

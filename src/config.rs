@@ -13,6 +13,9 @@ pub struct AppConfig {
     pub network: NetworkConfig,
     #[serde(default)]
     pub server: ServerConfig,
+    /// GitHub Actions cache service configuration.
+    #[serde(default)]
+    pub cache_service: CacheServiceConfig,
     /// Named VM pools with per-pool repos, replica counts, and resource overrides.
     /// When configured, pools replace the flat warm_pool_size setting.
     #[serde(default)]
@@ -37,6 +40,33 @@ impl Default for ServerConfig {
             api_key: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CacheServiceConfig {
+    /// Enable the GitHub Actions cache API service.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Directory for cache blobs and metadata index.
+    #[serde(default = "default_cache_service_dir")]
+    pub dir: String,
+    /// Bearer token for authenticating cache API requests.
+    /// If not set, a random token is generated at startup.
+    pub token: Option<String>,
+}
+
+impl Default for CacheServiceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dir: default_cache_service_dir(),
+            token: None,
+        }
+    }
+}
+
+fn default_cache_service_dir() -> String {
+    "/var/lib/fc-runner/cache-service".into()
 }
 
 fn default_listen_addr() -> String {

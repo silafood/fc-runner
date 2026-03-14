@@ -11,6 +11,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+use crate::cache_server::CacheState;
 use crate::config::ServerConfig;
 use crate::metrics;
 use crate::pool::PoolManager;
@@ -70,8 +71,12 @@ impl ServerState {
 
 // ── Server ─────────────────────────────────────────────────────────────
 
-pub async fn start(listen_addr: SocketAddr, state: Arc<ServerState>) -> anyhow::Result<()> {
-    let app = Router::new()
+pub async fn start(
+    listen_addr: SocketAddr,
+    state: Arc<ServerState>,
+    cache_state: Option<Arc<CacheState>>,
+) -> anyhow::Result<()> {
+    let mut app = Router::new()
         .route("/metrics", get(metrics_handler))
         .route("/healthz", get(healthz_handler))
         .route("/api/v1/status", get(status_handler))
@@ -84,6 +89,11 @@ pub async fn start(listen_addr: SocketAddr, state: Arc<ServerState>) -> anyhow::
         .route("/api/v1/pools/{name}/pause", post(pause_pool_handler))
         .route("/api/v1/pools/{name}/resume", post(resume_pool_handler))
         .with_state(state);
+
+    // Merge cache service routes if enabled
+    if let Some(cs) = cache_state {
+        app = app.merge(crate::cache_server::router(cs));
+    }
 
     tracing::info!(%listen_addr, "starting management HTTP server");
 
@@ -308,6 +318,11 @@ mod tests {
             .route("/api/v1/pools/{name}/pause", post(pause_pool_handler))
             .route("/api/v1/pools/{name}/resume", post(resume_pool_handler))
             .with_state(state)
+    }
+
+    #[allow(dead_code)]
+    fn app_with_cache(state: Arc<ServerState>, cache: Arc<CacheState>) -> Router {
+        app(state).merge(crate::cache_server::router(cache))
     }
 
     #[tokio::test]
