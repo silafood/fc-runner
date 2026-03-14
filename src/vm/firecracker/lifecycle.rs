@@ -10,7 +10,7 @@ use tokio::time::{Duration, timeout};
 use super::MicroVm;
 use super::VmRunContext;
 use super::mount::{lazy_umount_sync, mount_loop_ext4_ro};
-use super::process::{filename_str, is_process_alive, kill_process, path_str};
+use super::process::{filename_str, is_process_alive, kill_process, path_str, reap_zombies};
 use crate::vm::netlink;
 use crate::vm::vsock;
 
@@ -381,6 +381,12 @@ impl MicroVm {
                 }
             }
         }
+
+        // Reap any zombie children left by the SDK/jailer.
+        // The SDK spawns processes that become our children, but doesn't
+        // always call waitpid() on exit. Reap them to prevent zombie buildup.
+        reap_zombies();
+
         Ok(())
     }
 
