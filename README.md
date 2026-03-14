@@ -33,6 +33,7 @@ GitHub Actions                fc-runner                    Firecracker
 - **MMDS secret injection** — inject secrets via Firecracker's built-in metadata service (no loop-mount needed)
 - **Pool-based scaling** — named VM pools with per-pool repos, replica counts, and resource overrides
 - **Prometheus metrics** — `/metrics` endpoint with job counts, VM boot duration, API rate limits, and more
+- **S3 cache injection** — S3 credentials are auto-injected into VMs via MMDS for use with `runs-on/cache@v4` (drop-in `actions/cache` replacement backed by S3)
 - **Management API** — REST API (`/api/v1/status`, `/api/v1/vms`) for monitoring and VM management
 - **Guest agent** — `fc-runner agent` runs inside VMs: reads MMDS, starts runner, reports state via VSOCK
 - **CLI subcommands** — `server`, `agent`, `validate`, `ps`, `pools` (list/scale/pause/resume), `logs`
@@ -202,6 +203,7 @@ Full example at [`config.toml.example`](config.toml.example). Key sections:
 | `[runner]` | `work_dir`, `poll_interval_secs`, `max_concurrent_jobs`, `vm_timeout_secs`, `warm_pool_size` |
 | `[[pool]]` | Named pools: `name`, `repos`, `min_ready`, `max_ready`, per-pool `vcpu_count`/`mem_size_mib` |
 | `[network]` | `host_ip`, `guest_ip`, `cidr`, `dns`, `allowed_networks` |
+| `[cache_service]` | `enabled`, `s3_endpoint`, `s3_bucket`, `s3_access_key`, `s3_secret_key` — S3-backed Actions cache |
 | `[server]` | `enabled`, `listen_addr`, `api_key` — Prometheus metrics + management API |
 
 See [docs/configuration.md](docs/configuration.md) for the full reference.
@@ -211,21 +213,37 @@ See [docs/configuration.md](docs/configuration.md) for the full reference.
 ```
 fc-runner/
 ├── src/
-│   ├── main.rs           # Entry point with clap CLI dispatch
-│   ├── cli.rs            # CLI subcommand definitions (server, agent, ps, pools, etc.)
-│   ├── api_client.rs     # HTTP client for CLI→server management API calls
-│   ├── agent.rs          # Guest agent: MMDS reader, runner launcher, VSOCK reporter
-│   ├── image.rs          # OCI image pull, layer extraction, ext4 conversion
-│   ├── config.rs         # Typed TOML config with validation
-│   ├── github.rs         # GitHub API client (PAT + App auth, repo + org level)
-│   ├── firecracker.rs    # MicroVm lifecycle via firecracker-rs-sdk (MMDS + mount modes)
-│   ├── netlink.rs        # Pure-Rust TAP device management (rtnetlink + nix ioctl)
-│   ├── orchestrator.rs   # Poll/dispatch loop with dedup (JIT, warm pool, named pools)
-│   ├── setup.rs          # KVM checks, kernel/rootfs provisioning, network
-│   ├── metrics.rs        # Prometheus metrics registry and counters
-│   ├── server.rs         # HTTP server: /metrics, /healthz, management + pool API
-│   ├── pool.rs           # Named VM pool manager with runtime pause/resume/scale
-│   └── vsock.rs          # Host-side VSOCK listener for guest agent communication
+│   ├── main.rs              # Entry point with clap CLI dispatch
+│   ├── lib.rs               # Library crate (re-exports all modules)
+│   ├── cli.rs               # CLI subcommand definitions (server, agent, ps, pools, etc.)
+│   ├── bin/
+│   │   └── fc-runner-agent.rs  # Standalone agent binary for guest VMs
+│   ├── api/
+│   │   ├── server.rs        # HTTP server: /metrics, /healthz, management + pool API
+│   │   ├── client.rs        # HTTP client for CLI→server management API calls
+│   │   └── cache_server.rs  # S3-backed Actions cache service
+│   ├── vm/
+│   │   ├── firecracker/
+│   │   │   ├── mod.rs           # MicroVm struct and top-level VM lifecycle
+│   │   │   ├── lifecycle.rs     # VM prepare/run/cleanup orchestration
+│   │   │   ├── config_builder.rs # Firecracker config JSON generation
+│   │   │   ├── injection.rs     # Secret and env injection coordination
+│   │   │   ├── jailer.rs        # Jailer chroot/seccomp setup
+│   │   │   ├── mmds.rs          # MMDS metadata injection
+│   │   │   ├── mount.rs         # Loop-mount secret injection (legacy)
+│   │   │   └── process.rs       # Firecracker process management
+│   │   ├── netlink.rs       # Pure-Rust TAP device management (rtnetlink + nix ioctl)
+│   │   ├── setup.rs         # KVM checks, kernel/rootfs provisioning, network
+│   │   └── vsock.rs         # Host-side VSOCK listener for guest agent communication
+│   ├── scheduler/
+│   │   ├── orchestrator.rs  # Poll/dispatch loop with dedup (JIT, warm pool, named pools)
+│   │   └── pool.rs          # Named VM pool manager with runtime pause/resume/scale
+│   ├── agent.rs             # Guest agent: MMDS reader, runner launcher, VSOCK reporter
+│   ├── image.rs             # OCI image pull, layer extraction, ext4 conversion
+│   ├── config.rs            # Typed TOML config with validation
+│   ├── github.rs            # GitHub API client (PAT + App auth, repo + org level)
+│   ├── metrics.rs           # Prometheus metrics registry and counters
+│   └── version.rs           # Build-time version info
 ├── guest_configs/
 │   ├── fetch-mmds-env.sh            # Guest-side MMDS metadata fetch script
 │   └── microvm-kernel-ci-*.config   # Firecracker kernel configs (x86_64 + aarch64)

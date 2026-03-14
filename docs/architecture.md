@@ -30,7 +30,13 @@ Entry point with clap CLI dispatch. Parses subcommands (`server`, `agent`, `vali
 ### `cli.rs`
 Defines the CLI interface using `clap` derive macros. Contains the `Cli` struct, `Commands` enum (Server, Agent, Validate, Ps, Pools, Logs), and `PoolAction` enum (List, Scale, Pause, Resume). Each subcommand has typed arguments with defaults.
 
-### `api_client.rs`
+### `lib.rs`
+Library crate that re-exports all modules, enabling both the main binary and the standalone agent binary to share code.
+
+### `bin/fc-runner-agent.rs`
+Standalone agent binary entry point for guest VMs. Provides a dedicated binary target that can be installed into VM rootfs images independently of the full fc-runner server binary.
+
+### `api/client.rs`
 HTTP client for CLI-to-server management API communication. Used by the `ps`, `pools`, and `logs` subcommands to query the running fc-runner server. Methods include `status()`, `list_vms()`, `list_pools()`, `get_pool()`, `scale_pool()`, `pause_pool()`, and `resume_pool()`.
 
 ### `agent.rs`
@@ -82,12 +88,23 @@ All API methods accept a `repo` parameter, allowing a single client to serve mul
 
 All requests include `Authorization: Bearer <token>` and `X-GitHub-Api-Version: 2022-11-28`.
 
-### `firecracker.rs`
-Manages the full VM lifecycle through the `MicroVm` struct. Uses the `firecracker-rs-sdk` crate for typed API interactions in MMDS mode, replacing manual JSON config building and raw HTTP calls. Supports two secret injection modes:
+### `vm/firecracker/`
+Manages the full VM lifecycle through the `MicroVm` struct, split into sub-modules for maintainability:
+
+- **`mod.rs`** -- `MicroVm` struct definition and top-level API
+- **`lifecycle.rs`** -- VM prepare/run/cleanup orchestration
+- **`config_builder.rs`** -- Firecracker config JSON generation
+- **`injection.rs`** -- Secret and environment variable injection coordination
+- **`jailer.rs`** -- Jailer chroot and seccomp-BPF setup
+- **`mmds.rs`** -- MMDS metadata injection (including S3 cache credentials)
+- **`mount.rs`** -- Loop-mount secret injection (legacy mode)
+- **`process.rs`** -- Firecracker process spawning and management
+
+Uses the `firecracker-rs-sdk` crate for typed API interactions in MMDS mode, replacing manual JSON config building and raw HTTP calls. Supports two secret injection modes:
 
 **MMDS mode** (default, `secret_injection = "mmds"`):
 1. **copy_rootfs** — `cp --reflink=auto` of the golden ext4 image
-2. **create_tap** — creates a per-VM TAP device (`tap-fc<slot>`) via `netlink.rs`
+2. **create_tap** — creates a per-VM TAP device (`tap-fc<slot>`) via `vm/netlink.rs`
 3. **inject_network_config** — loop-mount the copy, write per-VM network config (but not secrets)
 4. **build_sdk_instance** — create an SDK `Instance` via `FirecrackerOption`/`JailerOption` builders
 5. **start_vmm** — SDK spawns the firecracker/jailer process and connects to the API socket
@@ -107,7 +124,7 @@ When VSOCK is enabled (`vsock_enabled = true`), the VM config includes a `vsock`
 
 The SDK's `FStack` (Drop-based cleanup) handles process termination and jailer workspace removal. Our `cleanup()` also runs unconditionally for TAP devices, rootfs copies, and any remaining artifacts.
 
-### `netlink.rs`
+### `vm/netlink.rs`
 Pure-Rust TAP device management module. On Linux, uses `ioctl(TUNSETIFF)` via `nix` crate for TAP creation and `rtnetlink` crate for IP assignment and link state management. On non-Linux platforms, falls back to `ip` commands for development/testing.
 
 Key functions:
@@ -117,7 +134,7 @@ Key functions:
 - `set_link_up(name)` — brings an interface up
 - `link_exists(name)` — checks if a link exists
 
-### `setup.rs`
+### `vm/setup.rs`
 Auto-provisioning module that ensures all VM prerequisites are in place at startup:
 
 1. **preflight_kvm** — verifies `/dev/kvm` exists and is accessible
@@ -134,7 +151,7 @@ Auto-provisioning module that ensures all VM prerequisites are in place at start
    - Shrinks to minimum size + headroom via `resize2fs`
 5. **ensure_network** — enables IP forwarding, configures iptables NAT/FORWARD rules
 
-### `orchestrator.rs`
+### `scheduler/orchestrator.rs`
 Async poll loop using `tokio::time::interval`. Supports three modes:
 
 **Reactive (JIT) mode** — default. Each cycle iterates over all configured repos:
@@ -174,7 +191,7 @@ Prometheus metrics registry using the `prometheus` crate with `Lazy` static init
 | `fc_poll_cycles_total` | Counter | `result` | Poll cycle outcomes (ok/error) |
 | `fc_uptime_seconds` | Gauge | `version` | Process uptime |
 
-### `server.rs`
+### `api/server.rs`
 Axum HTTP server providing Prometheus metrics, health checks, and a management API. Shared state is managed via `Arc<ServerState>`.
 
 **Endpoints:**
@@ -194,7 +211,10 @@ Axum HTTP server providing Prometheus metrics, health checks, and a management A
 
 When `server.api_key` is configured, management endpoints require an `X-Api-Key` header. Health and metrics endpoints are always unauthenticated.
 
-### `pool.rs`
+### `api/cache_server.rs`
+S3-backed GitHub Actions cache service. Runs on the same HTTP server as the management API. Provides a drop-in replacement for GitHub's hosted cache backend, storing cache archives in an S3-compatible store (RustFS, MinIO, etc.). S3 credentials configured in `[cache_service]` are automatically injected into guest VMs via MMDS so that `runs-on/cache@v4` can use the cache without additional workflow configuration.
+
+### `scheduler/pool.rs`
 Named VM pool manager. Each `PoolManager` maintains a set of warm VMs for its assigned repos:
 
 - Keeps `min_ready` idle VMs at all times
@@ -206,7 +226,7 @@ Named VM pool manager. Each `PoolManager` maintains a set of warm VMs for its as
 - Paused pools stop spawning new VMs but let active VMs finish
 - Pool managers are registered with `ServerState` for REST API access
 
-### `vsock.rs`
+### `vm/vsock.rs`
 Host-side VSOCK listener for guest agent communication. When `vsock_enabled = true`, a listener is spawned per VM before launch and aborted on VM exit.
 
 **Protocol:** NDJSON over VSOCK port 1024.
@@ -279,6 +299,8 @@ Uses Firecracker's built-in Metadata Data Store at `169.254.169.254`:
 3. Host injects metadata via `instance.put_mmds()` (SDK handles Unix socket HTTP internally)
 4. Guest fetches secrets from `http://169.254.169.254/latest/meta-data/` using a V2 session token
 5. No loop-mount needed for secret injection (only for network config)
+
+When `[cache_service]` is configured, S3 credentials are also injected via MMDS. The guest agent reads these and sets environment variables (`RUNS_ON_S3_BUCKET_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `RUNS_ON_S3_BUCKET_CACHE`, `RUNS_ON_S3_FORCE_PATH_STYLE`) that `runs-on/cache@v4` reads automatically. If the S3 endpoint contains `localhost` or `127.0.0.1`, it is automatically rewritten to the host IP so the VM can reach the service.
 
 **Advantages:** No root required for secret injection, no loop device exhaustion risk, secrets never written to disk, typed SDK API calls for compile-time safety.
 

@@ -143,9 +143,11 @@ dns = ["8.8.8.8", "1.1.1.1"]
 # api_key = "your-secret-key"
 
 # GitHub Actions cache service (drop-in replacement for GitHub's hosted cache).
-# When enabled, @actions/cache and actions like Swatinem/rust-cache store
-# cache archives in S3 instead of uploading to GitHub. Runs on the same
-# HTTP server as metrics/management API. Uses RustFS/MinIO as the S3 backend.
+# When enabled, S3 credentials are auto-injected into guest VMs via MMDS.
+# Use runs-on/cache@v4 (NOT actions/cache@v4) in workflows — it reads the
+# injected env vars (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, etc.) automatically.
+# localhost/127.0.0.1 in s3_endpoint is auto-rewritten to host IP for VM reachability.
+# Uses RustFS/MinIO as the S3 backend.
 [cache_service]
 # enabled = true
 # dir = "/var/lib/fc-runner/cache-service"
