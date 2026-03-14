@@ -109,7 +109,7 @@ chroot "$MNT" bash -c "
         python3 python3-pip python3-venv \
         nodejs npm \
         docker.io containerd \
-        wget tar gzip xz-utils \
+        wget tar gzip xz-utils zstd \
         zip bzip2 \
         libffi-dev zlib1g-dev \
         net-tools dnsutils iputils-ping \
