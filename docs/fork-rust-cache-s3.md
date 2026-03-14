@@ -29,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: silafood/rust-cache-s3@v2
+      - uses: silafood/rust-cache-s3@v2.0.0
       - run: cargo build --release
 ```
 
@@ -40,7 +40,7 @@ The action auto-detects S3 because `RUNS_ON_S3_BUCKET_CACHE` is already in the e
 Falls back to GitHub's cache automatically (no S3 env vars present):
 
 ```yaml
-- uses: silafood/rust-cache-s3@v2
+- uses: silafood/rust-cache-s3@v2.0.0
 ```
 
 ## Usage with explicit S3 credentials
@@ -48,7 +48,7 @@ Falls back to GitHub's cache automatically (no S3 env vars present):
 For runners without MMDS injection:
 
 ```yaml
-- uses: silafood/rust-cache-s3@v2
+- uses: silafood/rust-cache-s3@v2.0.0
   env:
     AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY }}
     AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_KEY }}

@@ -14,7 +14,8 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - uses: silafood/rust-cache-s3@v2
+      - name: Rust Cache S3
+        uses: silafood/rust-cache-s3@v2.0.0
 
       - name: Check formatting
         run: cargo fmt --check

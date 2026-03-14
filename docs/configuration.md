@@ -385,11 +385,11 @@ S3-backed GitHub Actions cache service. When enabled, S3 credentials are automat
 
 **Localhost rewriting:** If `s3_endpoint` contains `localhost` or `127.0.0.1`, it is automatically rewritten to the host IP (from `[network].host_ip`) when injected into VMs. This ensures VMs can reach a host-local S3 service.
 
-**Important:** Use `silafood/rust-cache-s3@v2` for Rust projects (caches target/, registry, git deps with smart cleanup) or `runs-on/cache@v4` for generic caching. The official `actions/cache` is hardcoded to GitHub's Azure-backed cache and ignores the S3 env vars. Both `rust-cache-s3` and `runs-on/cache` read the S3 environment variables set by fc-runner automatically.
+**Important:** Use `silafood/rust-cache-s3@v2.0.0` for Rust projects (caches target/, registry, git deps with smart cleanup) or `runs-on/cache@v4` for generic caching. The official `actions/cache` is hardcoded to GitHub's Azure-backed cache and ignores the S3 env vars. Both `rust-cache-s3` and `runs-on/cache` read the S3 environment variables set by fc-runner automatically.
 
 ```yaml
 # For Rust projects (recommended — includes cargo-specific cleanup):
-- uses: silafood/rust-cache-s3@v2
+- uses: silafood/rust-cache-s3@v2.0.0
 
 # For generic cache (any files):
 - uses: runs-on/cache@v4
