@@ -1,21 +1,16 @@
-mod agent;
-mod api;
-mod cli;
-mod config;
-mod github;
-mod image;
-mod metrics;
-mod scheduler;
-mod version;
-mod vm;
-
 use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
 use tokio_util::sync::CancellationToken;
 
-use cli::{Cli, Commands, PoolAction};
+use fc_runner::api;
+use fc_runner::cli::{Cli, Commands, PoolAction};
+use fc_runner::config;
+use fc_runner::metrics;
+use fc_runner::scheduler;
+use fc_runner::version;
+use fc_runner::vm;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -107,7 +102,7 @@ async fn run_server(config_path: &str) -> anyhow::Result<()> {
 }
 
 async fn run_agent(log_level: &str) -> anyhow::Result<()> {
-    agent::run(log_level).await
+    fc_runner::agent::run(log_level).await
 }
 
 fn run_validate(config_path: &str) -> anyhow::Result<()> {
