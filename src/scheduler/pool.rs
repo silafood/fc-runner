@@ -6,10 +6,10 @@ use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+use crate::api::VmLogEvent;
 use crate::config::{AppConfig, PoolConfig};
-use crate::firecracker::{MicroVm, VmRunContext};
 use crate::github::GitHubClient;
-use crate::server::VmLogEvent;
+use crate::vm::{MicroVm, VmRunContext};
 
 /// Runtime status of a pool, returned by the management API.
 #[derive(Clone, Serialize)]

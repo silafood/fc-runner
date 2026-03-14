@@ -1,19 +1,13 @@
 mod agent;
-mod api_client;
-mod cache_server;
+mod api;
 mod cli;
 mod config;
-mod firecracker;
 mod github;
 mod image;
 mod metrics;
-mod netlink;
-mod orchestrator;
-mod pool;
-mod server;
-mod setup;
+mod scheduler;
 mod version;
-mod vsock;
+mod vm;
 
 use std::sync::Arc;
 
@@ -54,7 +48,7 @@ async fn run_server(config_path: &str) -> anyhow::Result<()> {
     let mut config =
         config::AppConfig::load(config_path).context("failed to load configuration")?;
 
-    setup::ensure_vm_assets(&mut config)
+    vm::setup::ensure_vm_assets(&mut config)
         .await
         .context("failed to provision VM assets")?;
 
@@ -79,7 +73,7 @@ async fn run_server(config_path: &str) -> anyhow::Result<()> {
     // Initialize cache service if enabled
     let cache_state = if config.cache_service.enabled {
         let token = config.cache_service.token.clone().unwrap_or_default();
-        let cs = cache_server::CacheState::new(&config.cache_service, token)
+        let cs = api::cache_server::CacheState::new(&config.cache_service, token)
             .await
             .context("failed to initialize cache service")?;
         Some(cs)
@@ -87,7 +81,7 @@ async fn run_server(config_path: &str) -> anyhow::Result<()> {
         None
     };
 
-    let server_state = Arc::new(server::ServerState::new(&config.server));
+    let server_state = Arc::new(api::ServerState::new(&config.server));
     if config.server.enabled {
         let listen_addr: std::net::SocketAddr = config
             .server
@@ -97,7 +91,7 @@ async fn run_server(config_path: &str) -> anyhow::Result<()> {
         let state = server_state.clone();
         let cs = cache_state.clone();
         tokio::spawn(async move {
-            if let Err(e) = server::start(listen_addr, state, cs).await {
+            if let Err(e) = api::server::start(listen_addr, state, cs).await {
                 tracing::error!(error = %e, "management server failed");
             }
         });
@@ -105,7 +99,7 @@ async fn run_server(config_path: &str) -> anyhow::Result<()> {
 
     metrics::POOL_SLOTS_AVAILABLE.set(config.runner.max_concurrent_jobs as i64);
 
-    let orchestrator = orchestrator::Orchestrator::new(config, cancel, server_state)?;
+    let orchestrator = scheduler::Orchestrator::new(config, cancel, server_state)?;
     orchestrator.run().await?;
 
     tracing::info!("fc-runner exiting");
@@ -149,7 +143,7 @@ fn run_validate(config_path: &str) -> anyhow::Result<()> {
 }
 
 async fn run_ps(endpoint: &str) -> anyhow::Result<()> {
-    let client = api_client::ApiClient::new(endpoint);
+    let client = api::client::ApiClient::new(endpoint);
     let vms = client.list_vms().await?;
 
     if vms.is_empty() {
@@ -173,7 +167,7 @@ async fn run_ps(endpoint: &str) -> anyhow::Result<()> {
 async fn run_pools(action: PoolAction) -> anyhow::Result<()> {
     match action {
         PoolAction::List { endpoint } => {
-            let client = api_client::ApiClient::new(&endpoint);
+            let client = api::client::ApiClient::new(&endpoint);
             let pools = client.list_pools().await?;
 
             if pools.is_empty() {
@@ -208,19 +202,19 @@ async fn run_pools(action: PoolAction) -> anyhow::Result<()> {
             if min_ready.is_none() && max_ready.is_none() {
                 anyhow::bail!("at least one of --min-ready or --max-ready must be specified");
             }
-            let client = api_client::ApiClient::new(&endpoint);
+            let client = api::client::ApiClient::new(&endpoint);
             let resp = client.scale_pool(&name, min_ready, max_ready).await?;
             println!("{}", resp.message);
             Ok(())
         }
         PoolAction::Pause { name, endpoint } => {
-            let client = api_client::ApiClient::new(&endpoint);
+            let client = api::client::ApiClient::new(&endpoint);
             let resp = client.pause_pool(&name).await?;
             println!("{}", resp.message);
             Ok(())
         }
         PoolAction::Resume { name, endpoint } => {
-            let client = api_client::ApiClient::new(&endpoint);
+            let client = api::client::ApiClient::new(&endpoint);
             let resp = client.resume_pool(&name).await?;
             println!("{}", resp.message);
             Ok(())
@@ -231,7 +225,7 @@ async fn run_pools(action: PoolAction) -> anyhow::Result<()> {
 async fn run_logs(endpoint: &str, vm_id: &str, follow: bool) -> anyhow::Result<()> {
     use futures_util::StreamExt;
 
-    let client = api_client::ApiClient::new(endpoint);
+    let client = api::client::ApiClient::new(endpoint);
     let vm_filter = if vm_id.is_empty() { None } else { Some(vm_id) };
 
     println!(
