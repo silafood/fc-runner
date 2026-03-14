@@ -289,6 +289,8 @@ async fn lookup_cache(
 ) -> Result<axum::response::Response, StatusCode> {
     check_bearer(&state, &headers)?;
 
+    tracing::info!(keys = %q.keys, version = %q.version, "cache lookup request");
+
     let host = headers
         .get("host")
         .and_then(|v| v.to_str().ok())
@@ -305,6 +307,7 @@ async fn lookup_cache(
             .find(|e| e.key == *key && e.version == q.version)
         {
             let url = format!("http://{}/_apis/artifactcache/artifacts/{}", host, entry.id);
+            tracing::info!(key = %entry.key, cache_id = entry.id, "cache HIT (exact)");
             return Ok(Json(CacheHitResponse {
                 archive_location: url,
                 cache_key: entry.key.clone(),
@@ -321,6 +324,7 @@ async fn lookup_cache(
             .max_by_key(|e| e.created_at)
         {
             let url = format!("http://{}/_apis/artifactcache/artifacts/{}", host, entry.id);
+            tracing::info!(key = %entry.key, cache_id = entry.id, match_prefix = %key, "cache HIT (prefix)");
             return Ok(Json(CacheHitResponse {
                 archive_location: url,
                 cache_key: entry.key.clone(),
@@ -329,6 +333,7 @@ async fn lookup_cache(
         }
     }
 
+    tracing::info!(keys = %q.keys, "cache MISS");
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -354,11 +359,21 @@ async fn reserve_cache(
 ) -> Result<impl IntoResponse, StatusCode> {
     check_bearer(&state, &headers)?;
 
-    // Reject if exact key+version already committed
+    tracing::info!(key = %body.key, version = %body.version, "cache reserve request");
+
+    // If the exact key+version is already committed, remove the old entry
+    // so the new save can proceed. This matches GitHub's hosted cache behavior
+    // where saving the same key overwrites the previous entry.
     {
-        let idx = state.key_index.read().await;
-        if idx.contains_key(&(body.key.clone(), body.version.clone())) {
-            return Err(StatusCode::CONFLICT);
+        let mut idx = state.key_index.write().await;
+        if let Some(old_id) = idx.remove(&(body.key.clone(), body.version.clone())) {
+            tracing::info!(
+                key = %body.key,
+                old_id,
+                "replacing existing cache entry"
+            );
+            let mut entries = state.entries.write().await;
+            entries.retain(|e| e.id != old_id);
         }
     }
 
@@ -381,10 +396,11 @@ async fn reserve_cache(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
+    let key_for_log = entry.key.clone();
     state.entries.write().await.push(entry);
     state.save_index().await?;
 
-    tracing::debug!(cache_id = id, "cache entry reserved");
+    tracing::info!(cache_id = id, key = %key_for_log, "cache entry reserved");
     Ok((StatusCode::OK, Json(ReserveResponse { cache_id: id })))
 }
 
@@ -405,6 +421,8 @@ async fn upload_chunk(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let start = parse_content_range_start(range).ok_or(StatusCode::BAD_REQUEST)?;
+
+    tracing::info!(cache_id = id, range = %range, bytes = body.len(), "cache chunk upload");
 
     let tmp_path = state.tmp_path(id);
     if !tmp_path.exists() {
@@ -507,6 +525,12 @@ async fn get_artifact(
     check_bearer(&state, &headers)?;
 
     let (byte_stream, size) = state.get_from_s3(id).await?;
+
+    tracing::info!(
+        cache_id = id,
+        size_mb = size / 1_048_576,
+        "cache artifact download from S3"
+    );
 
     let reader = byte_stream.into_async_read();
     let stream = tokio_util::io::ReaderStream::new(reader);
