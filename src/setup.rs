@@ -956,17 +956,14 @@ cd /home/runner
 # Source Rust environment for CI jobs
 export PATH="/home/runner/.cargo/bin:$PATH"
 
-# Set up Actions cache service hook if configured by fc-runner host
+# Set up Actions cache service if configured by fc-runner host
 if [ -f /etc/fc-runner-cache ]; then
     . /etc/fc-runner-cache
-    cat > /home/runner/cache-hook.sh << CACHEEOF
-#!/bin/bash
-echo "ACTIONS_CACHE_URL=${FC_CACHE_URL}" >> "\$GITHUB_ENV"
-echo "ACTIONS_RUNTIME_TOKEN=${FC_CACHE_TOKEN}" >> "\$GITHUB_ENV"
-CACHEEOF
-    chmod +x /home/runner/cache-hook.sh
-    chown runner:runner /home/runner/cache-hook.sh
-    export ACTIONS_RUNNER_HOOK_JOB_STARTED=/home/runner/cache-hook.sh
+    # Export directly so the runner process inherits them via sudo -E.
+    # @actions/cache reads ACTIONS_CACHE_URL from the process environment,
+    # not from $GITHUB_ENV (which only affects subsequent steps).
+    export ACTIONS_CACHE_URL="${FC_CACHE_URL}"
+    export ACTIONS_RUNTIME_TOKEN="${FC_CACHE_TOKEN}"
     echo "Cache service configured: ${FC_CACHE_URL}"
 fi
 
