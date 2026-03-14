@@ -354,17 +354,34 @@ fn runner_env(metadata: &Metadata) -> Vec<(&str, String)> {
 fn runner_credentials() -> (u32, u32, Vec<u32>) {
     let mut uid = 1000u32;
     let mut primary_gid = 1000u32;
+    let mut found_user = false;
 
     // Read /etc/passwd to find the runner user's UID/GID
     if let Ok(contents) = std::fs::read_to_string("/etc/passwd") {
         for line in contents.lines() {
             let fields: Vec<&str> = line.split(':').collect();
             if fields.len() >= 4 && fields[0] == RUNNER_USER {
-                uid = fields[2].parse().unwrap_or(1000);
-                primary_gid = fields[3].parse().unwrap_or(1000);
+                uid = fields[2].parse().unwrap_or_else(|e| {
+                    tracing::warn!(field = fields[2], error = %e, "failed to parse UID, using 1000");
+                    1000
+                });
+                primary_gid = fields[3].parse().unwrap_or_else(|e| {
+                    tracing::warn!(field = fields[3], error = %e, "failed to parse GID, using 1000");
+                    1000
+                });
+                found_user = true;
                 break;
             }
         }
+    }
+
+    if !found_user {
+        tracing::warn!(
+            user = RUNNER_USER,
+            uid,
+            gid = primary_gid,
+            "user not found in /etc/passwd, using defaults"
+        );
     }
 
     // Read /etc/group to find supplementary groups (e.g., docker)
@@ -373,7 +390,10 @@ fn runner_credentials() -> (u32, u32, Vec<u32>) {
         for line in contents.lines() {
             let fields: Vec<&str> = line.split(':').collect();
             if fields.len() >= 4 {
-                let gid: u32 = fields[2].parse().unwrap_or(0);
+                let gid: u32 = match fields[2].parse() {
+                    Ok(g) => g,
+                    Err(_) => continue,
+                };
                 if gid == primary_gid {
                     continue;
                 }

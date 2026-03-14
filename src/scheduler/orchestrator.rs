@@ -256,10 +256,12 @@ impl Orchestrator {
                 }
             };
 
-            let slot = {
-                let mut pool = slot_pool.lock().await;
-                pool.pop()
-                    .expect("semaphore guarantees a slot is available")
+            let slot = match slot_pool.lock().await.pop() {
+                Some(s) => s,
+                None => {
+                    tracing::error!(job_id, "no slot available despite semaphore permit");
+                    return;
+                }
             };
 
             *active_jobs.lock().await += 1;

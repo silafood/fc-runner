@@ -66,7 +66,17 @@ impl CacheState {
         let index_path = dir.join("index.json");
         let entries: Vec<CacheEntry> = if index_path.exists() {
             let data = tokio::fs::read_to_string(&index_path).await?;
-            serde_json::from_str(&data).unwrap_or_default()
+            match serde_json::from_str(&data) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = %index_path.display(),
+                        "cache index corrupted, starting fresh"
+                    );
+                    Vec::new()
+                }
+            }
         } else {
             Vec::new()
         };
