@@ -359,6 +359,42 @@ fc-runner pools resume default --endpoint http://localhost:9090
 fc-runner logs --vm-id <id> --endpoint http://localhost:9090
 ```
 
+### `[cache_service]`
+
+S3-backed GitHub Actions cache service. When enabled, S3 credentials are automatically injected into guest VMs via MMDS (or the entrypoint script in mount mode). The guest agent sets the following environment variables that `runs-on/cache@v4` reads automatically:
+
+| Env var | Source |
+|---------|--------|
+| `RUNS_ON_S3_BUCKET_ENDPOINT` | `s3_endpoint` (rewritten if localhost) |
+| `AWS_ACCESS_KEY_ID` | `s3_access_key` |
+| `AWS_SECRET_ACCESS_KEY` | `s3_secret_key` |
+| `AWS_REGION` | `s3_region` |
+| `RUNS_ON_S3_BUCKET_CACHE` | `s3_bucket` |
+| `RUNS_ON_S3_FORCE_PATH_STYLE` | `"true"` |
+
+| Key | Required | Default | Description |
+|-----|----------|---------|-------------|
+| `enabled` | No | `false` | Enable the cache service |
+| `dir` | No | `/var/lib/fc-runner/cache-service` | Local directory for cache service data |
+| `token` | No | random | Bearer token for cache API authentication |
+| `s3_endpoint` | No | — | S3-compatible endpoint URL |
+| `s3_bucket` | No | `actions-cache` | S3 bucket name |
+| `s3_access_key` | No | — | S3 access key |
+| `s3_secret_key` | No | — | S3 secret key |
+| `s3_region` | No | `us-east-1` | S3 region |
+
+**Localhost rewriting:** If `s3_endpoint` contains `localhost` or `127.0.0.1`, it is automatically rewritten to the host IP (from `[network].host_ip`) when injected into VMs. This ensures VMs can reach a host-local S3 service.
+
+**Important:** Use `runs-on/cache@v4` in your workflows, not `actions/cache@v4`. The official `actions/cache` is hardcoded to GitHub's Azure-backed cache and ignores `ACTIONS_CACHE_URL`. `runs-on/cache@v4` is a drop-in replacement that reads the S3 environment variables set by fc-runner.
+
+```yaml
+# In your workflow:
+- uses: runs-on/cache@v4  # NOT actions/cache@v4
+  with:
+    path: target
+    key: rust-${{ hashFiles('Cargo.lock') }}
+```
+
 ## Environment Variables
 
 | Variable | Description |

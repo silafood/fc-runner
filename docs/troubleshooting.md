@@ -318,6 +318,43 @@ curl -s http://localhost:9090/api/v1/pools | jq .
 
 ---
 
+### Cache not working in workflows
+
+**Cause:** Using `actions/cache@v4` instead of `runs-on/cache@v4`, or S3 credentials not configured.
+
+**Fix:**
+- Replace `actions/cache@v4` with `runs-on/cache@v4` in your workflow files. The official `actions/cache` is hardcoded to GitHub's Azure backend and ignores the S3 environment variables set by fc-runner.
+- Verify `[cache_service]` is configured in `/etc/fc-runner/config.toml` with valid S3 credentials.
+- Check that `s3_endpoint`, `s3_access_key`, and `s3_secret_key` are set.
+
+**Diagnose:**
+```bash
+# Check if S3 env vars are being injected into VMs
+sudo journalctl -u fc-runner | grep -i "s3\|cache"
+```
+
+---
+
+### S3 cache service unreachable from VM
+
+**Cause:** The S3 endpoint is on localhost and not reachable from inside the VM, or network rules block the connection.
+
+**Fix:**
+- fc-runner automatically rewrites `localhost` and `127.0.0.1` in `s3_endpoint` to the host IP when injecting into VMs. Verify the rewrite is happening by checking logs.
+- If using a custom S3 endpoint, ensure it is reachable from the guest network (`172.16.<slot>.0/24`).
+- If `allowed_networks` is configured, ensure the S3 endpoint's IP is included in the allowlist.
+
+**Diagnose:**
+```bash
+# Check the host IP being used
+grep host_ip /etc/fc-runner/config.toml
+
+# Verify S3 service is running and accessible from host
+curl -s http://localhost:9000/minio/health/live
+```
+
+---
+
 ## Useful Commands
 
 ```bash
