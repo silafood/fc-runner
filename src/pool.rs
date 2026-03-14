@@ -7,7 +7,7 @@ use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{AppConfig, PoolConfig};
-use crate::firecracker::MicroVm;
+use crate::firecracker::{MicroVm, VmRunContext};
 use crate::github::GitHubClient;
 use crate::server::VmLogEvent;
 
@@ -208,30 +208,24 @@ impl PoolManager {
     }
 
     fn spawn_vm(&self, slot: usize, repo: String, done_tx: mpsc::Sender<(usize, String)>) {
-        let config = self.config.clone();
-        let github = self.github.clone();
+        let ctx = VmRunContext {
+            config: self.config.clone(),
+            github: self.github.clone(),
+            slot,
+            cancel: self.cancel.clone(),
+            log_tx: Some(self.log_tx.clone()),
+            vcpu_override: self.pool_config.vcpu_count,
+            mem_override: self.pool_config.mem_size_mib,
+        };
         let active_count = self.active_count.clone();
         let pool_name = self.pool_config.name.clone();
-        let vcpu_override = self.pool_config.vcpu_count;
-        let mem_override = self.pool_config.mem_size_mib;
-        let cancel = self.cancel.clone();
-        let log_tx = self.log_tx.clone();
 
         tokio::spawn(async move {
             active_count.fetch_add(1, Ordering::Relaxed);
             tracing::info!(pool = %pool_name, slot, repo = %repo, "starting pool VM");
 
-            let result = run_pool_vm(
-                config,
-                github.clone(),
-                slot,
-                &repo,
-                vcpu_override,
-                mem_override,
-                cancel,
-                Some(log_tx),
-            )
-            .await;
+            let github = ctx.github.clone();
+            let result = run_pool_vm(ctx, &repo).await;
 
             github.remove_offline_runners(&repo).await;
 
@@ -276,33 +270,29 @@ impl PoolManager {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_pool_vm(
-    config: Arc<AppConfig>,
-    github: Arc<GitHubClient>,
-    slot: usize,
-    repo: &str,
-    vcpu_override: Option<u32>,
-    mem_override: Option<u32>,
-    cancel: CancellationToken,
-    log_tx: Option<broadcast::Sender<VmLogEvent>>,
-) -> anyhow::Result<()> {
-    let is_org = github.is_org_mode();
+async fn run_pool_vm(ctx: VmRunContext, repo: &str) -> anyhow::Result<()> {
+    let is_org = ctx.github.is_org_mode();
+    let slot = ctx.slot;
 
     let (reg_token, registration_url) = if is_org {
-        let org = config.github.organization.as_deref().unwrap_or("unknown");
+        let org = ctx
+            .config
+            .github
+            .organization
+            .as_deref()
+            .unwrap_or("unknown");
         tracing::info!(
             slot,
             organization = org,
             "requesting org registration token for pool VM"
         );
-        let token = github.generate_org_registration_token().await?;
+        let token = ctx.github.generate_org_registration_token().await?;
         let url = format!("https://github.com/{}", org);
         (token, url)
     } else {
         tracing::info!(slot, repo = %repo, "requesting registration token for pool VM");
-        let token = github.generate_registration_token(repo).await?;
-        let url = format!("https://github.com/{}/{}", config.github.owner, repo);
+        let token = ctx.github.generate_registration_token(repo).await?;
+        let url = format!("https://github.com/{}/{}", ctx.config.github.owner, repo);
         (token, url)
     };
     let runner_name = format!(
@@ -312,41 +302,42 @@ async fn run_pool_vm(
     );
 
     // Apply per-pool resource overrides
-    let mut fc_config = config.firecracker.clone();
-    if let Some(vcpu) = vcpu_override {
+    let mut fc_config = ctx.config.firecracker.clone();
+    if let Some(vcpu) = ctx.vcpu_override {
         fc_config.vcpu_count = vcpu;
     }
-    if let Some(mem) = mem_override {
+    if let Some(mem) = ctx.mem_override {
         fc_config.mem_size_mib = mem;
     }
 
     let mut vm = MicroVm::new(
         0, // no specific job_id for pool VMs
         &fc_config,
-        &config.network,
-        &config.runner.work_dir,
-        config.runner.vm_timeout_secs,
+        &ctx.config.network,
+        &ctx.config.runner.work_dir,
+        ctx.config.runner.vm_timeout_secs,
         slot,
-        cancel,
+        ctx.cancel,
     );
-    if config.cache_service.enabled {
-        vm.cache_service_token = config.cache_service.token.clone();
-        vm.cache_service_port = config
+    if ctx.config.cache_service.enabled {
+        vm.cache_service_token = ctx.config.cache_service.token.clone();
+        vm.cache_service_port = ctx
+            .config
             .server
             .listen_addr
             .rsplit(':')
             .next()
             .and_then(|p| p.parse().ok());
     }
-    let ephemeral = config.runner.ephemeral;
+    let ephemeral = ctx.config.runner.ephemeral;
     let mut env_content = format!(
         "RUNNER_MODE=register\nRUNNER_TOKEN={}\nREPO_URL={}\nRUNNER_NAME={}\nVM_ID={}\nHOSTNAME={}\nSHUTDOWN_ON_EXIT=true\nEPHEMERAL={}\n",
         reg_token, registration_url, runner_name, vm.vm_id, vm.vm_id, ephemeral
     );
-    if config.cache_service.enabled
+    if ctx.config.cache_service.enabled
         && let (Some(token), Some(port)) = (
-            &config.cache_service.token,
-            config
+            &ctx.config.cache_service.token,
+            ctx.config
                 .server
                 .listen_addr
                 .rsplit(':')
@@ -357,5 +348,5 @@ async fn run_pool_vm(
         let cache_url = format!("http://{}:{}/", vm.host_ip, port);
         env_content.push_str(&format!("CACHE_URL={}\nCACHE_TOKEN={}\n", cache_url, token));
     }
-    vm.execute_with_notify(&env_content, None, log_tx).await
+    vm.execute_with_notify(&env_content, None, ctx.log_tx).await
 }

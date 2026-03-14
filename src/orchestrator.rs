@@ -1,25 +1,16 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
+use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio::time::{Duration, interval};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::AppConfig;
-use crate::firecracker::MicroVm;
+use crate::firecracker::{MicroVm, VmRunContext};
 use crate::github::GitHubClient;
 use crate::metrics;
 use crate::pool::PoolManager;
-use crate::server::{ServerState, VmLogEvent};
-
-/// Shared context passed to VM runner functions, reducing parameter count.
-struct VmRunContext {
-    config: Arc<AppConfig>,
-    github: Arc<GitHubClient>,
-    slot: usize,
-    cancel: CancellationToken,
-    log_tx: Option<broadcast::Sender<VmLogEvent>>,
-}
+use crate::server::ServerState;
 
 pub struct Orchestrator {
     config: Arc<AppConfig>,
@@ -297,6 +288,8 @@ impl Orchestrator {
                 slot,
                 cancel,
                 log_tx: Some(server_state.log_tx.clone()),
+                vcpu_override: None,
+                mem_override: None,
             };
             let timer = metrics::VM_BOOT_DURATION
                 .with_label_values(&[&repo])
@@ -630,6 +623,8 @@ impl Orchestrator {
                 slot,
                 cancel,
                 log_tx: Some(log_tx),
+                vcpu_override: None,
+                mem_override: None,
             };
             let result = run_warm_vm(ctx, &repo, Some(vsock_tx)).await;
             timer.observe_duration();

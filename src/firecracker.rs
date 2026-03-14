@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, ensure};
 use firecracker_rs_sdk::firecracker::FirecrackerOption;
@@ -8,13 +9,29 @@ use firecracker_rs_sdk::models::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::process::Command;
+use tokio::sync::broadcast;
 use tokio::time::{Duration, timeout};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::config::{FirecrackerConfig, NetworkConfig};
+use crate::config::{AppConfig, FirecrackerConfig, NetworkConfig};
+use crate::github::GitHubClient;
 use crate::netlink;
+use crate::server::VmLogEvent;
 use crate::vsock;
+
+/// Shared context passed to VM runner functions, reducing parameter count.
+pub struct VmRunContext {
+    pub config: Arc<AppConfig>,
+    pub github: Arc<GitHubClient>,
+    pub slot: usize,
+    pub cancel: CancellationToken,
+    pub log_tx: Option<broadcast::Sender<VmLogEvent>>,
+    /// Per-pool vCPU override (only used by named pools).
+    pub vcpu_override: Option<u32>,
+    /// Per-pool memory override (only used by named pools).
+    pub mem_override: Option<u32>,
+}
 
 /// Mount an ext4 image via loop (read-write).
 ///
