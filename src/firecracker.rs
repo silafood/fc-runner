@@ -333,29 +333,41 @@ impl MicroVm {
         Ok(())
     }
 
-    /// Ensure the per-slot persistent cache ext4 image exists.
-    /// Creates a sparse file + formats it if missing. This is NOT per-VM — it
-    /// persists across VM lifecycles for the same slot.
+    /// Ensure the per-slot persistent cache ext4 image exists at the configured size.
+    /// Creates a sparse file + formats it if missing. Recreates the image if the
+    /// configured size differs from the existing file (e.g. after a config change).
+    /// This is NOT per-VM — it persists across VM lifecycles for the same slot.
     async fn ensure_cache_image(&self) -> anyhow::Result<()> {
         let cache_path = match &self.cache_path {
             Some(p) => p,
             None => return Ok(()),
         };
+        let size_bytes = self.fc_config.cache_size_mib as u64 * 1024 * 1024;
         if cache_path.exists() {
-            tracing::debug!(
+            let meta = tokio::fs::metadata(cache_path).await?;
+            if meta.len() == size_bytes {
+                tracing::debug!(
+                    vm_id = %self.vm_id,
+                    slot = self.slot,
+                    cache = %cache_path.display(),
+                    "cache image already exists"
+                );
+                return Ok(());
+            }
+            tracing::warn!(
                 vm_id = %self.vm_id,
                 slot = self.slot,
-                cache = %cache_path.display(),
-                "cache image already exists"
+                current_mib = meta.len() / (1024 * 1024),
+                configured_mib = self.fc_config.cache_size_mib,
+                "cache image size mismatch, recreating"
             );
-            return Ok(());
+            tokio::fs::remove_file(cache_path).await?;
         }
         let cache_dir = cache_path.parent().unwrap();
         tokio::fs::create_dir_all(cache_dir)
             .await
             .with_context(|| format!("creating cache directory: {}", cache_dir.display()))?;
 
-        let size_bytes = self.fc_config.cache_size_mib as u64 * 1024 * 1024;
         let cache_str = path_str(cache_path)?;
 
         tracing::info!(
