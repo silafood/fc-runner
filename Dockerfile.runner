@@ -29,7 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip python3-venv \
         nodejs npm \
         podman buildah crun netavark aardvark-dns iptables \
-        wget tar gzip xz-utils zip bzip2 \
+        wget tar gzip xz-utils zstd zip bzip2 \
         libffi-dev zlib1g-dev \
         net-tools dnsutils iputils-ping \
         locales \
