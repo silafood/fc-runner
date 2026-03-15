@@ -146,6 +146,12 @@ setup.rs (automatic at first startup)
   └─ Shrinks to min + headroom via e2fsck + resize2fs
   └─ Produces runner-rootfs-golden.ext4
 
+OCI image mode (when firecracker.image is set):
+  └─ Pulls OCI image from registry (e.g. ghcr.io/silafood/fc-runner-image:latest)
+  └─ Extracts layers onto ext4 image
+  └─ Packages are defined in Dockerfile.runner, NOT setup.rs
+  └─ setup.rs package installs are SKIPPED entirely in OCI mode
+
 Per-job (firecracker.rs):
   cp --reflink=auto golden.ext4 → /var/lib/fc-runner/vms/<vm-id>.ext4
   create TAP device (ioctl TUNSETIFF via netlink.rs)
@@ -274,13 +280,36 @@ df -Th /var/lib/fc-runner/vms
 ```
 
 ### Rebuild the golden rootfs
+
+**Two build pipelines exist — changes go to different places depending on mode:**
+
+| Mode | Config | Package changes go in | Rebuild command |
+|------|--------|-----------------------|-----------------|
+| **OCI image** (production) | `firecracker.image = "ghcr.io/..."` | `Dockerfile.runner` | Rebuild + push image, then delete rootfs + restart |
+| **Cloud image** (fallback) | No `image` set | `setup.rs` package list | Delete rootfs + restart |
+
+**OCI mode** (current production setup):
 ```bash
-# Check no VMs are running first
-pgrep -x firecracker && echo "VMs running — wait before rebuilding rootfs" || echo "Safe to proceed"
-# Delete the golden image — fc-runner rebuilds automatically on next start
+# 1. Edit Dockerfile.runner with package changes
+# 2. Build and push new image
+docker build -t ghcr.io/silafood/fc-runner-image:latest -f Dockerfile.runner .
+docker push ghcr.io/silafood/fc-runner-image:latest
+# 3. Delete rootfs and restart so fc-runner pulls the new image
 sudo rm /opt/fc-runner/runner-rootfs-golden.ext4
 sudo systemctl restart fc-runner
 ```
+
+**Cloud image mode** (when `firecracker.image` is not set):
+```bash
+# Package changes in setup.rs require rebuilding the fc-runner binary first
+cargo build --release
+sudo install -m 0755 target/release/fc-runner /usr/local/bin/fc-runner
+sudo rm /opt/fc-runner/runner-rootfs-golden.ext4
+sudo systemctl restart fc-runner
+```
+
+**Important:** `setup.rs` package installs are **completely skipped** in OCI mode.
+Adding a package to `setup.rs` has no effect when `firecracker.image` is configured.
 
 ---
 
