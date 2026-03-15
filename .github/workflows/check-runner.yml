@@ -1,0 +1,91 @@
+name: Check Runner Environment
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: [self-hosted, linux, firecracker]
+    steps:
+      - name: System info
+        run: |
+          echo "Hostname: $(hostname)"
+          echo "OS: $(uname -a)"
+          echo "User: $(whoami)"
+          echo "Disk: $(df -h / | tail -1)"
+          echo "Memory: $(free -h | grep Mem)"
+
+      - name: Check compression tools
+        run: |
+          echo "=== zstd ==="
+          which zstd && zstd --version || echo "MISSING: zstd (needed for fast cache compression)"
+          echo ""
+          echo "=== gzip ==="
+          which gzip && gzip --version | head -1 || echo "MISSING: gzip"
+          echo ""
+          echo "=== tar ==="
+          tar --version | head -1
+
+      - name: Check build tools
+        run: |
+          echo "=== gcc ==="
+          which gcc && gcc --version | head -1 || echo "MISSING: gcc"
+          echo ""
+          echo "=== make ==="
+          which make && make --version | head -1 || echo "MISSING: make"
+          echo ""
+          echo "=== cmake ==="
+          which cmake && cmake --version | head -1 || echo "MISSING: cmake"
+          echo ""
+          echo "=== pkg-config ==="
+          which pkg-config && pkg-config --version || echo "MISSING: pkg-config"
+
+      - name: Check language runtimes
+        run: |
+          echo "=== Rust ==="
+          which rustc && rustc --version || echo "MISSING: rustc"
+          which cargo && cargo --version || echo "MISSING: cargo"
+          echo ""
+          echo "=== Node.js ==="
+          which node && node --version || echo "MISSING: node"
+          which npm && npm --version || echo "MISSING: npm"
+          echo ""
+          echo "=== Python ==="
+          which python3 && python3 --version || echo "MISSING: python3"
+
+      - name: Check container runtime
+        run: |
+          echo "=== Podman ==="
+          which podman && podman --version || echo "MISSING: podman"
+          echo ""
+          echo "=== Buildah ==="
+          which buildah && buildah --version || echo "MISSING: buildah"
+
+      - name: Check networking tools
+        run: |
+          echo "=== curl ==="
+          which curl && curl --version | head -1 || echo "MISSING: curl"
+          echo ""
+          echo "=== git ==="
+          which git && git --version || echo "MISSING: git"
+          echo ""
+          echo "=== jq ==="
+          which jq && jq --version || echo "MISSING: jq"
+          echo ""
+          echo "=== DNS ==="
+          cat /etc/resolv.conf | grep nameserver
+
+      - name: Check S3 cache env vars
+        run: |
+          echo "RUNS_ON_S3_BUCKET_CACHE=${RUNS_ON_S3_BUCKET_CACHE:-MISSING}"
+          echo "RUNS_ON_S3_BUCKET_ENDPOINT=${RUNS_ON_S3_BUCKET_ENDPOINT:-MISSING}"
+          echo "AWS_REGION=${AWS_REGION:-MISSING}"
+          echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:+set}"
+          echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:+set}"
+
+      - name: Test S3 connectivity
+        run: |
+          if [ -n "${RUNS_ON_S3_BUCKET_ENDPOINT}" ]; then
+            curl -sf --max-time 5 "${RUNS_ON_S3_BUCKET_ENDPOINT}" >/dev/null 2>&1 && echo "S3 endpoint reachable" || echo "S3 endpoint UNREACHABLE"
+          else
+            echo "No S3 endpoint configured"
+          fi
